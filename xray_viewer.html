@@ -1,0 +1,1120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>X-Ray map viewer</title>
+<style>
+:root{
+  color-scheme: dark;
+  --film:#15202a; --film-edge:#0c141b; --chrome:#1a2530; --chrome-2:#22303d; --line:#2e3c49;
+  --text:#dde4ea; --muted:#93a3b1; --focus:#8fd3cc;
+  --bone:#ebe6d6; --teal:#5fb8b1; --slate:#7f8d9b; --amber:#dca84a; --orange:#e58a4c; --violet:#a597e8; --coral:#e77676;
+  --edge-rgb:200,216,228; --label:#e8edf1; --label-halo:rgba(12,20,27,.85);
+  --b-camera:#5fb8b1; --b-screen:#a597e8; --b-model:#dca84a; --b-data:#d8c46a; --b-writes:#e58a4c; --b-env:#6fa8dc;
+  --b-network:#7cc47f; --b-packages:#9fb6c9; --b-system:#7f8d9b; --b-config:#c79bd1; --b-side:#5d6b77; --b-problems:#e77676;
+  --ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  --code:"Cascadia Mono","Cascadia Code",Consolas,"SF Mono",Menlo,"DejaVu Sans Mono",monospace;
+}
+@media (prefers-color-scheme: light){
+  :root{ color-scheme: light;
+    --film:#eef2f5; --film-edge:#d9e1e7; --chrome:#ffffff; --chrome-2:#f2f5f8; --line:#d4dce2;
+    --text:#1c2630; --muted:#56666f; --focus:#1f7f79;
+    --bone:#27313c; --teal:#1f7f79; --slate:#66757f; --amber:#8f630c; --orange:#ab5019; --violet:#5343aa; --coral:#b03838;
+    --edge-rgb:40,55,70; --label:#1c2630; --label-halo:rgba(238,242,245,.9);
+    --b-camera:#1f7f79; --b-screen:#5343aa; --b-model:#8f630c; --b-data:#7a6a10; --b-writes:#ab5019; --b-env:#2a5d9f;
+    --b-network:#2f7a33; --b-packages:#4a6070; --b-system:#66757f; --b-config:#7a3f86; --b-side:#98a4ad; --b-problems:#b03838; }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:14px/1.45 var(--ui);color:var(--text);background:var(--chrome);display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
+header{display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1px solid var(--line);min-width:0}
+.brand{font-weight:700;font-size:16px;white-space:nowrap}
+#fileinfo{color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+#fileinfo b{color:var(--text);font-weight:600;font-family:var(--code);font-size:12.5px;margin-right:6px}
+.tabs{display:flex;gap:2px;margin-left:auto;background:var(--chrome-2);padding:3px;border-radius:8px;flex:none}
+.tabs button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:13px;padding:5px 12px;border-radius:6px;cursor:pointer}
+.tabs button[aria-selected=true]{background:var(--chrome);color:var(--text);font-weight:600;box-shadow:0 0 0 1px var(--line)}
+.btn{border:1px solid var(--line);background:var(--chrome-2);color:var(--text);font:inherit;font-size:13px;padding:6px 12px;border-radius:7px;cursor:pointer;flex:none}
+.btn:hover{border-color:var(--muted)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+kbd{font-family:var(--code);font-size:11.5px;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+main{min-height:0;display:grid}
+.view{display:none;min-height:0}
+.view.on{display:grid}
+#mapView{grid-template-columns:232px minmax(0,1fr) 360px}
+.panel{overflow:auto;min-height:0}
+#side{border-right:1px solid var(--line);padding:14px 14px 24px}
+#details{border-left:1px solid var(--line);padding:16px 16px 28px}
+h2{font-size:12.5px;font-weight:650;margin:20px 0 8px;color:var(--muted)}
+h2:first-child{margin-top:0}
+.toggle{display:flex;align-items:center;gap:9px;padding:4px 2px;cursor:pointer;font-size:13.5px;user-select:none}
+.toggle input{margin:0;accent-color:var(--focus)}
+.toggle .count{margin-left:auto;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.swatch{width:14px;height:14px;flex:none}
+#search{width:100%;font:inherit;font-size:13px;padding:7px 9px;border-radius:7px;border:1px solid var(--line);background:var(--chrome-2);color:var(--text)}
+.hint{color:var(--muted);font-size:12px;margin-top:10px;line-height:1.55}
+#stage{position:relative;min-width:0;min-height:0;background:radial-gradient(ellipse at center,var(--film) 55%,var(--film-edge) 100%)}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+canvas.dragging{cursor:grabbing}
+#empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
+#empty .card{max-width:430px;text-align:center}
+#empty h1{font-size:22px;margin:0 0 8px;font-weight:650}
+#empty p{color:var(--muted);margin:0 0 18px}
+#stage.drop{outline:2px dashed var(--focus);outline-offset:-10px}
+#tip{position:absolute;pointer-events:none;background:var(--chrome);border:1px solid var(--line);padding:6px 9px;border-radius:6px;font-size:12px;max-width:380px;display:none;z-index:2;line-height:1.4}
+#tip code{font-family:var(--code);font-size:12px;word-break:break-all}
+#factsView{grid-template-rows:auto minmax(0,1fr)}
+.tablebar{display:flex;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line);align-items:center;flex-wrap:wrap}
+.tablebar input,.tablebar select{font:inherit;font-size:13px;padding:6px 9px;border-radius:7px;border:1px solid var(--line);background:var(--chrome-2);color:var(--text)}
+.tablebar input{min-width:260px;flex:1 1 260px;max-width:420px}
+.tablewrap{overflow:auto;min-height:0}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{position:sticky;top:0;background:var(--chrome);text-align:left;font-weight:600;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
+th[aria-sort]{color:var(--text)}
+td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+td:first-child{white-space:nowrap;word-break:normal}
+tbody tr{cursor:pointer}
+tbody tr:hover,tbody tr:focus{background:var(--chrome-2)}
+.mono{font-family:var(--code);font-size:12.5px;word-break:break-all}
+.pill{display:inline-block;font-size:11.5px;padding:0 7px;border-radius:10px;border:1px solid var(--line);white-space:nowrap;line-height:1.6}
+.req-yes{border-color:var(--muted)}
+.run-seen{border-color:var(--teal);color:var(--teal)}
+.run-ran{border-color:var(--teal)}
+.run-no{border-style:dashed;color:var(--muted)}
+.run-new{border-color:var(--amber);color:var(--amber)}
+.runnote{font-size:12.5px;color:var(--muted);margin-top:3px}
+.req-conditional{color:var(--amber);border-color:currentColor}
+.req-no{color:var(--muted);border-style:dashed}
+#planView{overflow:auto}
+.plan{max-width:860px;padding:22px 28px 48px}
+.plan h3{font-size:15px;margin:26px 0 8px}
+.plan h3:first-child{margin-top:0}
+.plan ul{margin:0;padding-left:20px}
+.plan li{margin:3px 0}
+.plan p{margin:4px 0}
+.kv{color:var(--muted)}
+.dtitle{font-family:var(--code);font-size:14px;font-weight:600;word-break:break-all;margin:0 0 4px}
+.dtype{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;margin-bottom:12px}
+.fact{padding:10px 0;border-top:1px solid var(--line)}
+.fact .row1{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.fact .cat{font-weight:600;font-size:13px;margin-right:2px}
+.fact .subj{font-family:var(--code);font-size:12.5px;word-break:break-all;margin-top:2px}
+.fact .where{font-family:var(--code);font-size:12px;color:var(--muted);margin-top:3px;word-break:break-all}
+.fact .impl{font-size:13px;margin-top:5px}
+.fact .why{font-size:12.5px;color:var(--muted);margin-top:3px}
+.nbrs{display:flex;flex-wrap:wrap;gap:6px}
+.nbrs button{font-family:var(--code);font-size:12px;border:1px solid var(--line);background:var(--chrome-2);color:var(--text);padding:3px 7px;border-radius:6px;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.legend{font-size:12.5px;color:var(--muted);margin:0;padding:0;list-style:none}
+.legend li{display:flex;gap:9px;align-items:center;margin:5px 0}
+.muted{color:var(--muted)}
+.err{color:var(--coral)}
+.stats{margin:10px 0 0;padding:0;list-style:none;font-size:13px}
+.stats li{margin:3px 0}
+#treeView{grid-template-rows:auto minmax(0,1fr)}
+.progress{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line)}
+.step{font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:4px 10px;color:var(--muted);max-width:340px}
+.step b{color:var(--text);font-weight:600}
+.step.done{border-color:var(--teal)}
+.step.done b::before{content:"\2713  ";color:var(--teal)}
+.step .fn{font-family:var(--code);font-size:11.5px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.progress label{margin-left:auto;font-size:13px;display:flex;gap:6px;align-items:center;cursor:pointer}
+.tsplit{display:grid;grid-template-columns:minmax(0,1fr) 400px;min-height:0}
+.tmain{overflow:auto;padding:14px 18px 40px;min-height:0}
+.tneeds{overflow:auto;border-left:1px solid var(--line);padding:14px 16px 40px;min-height:0}
+.tnode{margin:2px 0 2px 0}
+.tnode>summary{cursor:pointer;padding:4px 6px;border-radius:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;list-style:none}
+.tnode>summary::-webkit-details-marker{display:none}
+.tnode>summary::before{content:"\25B8";color:var(--muted);width:10px;display:inline-block;transition:transform .12s}
+.tnode[open]>summary::before{transform:rotate(90deg)}
+.tnode>summary:hover{background:var(--chrome-2)}
+.tfile{font-family:var(--code);font-size:13.5px;font-weight:600}
+.tentry{font-size:11px;color:var(--focus);border:1px solid var(--focus);border-radius:9px;padding:0 6px}
+.tchips{display:flex;gap:5px;flex-wrap:wrap}
+.chip{font-size:11px;display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--c);display:inline-block;flex:none}
+.tbody{margin-left:13px;padding-left:12px;border-left:1px solid var(--line)}
+.bundle{margin:6px 0 8px;border-left:3px solid var(--c);padding:2px 0 2px 10px}
+.bhead{font-size:13px;font-weight:600;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.bhead .muted{font-weight:400;font-size:12px}
+details.bundle>summary{cursor:pointer;list-style:none}
+details.bundle>summary::-webkit-details-marker{display:none}
+.items{list-style:none;margin:3px 0 0;padding:0}
+.items li{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:2px 0;font-size:13px}
+.items button{all:unset;cursor:pointer;font-family:var(--code);font-size:12.5px;word-break:break-all}
+.items button:hover{text-decoration:underline}
+.items button:focus-visible{outline:2px solid var(--focus)}
+.ln{color:var(--muted);font-size:12px}
+.tref{font-family:var(--code);font-size:13px;color:var(--muted);padding:3px 6px 3px 22px}
+.need{border-top:1px solid var(--line);padding:9px 0}
+.need:first-of-type{border-top:0}
+.need .k{font-size:11.5px;font-weight:650;text-transform:uppercase;letter-spacing:.04em;display:flex;gap:6px;align-items:center}
+.need .v{font-family:var(--code);font-size:12.5px;word-break:break-all;margin-top:3px}
+.need .w{font-size:12.5px;color:var(--muted);margin-top:2px}
+.need code{font-family:var(--code);font-size:12px;background:var(--chrome-2);border:1px solid var(--line);border-radius:4px;padding:0 4px;word-break:break-all}
+.tneeds h3{font-size:14px;margin:0 0 4px}
+.tneeds h3.sub{margin-top:22px}
+@media (max-width:980px){
+  .tsplit{grid-template-columns:1fr}
+  .tneeds{border-left:0;border-top:1px solid var(--line)}
+  body{overflow:auto;grid-template-rows:auto auto}
+  #mapView{grid-template-columns:1fr;grid-template-rows:minmax(380px,62vh) auto auto}
+  #stage{order:1}
+  #side{order:2;border-right:0;border-top:1px solid var(--line)}
+  #details{order:3;border-left:0;border-top:1px solid var(--line)}
+  header{flex-wrap:wrap}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">X-Ray</div>
+  <div id="fileinfo">No map loaded</div>
+  <div class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" aria-selected="true" data-view="treeView">Entry tree</button>
+    <button role="tab" aria-selected="false" data-view="mapView">Map</button>
+    <button role="tab" aria-selected="false" data-view="factsView">Facts</button>
+    <button role="tab" aria-selected="false" data-view="planView">Docker plan</button>
+  </div>
+  <button class="btn" id="openBtn" type="button">Open files…</button>
+  <input type="file" id="fileInput" accept=".json,application/json" multiple hidden>
+</header>
+<main>
+  <section id="treeView" class="view on" aria-label="Entry tree">
+    <div class="progress" id="progress"></div>
+    <div class="tsplit">
+      <div class="tmain" id="tree"><div class="card" style="max-width:560px">
+        <h1 style="font-size:22px;margin:0 0 8px;font-weight:650">Open your X-Ray files</h1>
+        <p class="muted">Select <b>all</b> the .json files of one project at once (Ctrl+A in the file dialog) or drop them here:
+        the static map (<span class="mono">X.json</span>), the merged map (<span class="mono">X-merged.json</span>), the
+        package facts (<span class="mono">X-pkg.json</span>) and <span class="mono">plan.json</span>. Nothing leaves your computer.</p>
+        <button class="btn" id="openBtn3" type="button">Choose files…</button>
+        <p id="loadErr2" class="err" style="margin-top:14px"></p></div></div>
+      <aside class="tneeds" id="needs" aria-live="polite"></aside>
+    </div>
+  </section>
+  <section id="mapView" class="view" aria-label="Map">
+    <aside id="side" class="panel">
+      <h2>Show</h2>
+      <div id="groupToggles"><p class="muted" style="font-size:13px;margin:0">Load a map to filter it.</p></div>
+      <h2>Evidence</h2>
+      <div id="evToggles"></div>
+      <h2>Needed at runtime</h2>
+      <div id="reqToggles"></div>
+      <h2>Find</h2>
+      <input id="search" type="search" placeholder="Module, file, package…" autocomplete="off" aria-label="Find a node">
+      <p class="hint">Drag the background to pan, scroll to zoom. Drag a node to pin it, double-click to release it. Press <kbd>/</kbd> to search, <kbd>F</kbd> to fit, <kbd>Esc</kbd> to clear.</p>
+    </aside>
+    <div id="stage">
+      <canvas id="cv" tabindex="0" aria-label="Dependency map. The Facts tab has the same information as a table."></canvas>
+      <div id="tip" role="status"></div>
+      <div id="empty"><div class="card">
+        <h1>Open an X-Ray map</h1>
+        <p>Drop <span class="mono">xray_static.json</span> here (or a fixture <span class="mono">answer_key.json</span>), or choose a file. Nothing leaves your computer.</p>
+        <button class="btn" id="openBtn2" type="button">Choose file…</button>
+        <p id="loadErr" class="err" style="margin-top:14px"></p>
+      </div></div>
+    </div>
+    <aside id="details" class="panel" aria-live="polite"></aside>
+  </section>
+  <section id="factsView" class="view" aria-label="Facts">
+    <div class="tablebar">
+      <input id="fq" type="search" placeholder="Filter facts: subject, file, detail…" aria-label="Filter facts">
+      <select id="fcat" aria-label="Category"><option value="">All categories</option></select>
+      <select id="frun" aria-label="Seen at runtime"><option value="">Run: any</option><option value="seen">Seen running</option><option value="ran">Its line ran</option><option value="no">Did not run</option><option value="new">Found only by running</option></select>
+      <select id="freq" aria-label="Needed at runtime"><option value="">Needed: any</option><option value="yes">Needed: yes</option><option value="conditional">Needed: maybe</option><option value="no">Needed: no</option></select>
+      <span id="fcount" class="muted" style="font-size:13px"></span>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr>
+        <th data-k="id">ID</th><th data-k="category">Category</th><th data-k="subject">Subject</th>
+        <th data-k="where">Where</th><th data-k="req">Needed</th><th data-k="evidence">Evidence</th><th data-k="run">Run</th><th data-k="impl">Docker implication</th>
+      </tr></thead>
+      <tbody id="ftbody"></tbody>
+    </table></div>
+  </section>
+  <section id="planView" class="view" aria-label="Docker plan"><div class="plan" id="plan"><p class="muted">Load a map to see its Docker plan.</p></div></section>
+</main>
+<script>
+(() => {
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+const GROUPS = [
+  ["code","Your code","--bone","circle"],
+  ["packages","Packages","--teal","square"],
+  ["stdlib","Standard library","--slate","square"],
+  ["files","Files read","--amber","diamond"],
+  ["writes","Files written","--orange","diamond"],
+  ["runtime","Runtime needs","--violet","hexagon"],
+  ["problems","Problems to check","--coral","triangle"],
+];
+const GSHAPE = Object.fromEntries(GROUPS.map(g => [g[0], g[3]]));
+const TYPE_GROUP = {
+  module:"code", local_module:"code", file:"files", package:"packages", third_party_import:"packages",
+  stdlib:"stdlib", stdlib_import:"stdlib", model_file:"files", config_file:"files", data_file_read:"files",
+  file_write:"writes", env_var:"runtime", network_endpoint:"runtime", listen_port:"runtime",
+  subprocess_binary:"runtime", native_library:"runtime", system_package_candidate:"runtime", gpu_usage:"runtime",
+  gui_usage:"runtime", multiprocessing:"runtime", ipc_shared_memory:"runtime", thread_config:"runtime",
+  hardware_identity:"runtime", os_data:"runtime", device:"runtime", runtime_download:"runtime",
+  secret:"problems", hardcoded_config:"problems", dangling_reference:"problems", shadowing:"problems",
+  unused_asset:"problems", duplicate_asset:"problems", packaging:"problems", dynamic_import:"problems"
+};
+const CAT_LABEL = {
+  module:"Python module", local_module:"Local module", third_party_import:"Package import", package:"Package",
+  stdlib:"Standard library", stdlib_import:"Standard-library import", dynamic_import:"Dynamic import",
+  model_file:"Model file", config_file:"Config file", data_file_read:"Data file read", file:"File",
+  file_write:"File written", runtime_download:"Runtime download", env_var:"Environment variable",
+  hardcoded_config:"Hardcoded config", secret:"Secret", network_endpoint:"Network endpoint",
+  listen_port:"Listening port", subprocess_binary:"External program", native_library:"Native library",
+  system_package_candidate:"System package", gui_usage:"GUI use", gpu_usage:"GPU use",
+  ipc_shared_memory:"Shared memory", multiprocessing:"Multiprocessing", thread_config:"Thread settings",
+  hardware_identity:"Hardware identity", os_data:"OS data", device:"Device", unused_asset:"Unused file",
+  duplicate_asset:"Duplicate file", dangling_reference:"Missing reference", shadowing:"Shadowing",
+  packaging:"Requirements"
+};
+const EVIDENCE = [["static","Known from code",[]],["static_partial","Partly known",[6,4]],
+                  ["unresolved","Unknown until run",[2,4]],["derived","From file checks",[10,4]],
+                  ["confirmed","Seen running",[]]];
+const EV_DASH = Object.fromEntries(EVIDENCE.map(e => [e[0], e[2]]));
+const EV_LABEL = Object.fromEntries(EVIDENCE.map(e => [e[0], e[1]]));
+const REQS = [["yes","Yes"],["conditional","Maybe"],["no","No"]];
+const REQ_LABEL = {yes:"yes", conditional:"maybe", no:"no"};
+const REQ_RANK = {no:0, conditional:1, yes:2};
+const EV_RANK = {unresolved:0, static_partial:1, derived:2, static:3, confirmed:3};
+
+let D = null, nodes = [], edges = [], byId = new Map(), facts = new Map(), adj = new Map();
+const st = {groups:{code:1,packages:1,stdlib:0,files:1,writes:1,runtime:1,problems:1},
+            ev:{static:1,static_partial:1,unresolved:1,derived:1,confirmed:1}, req:{yes:1,conditional:1,no:1},
+            q:"", sel:null, hover:null};
+let view = {x:0,y:0,k:1}, W = 0, H = 0, dpr = 1, colors = {};
+let alpha = 0, running = false, fitPending = false, userMoved = false;
+let sortKey = "where", sortDir = 1;
+const cv = $("#cv"), ctx = cv.getContext("2d");
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+function readColors(){
+  const cs = getComputedStyle(document.documentElement), g = n => cs.getPropertyValue(n).trim();
+  colors = {edge:g("--edge-rgb"), label:g("--label"), halo:g("--label-halo"), focus:g("--focus")};
+  GROUPS.forEach(([k,,v]) => colors[k] = g(v));
+}
+readColors();
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { readColors(); draw(); });
+
+/* ---------------------------------------------------------------- helpers */
+const evOf = f => f.evidence || evFromKey(f);
+function evFromKey(f){
+  const v = f.visible_to || [];
+  if (f.expected_label === "derived") return "derived";
+  if (v.includes("static")) return "static";
+  if (v.includes("static_partial")) return "static_partial";
+  return "unresolved";
+}
+const groupOf = n => n.type === "module" ? "code" : (TYPE_GROUP[n.type] || "runtime");
+const typeLabel = n => n.type === "module" ? (n.kind === "unreached" ? "Python module (never imported)" : "Python module")
+                                           : (CAT_LABEL[n.type] || n.type);
+/* runtime status: from a merged map (label + runtime) or a runtime-only file (evidence "confirmed") */
+const RUN_TXT = {seen:"seen running", ran:"its line ran", no:"did not run", new:"found only by running", file:"file check"};
+function runOf(f){
+  const r = f.runtime;
+  if (r){
+    if (f.required_static === null && r.seen_by && r.seen_by.length) return "new";
+    if (f.label === "derived") return "file";
+    if (r.seen_by && r.seen_by.length && f.label === "confirmed") return "seen";
+    if (f.label === "confirmed") return "ran";
+    return "no";
+  }
+  return f.evidence === "confirmed" ? "seen" : null;
+}
+const RUN_RANK = {new:0, seen:1, ran:2, no:3, file:4};
+function runPill(f){
+  const k = runOf(f); if (!k) return "";
+  const lay = (f.runtime ? f.runtime.layers : f.layers) || [];
+  return `<span class="pill run-${k === "file" ? "no" : k}" title="${esc(lay.join(", "))}">${esc(RUN_TXT[k])}</span>`;
+}
+const reqPill = r => r ? `<span class="pill req-${esc(r)}">needed: ${esc(REQ_LABEL[r] || r)}</span>` : "";
+const where = f => (f.sites || []).map(s => s.file + (s.line ? ":" + s.line : "")).join(", ");
+function short(n){
+  const t = String(n.label);
+  if (n.type === "module" || n.type === "file"){
+    const p = t.split("/");
+    const s = p.length > 2 ? "…/" + p.slice(-2).join("/") : t;
+    return s.length > 40 ? "…" + s.slice(-39) : s;
+  }
+  return t.length > 36 ? t.slice(0, 35) + "…" : t;
+}
+function nodeIdForFact(f){
+  const c = f.category, rp = f.resolved_path;
+  if ((c === "local_module" || c === "dynamic_import") && rp) return "mod:" + rp;
+  if (c === "third_party_import") return "pkg:" + f.subject;
+  if (c === "stdlib_import") return "std:" + f.subject;
+  return c + ":" + f.subject;
+}
+function swatchSvg(g){
+  const G = GROUPS.find(x => x[0] === g) || GROUPS[5], c = `var(${G[2]})`, s = G[3];
+  let p;
+  if (s === "circle") p = `<circle cx="7" cy="7" r="5.5" fill="${c}"/>`;
+  else if (s === "square") p = `<rect x="2" y="2" width="10" height="10" fill="${c}"/>`;
+  else if (s === "diamond") p = `<path d="M7 1 L13 7 L7 13 L1 7Z" fill="${c}"/>`;
+  else if (s === "hexagon") p = `<path d="M13 7 L10 12.2 L4 12.2 L1 7 L4 1.8 L10 1.8Z" fill="${c}"/>`;
+  else p = `<path d="M7 1.5 L13 12 L1 12Z" fill="${c}"/>`;
+  return `<svg class="swatch" viewBox="0 0 14 14" aria-hidden="true">${p}</svg>`;
+}
+function lineSvg(dash){
+  return `<svg class="swatch" viewBox="0 0 14 14" aria-hidden="true" style="width:26px"><line x1="0" y1="7" x2="26" y2="7" stroke="var(--text)" stroke-width="1.6" stroke-dasharray="${dash.join(" ")}"/></svg>`;
+}
+function rng(seed){
+  return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
+/* ---------------------------------------------------------------- load */
+function graphFromFacts(fs){
+  const N = new Map(), E = [];
+  const add = (id, label, type) => { if (!N.has(id)) N.set(id, {id, label, type}); return id; };
+  for (const f of fs){
+    const c = f.category, rp = f.resolved_path;
+    let tid;
+    if ((c === "local_module" || c === "dynamic_import") && rp) tid = add("mod:" + rp, rp, "module");
+    else if (c === "third_party_import") tid = add("pkg:" + f.subject, String(f.subject), "package");
+    else if (c === "stdlib_import") tid = add("std:" + f.subject, String(f.subject), "stdlib");
+    else tid = add(c + ":" + f.subject, String(f.subject), c);
+    for (const s of (f.sites || [])){
+      if (!s.file || s.file === f.subject) continue;
+      const sid = s.file.endsWith(".py") ? add("mod:" + s.file, s.file, "module") : add("file:" + s.file, s.file, "file");
+      if (sid !== tid) E.push({source:sid, target:tid, type:c, required:f.required_at_runtime || "conditional",
+                               evidence:evOf(f), fact:f.id, line:s.line});
+    }
+  }
+  return {nodes:[...N.values()], edges:E};
+}
+
+function load(data, name){
+  if (!data || typeof data !== "object" || !(Array.isArray(data.facts) || (data.graph && data.graph.nodes)))
+    throw new Error("This JSON has no facts or graph. Open a file written by xray_static.py / xray_trace.py, or a fixture answer_key.json.");
+  D = data;
+  facts = new Map((data.facts || []).map(f => [f.id, f]));
+  const g = (data.graph && data.graph.nodes) ? data.graph : graphFromFacts((data.facts || []).filter(f => !f.negative));
+  nodes = g.nodes.map(n => ({...n, group:groupOf(n), x:0, y:0, vx:0, vy:0, deg:0, fixed:false}));
+  byId = new Map(nodes.map(n => [n.id, n]));
+  for (const ep of (data.entrypoints || [])){
+    const p = typeof ep === "string" ? ep : ep.path;
+    const n = byId.get("mod:" + p); if (n) n.entry = true;
+  }
+  edges = (g.edges || []).filter(e => byId.has(e.source) && byId.has(e.target) && e.source !== e.target)
+    .map(e => ({...e, s:byId.get(e.source), t:byId.get(e.target)}));
+  adj = new Map(nodes.map(n => [n.id, new Set()]));
+  for (const e of edges){ e.s.deg++; e.t.deg++; adj.get(e.s.id).add(e.t.id); adj.get(e.t.id).add(e.s.id); }
+  for (const n of nodes){
+    const inc = edges.filter(e => e.t === n);
+    if (n.type === "module"){ n.req = n.required || (inc.length ? maxReq(inc) : "yes"); n.ev = "static"; }
+    else {
+      n.req = inc.length ? maxReq(inc) : (reqOfSubjectFact(n) || "conditional");
+      n.ev = inc.length ? inc.reduce((a, e) => (EV_RANK[e.evidence] ?? 3) < EV_RANK[a] ? e.evidence : a, "static")
+                        : (evOfSubjectFact(n) || "derived");
+    }
+  }
+  st.sel = null; st.hover = null; userMoved = false; st.q = ""; $("#search").value = "";
+  $("#empty").style.display = "none";
+  $("#loadErr").textContent = "";
+  const s = data.summary;
+  $("#fileinfo").innerHTML = `<b>${esc(name)}</b>${facts.size} facts, ${nodes.length} nodes` +
+    (s && s.modules_needed != null ? `, ${s.modules_needed} modules needed` : "") +
+    (data.fixture_id ? `, answer key ${esc(data.fixture_id)}` : "");
+  $("#loadErr2").textContent = "";
+  buildToggles(); buildFactFilters(); renderFacts(); renderPlan(); renderDetails(); renderTree();
+  seed(); resize(); fitPending = true; start(1);
+}
+function maxReq(list){ return list.reduce((a, e) => (REQ_RANK[e.required] ?? 1) > REQ_RANK[a] ? (e.required || "conditional") : a, "no"); }
+function subjectFacts(n){ return [...facts.values()].filter(f => nodeIdForFact(f) === n.id); }
+function reqOfSubjectFact(n){ const f = subjectFacts(n); return f.length ? f[0].required_at_runtime : null; }
+function evOfSubjectFact(n){ const f = subjectFacts(n); return f.length ? evOf(f[0]) : null; }
+
+/* several files at once: the main map (merged > static > runtime > answer key) + package facts + plan.json */
+const EXTRA = {pkg:null, plan:null, pkgName:"", planName:"", mainName:""};
+const MAIN_RANK = {"xray-merged":0, "xray-static":1, "xray-trace":2};
+function kindOf(j){
+  if (!j || typeof j !== "object") return null;
+  if (j.tool === "xray-pkg") return "pkg";
+  if (j.tool === "xray-plan") return "plan";
+  if (Array.isArray(j.facts) || (j.graph && j.graph.nodes)) return "main";
+  return null;
+}
+function showErr(msg){ $("#loadErr").textContent = msg; $("#loadErr2").textContent = msg; if (!D) $("#empty").style.display = "flex"; }
+async function readFiles(list){
+  const got = [];
+  for (const file of list){
+    try { got.push({name:file.name, j:JSON.parse(await file.text())}); }
+    catch (e) { showErr(`${file.name} isn't valid JSON (${e.message}). Open the .json files X-Ray wrote.`); return; }
+  }
+  const mains = got.filter(g => kindOf(g.j) === "main")
+    .sort((a, b) => (MAIN_RANK[a.j.tool] ?? 9) - (MAIN_RANK[b.j.tool] ?? 9));
+  for (const g of got){
+    const k = kindOf(g.j);
+    if (k === "pkg"){ EXTRA.pkg = g.j; EXTRA.pkgName = g.name; }
+    else if (k === "plan"){ EXTRA.plan = g.j; EXTRA.planName = g.name; }
+    else if (!k) showErr(`${g.name} is not an X-Ray file (no facts, graph, or tool name).`);
+  }
+  try {
+    if (mains.length){ EXTRA.mainName = mains[0].name; load(mains[0].j, mains[0].name); }
+    else if (D){ renderTree(); renderPlan(); }
+    else if (got.length) showErr("Also open the static or merged map (X.json / X-merged.json) - the tree is built from it.");
+  } catch (e) { showErr(e.message); }
+}
+$("#openBtn").onclick = $("#openBtn2").onclick = $("#openBtn3").onclick = () => $("#fileInput").click();
+$("#fileInput").onchange = e => { if (e.target.files.length) readFiles([...e.target.files]); e.target.value = ""; };
+window.addEventListener("dragover", e => { e.preventDefault(); $("#stage").classList.add("drop"); });
+window.addEventListener("dragleave", e => { if (!e.relatedTarget) $("#stage").classList.remove("drop"); });
+window.addEventListener("drop", e => {
+  e.preventDefault(); $("#stage").classList.remove("drop");
+  const fs = e.dataTransfer.files; if (fs && fs.length) readFiles([...fs]);
+});
+
+/* ---------------------------------------------------------------- filters */
+function buildToggles(){
+  const cnt = {}; nodes.forEach(n => cnt[n.group] = (cnt[n.group] || 0) + 1);
+  $("#groupToggles").innerHTML = GROUPS.map(([k, label]) =>
+    `<label class="toggle"><input type="checkbox" data-g="${k}" ${st.groups[k] ? "checked" : ""}>${swatchSvg(k)}<span>${label}</span><span class="count">${cnt[k] || 0}</span></label>`).join("");
+  $("#evToggles").innerHTML = EVIDENCE.map(([k, label, dash]) =>
+    `<label class="toggle"><input type="checkbox" data-e="${k}" ${st.ev[k] ? "checked" : ""}>${lineSvg(dash)}<span>${label}</span></label>`).join("");
+  $("#reqToggles").innerHTML = REQS.map(([k, label]) =>
+    `<label class="toggle"><input type="checkbox" data-r="${k}" ${st.req[k] ? "checked" : ""}><span>${label}</span></label>`).join("") +
+    `<p class="hint" style="margin-top:6px">Hollow shapes are not needed at runtime: dead weight for the image.</p>`;
+  document.querySelectorAll("#side input[type=checkbox]").forEach(cb => cb.onchange = () => {
+    if (cb.dataset.g) st.groups[cb.dataset.g] = cb.checked ? 1 : 0;
+    if (cb.dataset.e) st.ev[cb.dataset.e] = cb.checked ? 1 : 0;
+    if (cb.dataset.r) st.req[cb.dataset.r] = cb.checked ? 1 : 0;
+    if (st.sel && !visible(st.sel)) select(null);
+    start(0.25);
+  });
+}
+function visible(n){
+  if (!st.groups[n.group]) return false;
+  if (!st.req[n.req || "conditional"]) return false;
+  if (n.type !== "module" && !st.ev[n.ev || "static"]) return false;
+  return true;
+}
+const edgeVisible = e => visible(e.s) && visible(e.t) && st.ev[e.evidence || "static"] && st.req[e.required || "conditional"];
+$("#search").addEventListener("input", e => { st.q = e.target.value.trim(); draw(); });
+$("#search").addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  const q = st.q.toLowerCase(); if (!q) return;
+  const hit = nodes.find(n => visible(n) && String(n.label).toLowerCase().includes(q));
+  if (hit){ select(hit); centerOn(hit); }
+});
+
+/* ---------------------------------------------------------------- layout */
+function clusterKey(n){
+  if (n.type === "module"){ const p = String(n.label).split("/"); return "m:" + p.slice(0, Math.min(2, p.length - 1)).join("/"); }
+  return "g:" + n.group;
+}
+function seed(){
+  const r = rng(7), mods = nodes.filter(n => n.group === "code");
+  const keys = [...new Set(mods.map(clusterKey))], R = 60 + 22 * Math.sqrt(nodes.length);
+  mods.forEach(n => {
+    const i = keys.indexOf(clusterKey(n)), a = 2 * Math.PI * i / Math.max(1, keys.length);
+    n.x = Math.cos(a) * R * 0.5 + (r() - .5) * 70; n.y = Math.sin(a) * R * 0.5 + (r() - .5) * 70;
+  });
+  const gk = GROUPS.map(g => g[0]);
+  nodes.filter(n => n.group !== "code").forEach(n => {
+    const nb = [...adj.get(n.id)].map(id => byId.get(id)).filter(m => m.group === "code");
+    if (nb.length){
+      n.x = nb.reduce((s, m) => s + m.x, 0) / nb.length + (r() - .5) * 90;
+      n.y = nb.reduce((s, m) => s + m.y, 0) / nb.length + (r() - .5) * 90;
+    } else {
+      const a = 2 * Math.PI * gk.indexOf(n.group) / gk.length;
+      n.x = Math.cos(a) * R * 1.3 + (r() - .5) * 80; n.y = Math.sin(a) * R * 1.3 + (r() - .5) * 80;
+    }
+  });
+}
+function tick(){
+  const cell = 110, grid = new Map(), vis = nodes.filter(visible);
+  for (const n of vis){ const k = Math.floor(n.x / cell) + "," + Math.floor(n.y / cell); (grid.get(k) || grid.set(k, []).get(k)).push(n); }
+  for (const n of vis){
+    const cx = Math.floor(n.x / cell), cy = Math.floor(n.y / cell);
+    for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++){
+      const arr = grid.get((cx + i) + "," + (cy + j)); if (!arr) continue;
+      for (const m of arr){
+        if (m === n) continue;
+        let dx = n.x - m.x, dy = n.y - m.y, d2 = dx * dx + dy * dy;
+        if (d2 < 1){ dx = Math.random() - .5; dy = Math.random() - .5; d2 = 1; }
+        if (d2 > 90000) continue;
+        const f = 380 * alpha / d2; n.vx += dx * f; n.vy += dy * f;
+      }
+    }
+  }
+  for (const e of edges){
+    if (!visible(e.s) || !visible(e.t)) continue;
+    const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const L = (e.s.group === "code" && e.t.group === "code") ? 75 : 52;
+    const f = (d - L) / d * 0.07 * alpha, fx = dx * f, fy = dy * f;
+    e.s.vx += fx; e.s.vy += fy; e.t.vx -= fx; e.t.vy -= fy;
+  }
+  for (const n of vis){
+    if (n.fixed){ n.vx = n.vy = 0; continue; }
+    n.vx -= n.x * 0.005 * alpha; n.vy -= n.y * 0.005 * alpha;
+    n.vx *= 0.6; n.vy *= 0.6; n.x += n.vx; n.y += n.vy;
+  }
+}
+function start(a){
+  alpha = Math.max(alpha, a);
+  if (reduceMotion.matches){
+    for (let i = 0; i < 500 && alpha > 0.01; i++){ tick(); alpha *= 0.985; }
+    alpha = 0; if (fitPending && !userMoved){ fit(); fitPending = false; } draw(); return;
+  }
+  if (!running){ running = true; requestAnimationFrame(loop); }
+}
+function loop(){
+  for (let i = 0; i < 3; i++){ tick(); alpha *= 0.985; }
+  if (fitPending && !userMoved && (alpha < 0.3 || alpha < 0.012)) fit();
+  if (alpha < 0.012){ running = false; alpha = 0; if (fitPending && !userMoved) fit(); fitPending = false; draw(); return; }
+  draw(); requestAnimationFrame(loop);
+}
+function fit(){
+  const vs = nodes.filter(visible); if (!vs.length || !W) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const n of vs){ x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); }
+  const pad = 70, k = Math.min((W - pad * 2) / Math.max(1, x1 - x0), (H - pad * 2) / Math.max(1, y1 - y0), 2.2);
+  view.k = Math.max(0.12, k); view.x = W / 2 - (x0 + x1) / 2 * view.k; view.y = H / 2 - (y0 + y1) / 2 * view.k;
+}
+function centerOn(n){ if (!n) return; view.x = W / 2 - n.x * view.k; view.y = H / 2 - n.y * view.k; userMoved = true; draw(); }
+
+/* ---------------------------------------------------------------- drawing */
+const radius = n => (n.type === "module" ? 6 : 4.6) + Math.min(7, Math.sqrt(n.deg) * 1.25) + (n.entry ? 3 : 0);
+function shape(n, r, col, hollow){
+  const x = n.x, y = n.y, s = GSHAPE[n.group];
+  ctx.beginPath();
+  if (s === "circle") ctx.arc(x, y, r, 0, Math.PI * 2);
+  else if (s === "square") ctx.rect(x - r * .85, y - r * .85, r * 1.7, r * 1.7);
+  else if (s === "diamond"){ ctx.moveTo(x, y - r * 1.15); ctx.lineTo(x + r * 1.15, y); ctx.lineTo(x, y + r * 1.15); ctx.lineTo(x - r * 1.15, y); ctx.closePath(); }
+  else if (s === "hexagon"){ for (let i = 0; i < 6; i++){ const a = Math.PI / 3 * i, px = x + r * 1.05 * Math.cos(a), py = y + r * 1.05 * Math.sin(a); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.closePath(); }
+  else { ctx.moveTo(x, y - r * 1.2); ctx.lineTo(x + r * 1.1, y + r * .8); ctx.lineTo(x - r * 1.1, y + r * .8); ctx.closePath(); }
+  if (hollow){ ctx.lineWidth = 1.6 / view.k; ctx.strokeStyle = col; ctx.stroke(); }
+  else { ctx.fillStyle = col; ctx.fill(); }
+}
+function arrow(e, a){
+  const r = radius(e.t) + 2, dx = e.t.x - e.s.x, dy = e.t.y - e.s.y, d = Math.hypot(dx, dy) || 1;
+  const ux = dx / d, uy = dy / d, tx = e.t.x - ux * r, ty = e.t.y - uy * r, s = 5.5 / view.k;
+  ctx.fillStyle = `rgba(${colors.edge},${a})`;
+  ctx.beginPath(); ctx.moveTo(tx, ty);
+  ctx.lineTo(tx - ux * s - uy * s * .55, ty - uy * s + ux * s * .55);
+  ctx.lineTo(tx - ux * s + uy * s * .55, ty - uy * s - ux * s * .55);
+  ctx.closePath(); ctx.fill();
+}
+function draw(){
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+  if (!nodes.length) return;
+  const focus = st.hover || st.sel, near = focus ? adj.get(focus.id) : null;
+  const q = focus ? "" : st.q.toLowerCase(), match = n => !q || String(n.label).toLowerCase().includes(q);
+  ctx.save(); ctx.translate(view.x, view.y); ctx.scale(view.k, view.k);
+  for (const e of edges){
+    if (!edgeVisible(e)) continue;
+    const hl = focus && (e.s === focus || e.t === focus);
+    let a = hl ? .85 : (focus ? .06 : .26);
+    if (e.required === "no") a *= .5;
+    if (q && !(match(e.s) || match(e.t))) a *= .3;
+    ctx.strokeStyle = `rgba(${colors.edge},${a})`; ctx.lineWidth = (hl ? 1.7 : 1) / view.k;
+    ctx.setLineDash((EV_DASH[e.evidence] || []).map(v => v / view.k));
+    ctx.beginPath(); ctx.moveTo(e.s.x, e.s.y); ctx.lineTo(e.t.x, e.t.y); ctx.stroke();
+    if (hl || view.k > 1.5){ ctx.setLineDash([]); arrow(e, a); }
+  }
+  ctx.setLineDash([]);
+  for (const n of nodes){
+    if (!visible(n)) continue;
+    const dim = (focus && n !== focus && !(near && near.has(n.id))) || (q && !match(n));
+    const r = radius(n), hollow = n.req === "no" || n.kind === "unreached";
+    ctx.globalAlpha = dim ? .22 : 1;
+    shape(n, r, colors[n.group], hollow);
+    if (n.entry){ ctx.strokeStyle = colors.code; ctx.lineWidth = 1.4 / view.k; ctx.beginPath(); ctx.arc(n.x, n.y, r + 4 / view.k + 2, 0, Math.PI * 2); ctx.stroke(); }
+    if (n === st.sel){ ctx.globalAlpha = 1; ctx.strokeStyle = colors.focus; ctx.lineWidth = 2.4 / view.k; ctx.beginPath(); ctx.arc(n.x, n.y, r + 7 / view.k + 2, 0, Math.PI * 2); ctx.stroke(); }
+  }
+  ctx.globalAlpha = 1; ctx.restore();
+  ctx.font = "12px " + getComputedStyle(document.body).fontFamily; ctx.lineJoin = "round";
+  const cands = [];
+  for (const n of nodes){
+    if (!visible(n)) continue;
+    const isNear = near && near.has(n.id);
+    let pri = 0;
+    if (n === focus) pri = 9; else if (n.entry) pri = 8; else if (q && match(n)) pri = 7;
+    else if (isNear && view.k > .2) pri = 6; else if (view.k > .25) pri = n.group === "code" ? 3 : 2;
+    if (!pri) continue;
+    const sx = n.x * view.k + view.x, sy = n.y * view.k + view.y;
+    if (sx < -200 || sx > W + 20 || sy < -20 || sy > H + 20) continue;
+    cands.push({n, pri: pri + Math.min(.9, n.deg / 100), sx, sy});
+  }
+  cands.sort((a, b) => b.pri - a.pri);
+  const placed = [];
+  for (const c of cands){
+    const t = short(c.n), w = ctx.measureText(t).width;
+    const ox = c.sx + radius(c.n) * view.k + 6, oy = c.sy + 4, box = [ox - 2, oy - 12, w + 4, 16];
+    const hit = placed.some(b => box[0] < b[0] + b[2] && box[0] + box[2] > b[0] && box[1] < b[1] + b[3] && box[1] + box[3] > b[1]);
+    if (hit && c.pri < 9) continue;
+    placed.push(box);
+    ctx.globalAlpha = (focus && c.n !== focus && !(near && near.has(c.n.id))) ? .35 : 1;
+    ctx.lineWidth = 3.5; ctx.strokeStyle = colors.halo; ctx.strokeText(t, ox, oy);
+    ctx.fillStyle = colors.label; ctx.fillText(t, ox, oy);
+  }
+  ctx.globalAlpha = 1;
+}
+function resize(){
+  const r = $("#stage").getBoundingClientRect(); dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height; cv.width = Math.max(1, Math.round(W * dpr)); cv.height = Math.max(1, Math.round(H * dpr));
+  draw();
+}
+new ResizeObserver(resize).observe($("#stage"));
+
+/* ---------------------------------------------------------------- interaction */
+let drag = null;
+const local = ev => { const r = cv.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
+const toWorld = (px, py) => [(px - view.x) / view.k, (py - view.y) / view.k];
+function pick(px, py){
+  const [wx, wy] = toWorld(px, py); let best = null, bd = Infinity;
+  for (const n of nodes){
+    if (!visible(n)) continue;
+    const d = Math.hypot(n.x - wx, n.y - wy);
+    if (d < radius(n) + 6 / view.k && d < bd){ bd = d; best = n; }
+  }
+  return best;
+}
+cv.addEventListener("pointerdown", ev => {
+  if (!nodes.length) return;
+  const p = local(ev), n = pick(p[0], p[1]);
+  cv.setPointerCapture(ev.pointerId);
+  drag = {node:n, sx:p[0], sy:p[1], vx:view.x, vy:view.y, moved:false};
+  cv.classList.add("dragging");
+});
+cv.addEventListener("pointermove", ev => {
+  if (!nodes.length) return;
+  const p = local(ev);
+  if (drag){
+    const dx = p[0] - drag.sx, dy = p[1] - drag.sy;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    if (drag.node){
+      const [wx, wy] = toWorld(p[0], p[1]);
+      Object.assign(drag.node, {x:wx, y:wy, vx:0, vy:0, fixed:true});
+      if (!running) start(.12); else draw();
+    } else { view.x = drag.vx + dx; view.y = drag.vy + dy; draw(); }
+    userMoved = true; showTip(null); return;
+  }
+  const n = pick(p[0], p[1]);
+  if (n !== st.hover){ st.hover = n; draw(); }
+  showTip(n, p);
+});
+cv.addEventListener("pointerup", () => {
+  if (drag && !drag.moved) select(drag.node || null);
+  drag = null; cv.classList.remove("dragging");
+});
+cv.addEventListener("pointerleave", () => { if (!drag){ st.hover = null; showTip(null); draw(); } });
+cv.addEventListener("dblclick", ev => { const p = local(ev), n = pick(p[0], p[1]); if (n){ n.fixed = false; start(.2); } });
+cv.addEventListener("wheel", ev => {
+  if (!nodes.length) return;
+  ev.preventDefault();
+  const p = local(ev), k = Math.min(6, Math.max(.08, view.k * Math.exp(-ev.deltaY * .0015)));
+  view.x = p[0] - (p[0] - view.x) * k / view.k; view.y = p[1] - (p[1] - view.y) * k / view.k; view.k = k;
+  userMoved = true; draw();
+}, {passive:false});
+function showTip(n, p){
+  const t = $("#tip");
+  if (!n){ t.style.display = "none"; return; }
+  t.innerHTML = `<code>${esc(n.label)}</code><br><span class="muted">${esc(typeLabel(n))}, needed at runtime: ${esc(REQ_LABEL[n.req] || n.req)}</span>`;
+  t.style.display = "block";
+  const x = Math.min(p[0] + 14, W - t.offsetWidth - 8), y = Math.min(p[1] + 14, H - t.offsetHeight - 8);
+  t.style.left = Math.max(8, x) + "px"; t.style.top = Math.max(8, y) + "px";
+}
+document.addEventListener("keydown", e => {
+  const typing = /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName);
+  if (e.key === "/" && !typing){ e.preventDefault(); showView("mapView"); $("#search").focus(); }
+  else if ((e.key === "f" || e.key === "F") && !typing && nodes.length){ fit(); userMoved = true; draw(); }
+  else if (e.key === "Escape"){ if (typing) document.activeElement.blur(); select(null); }
+});
+
+/* ---------------------------------------------------------------- details */
+function select(n){ st.sel = n; renderDetails(); draw(); }
+function factHtml(f){
+  const s = where(f);
+  return `<div class="fact"><div class="row1"><span class="cat">${esc(CAT_LABEL[f.category] || f.category)}</span>${reqPill(f.required_at_runtime)}<span class="pill">${esc(EV_LABEL[evOf(f)] || evOf(f))}</span>${runPill(f)}${f.negative ? '<span class="pill">decoy</span>' : ""}</div>
+    <div class="subj">${esc(String(f.subject))}</div>
+    ${f.runtime && f.runtime.note ? `<div class="runnote">${esc(f.runtime.note)}</div>` : ""}
+    ${(f.runtime ? f.runtime.layers : f.layers || []).length ? `<div class="runnote">seen by: ${esc((f.runtime ? f.runtime.layers : f.layers).join(", "))}${f.processes ? " in " + esc(f.processes.join(", ")) : ""}</div>` : ""}
+    ${s ? `<div class="where">${esc(s)}${f.mechanism ? ", via " + esc(f.mechanism) : ""}</div>` : ""}
+    ${f.docker_implication ? `<div class="impl">${esc(f.docker_implication)}</div>` : ""}
+    ${(f.detail || f.trap) ? `<div class="why">${esc(f.detail || f.trap)}</div>` : ""}</div>`;
+}
+function legendHtml(){
+  return `<h2>Reading the map</h2><ul class="legend">
+    ${GROUPS.map(([k, label]) => `<li>${swatchSvg(k)}${label}</li>`).join("")}
+    ${EVIDENCE.map(([, label, dash]) => `<li>${lineSvg(dash)}${label}</li>`).join("")}
+    <li><svg class="swatch" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--bone)" stroke-width="1.5"/></svg>Hollow: not needed at runtime</li>
+    <li><svg class="swatch" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="3.5" fill="var(--bone)"/><circle cx="7" cy="7" r="6.2" fill="none" stroke="var(--bone)" stroke-width="1.1"/></svg>Ringed: entrypoint</li></ul>`;
+}
+function renderDetails(){
+  const el = $("#details"), n = st.sel;
+  if (!D){ el.innerHTML = `<p class="muted">Open a map to explore it.</p>`; return; }
+  if (!n){
+    const s = D.summary, list = [];
+    if (s){
+      list.push(s.modules_total != null ? `${s.facts} facts, ${s.modules_needed} of ${s.modules_total} parsed modules needed` : `${s.facts} facts`);
+      if (s.by_label) list.push(`After running: ${s.by_label.confirmed || 0} confirmed, ${s.by_label.static_only || 0} did not run, ${s.by_label.derived || 0} from file checks; ${s.runtime_only || 0} found only by running`);
+      if (s.processes) list.push(`${s.processes} Python processes traced` + (s.exit_code != null ? `, app exit code ${s.exit_code}` : ""));
+      if (s.by_required) list.push(`Needed at runtime: ${s.by_required.yes} yes, ${s.by_required.conditional} maybe, ${s.by_required.no} no`);
+      if (s.unresolved_dynamic_sites && s.unresolved_dynamic_sites.length) list.push(`Dynamic imports unknown until it runs: ${s.unresolved_dynamic_sites.map(esc).join(", ")}`);
+    } else list.push(`${facts.size} facts in this answer key`);
+    el.innerHTML = `<p class="muted" style="margin-top:0">Click a node to see what it is, where the code reaches it, and what it means for the Dockerfile.</p>
+      <ul class="stats">${list.map(x => `<li>${x}</li>`).join("")}</ul>${legendHtml()}`;
+    return;
+  }
+  const seen = new Set(), via = [];
+  for (const e of edges) if (e.t === n && e.fact && facts.has(e.fact) && !seen.has(e.fact)){ seen.add(e.fact); via.push(facts.get(e.fact)); }
+  for (const f of subjectFacts(n)) if (!seen.has(f.id)){ seen.add(f.id); via.push(f); }
+  const own = (n.type === "module" || n.type === "file")
+    ? [...facts.values()].filter(f => !seen.has(f.id) && (f.sites || []).some(s => s.file === n.label))
+        .sort((a, b) => ((a.sites[0] || {}).line || 0) - ((b.sites[0] || {}).line || 0))
+    : [];
+  let h = `<p class="dtitle">${esc(n.label)}</p><div class="dtype">${swatchSvg(n.group)}<span>${esc(typeLabel(n))}</span></div>
+    <p style="margin:0 0 4px">${reqPill(n.req)} <span class="pill">${esc(EV_LABEL[n.ev] || n.ev || "")}</span></p>`;
+  if (n.name && n.name !== n.label) h += `<p class="muted" style="margin:6px 0 0;font-size:13px">Imported as <span class="mono">${esc(n.name)}</span></p>`;
+  if (via.length) h += `<h2>How the code reaches it (${via.length})</h2>` + via.map(factHtml).join("");
+  if (own.length) h += `<h2>What this file does (${own.length})</h2>` + own.map(factHtml).join("");
+  const nb = [...(adj.get(n.id) || [])].map(id => byId.get(id)).filter(Boolean);
+  if (nb.length) h += `<h2>Connected (${nb.length})</h2><div class="nbrs">` +
+    nb.slice(0, 80).map(m => `<button type="button" data-id="${esc(m.id)}" title="${esc(m.label)}">${esc(short(m))}</button>`).join("") + `</div>`;
+  el.innerHTML = h;
+  el.querySelectorAll(".nbrs button").forEach(b => b.onclick = () => { const m = byId.get(b.dataset.id); if (m){ if (!visible(m)) st.groups[m.group] = 1; buildToggles(); select(m); centerOn(m); } });
+}
+
+/* ---------------------------------------------------------------- facts table */
+function buildFactFilters(){
+  const cats = [...new Set([...facts.values()].map(f => f.category))].sort();
+  $("#fcat").innerHTML = `<option value="">All categories</option>` + cats.map(c => `<option value="${esc(c)}">${esc(CAT_LABEL[c] || c)}</option>`).join("");
+}
+function sortVal(f, k){
+  if (k === "where") return where(f) + String(1e6 + (((f.sites || [])[0] || {}).line || 0));
+  if (k === "req") return REQ_RANK[f.required_at_runtime] ?? -1;
+  if (k === "impl") return f.docker_implication || "";
+  if (k === "evidence") return evOf(f);
+  if (k === "run") return RUN_RANK[runOf(f)] ?? 9;
+  return String(f[k] ?? "");
+}
+function renderFacts(){
+  const q = $("#fq").value.toLowerCase(), cat = $("#fcat").value, req = $("#freq").value, run = $("#frun").value;
+  const rows = [...facts.values()].filter(f => (!cat || f.category === cat) && (!req || f.required_at_runtime === req) &&
+    (!run || runOf(f) === run) &&
+    (!q || JSON.stringify([f.subject, f.sites, f.mechanism, f.detail, f.docker_implication, f.trap, f.runtime]).toLowerCase().includes(q)));
+  rows.sort((a, b) => { const x = sortVal(a, sortKey), y = sortVal(b, sortKey); return (x > y ? 1 : x < y ? -1 : 0) * sortDir; });
+  $("#fcount").textContent = `${rows.length} of ${facts.size}`;
+  document.querySelectorAll("th[data-k]").forEach(th => th.dataset.k === sortKey ? th.setAttribute("aria-sort", sortDir > 0 ? "ascending" : "descending") : th.removeAttribute("aria-sort"));
+  $("#ftbody").innerHTML = rows.map(f => `<tr tabindex="0" data-id="${esc(f.id)}">
+    <td class="mono">${esc(f.id)}</td><td>${esc(CAT_LABEL[f.category] || f.category)}${f.negative ? ' <span class="pill">decoy</span>' : ""}</td>
+    <td class="mono">${esc(String(f.subject))}</td><td class="mono">${esc(where(f))}</td>
+    <td>${reqPill(f.required_at_runtime)}</td><td>${esc(EV_LABEL[evOf(f)] || evOf(f))}</td><td>${runPill(f)}</td><td>${esc(f.docker_implication || "")}</td></tr>`).join("");
+}
+["fq", "fcat", "freq", "frun"].forEach(id => $("#" + id).addEventListener("input", renderFacts));
+document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => { sortDir = sortKey === th.dataset.k ? -sortDir : 1; sortKey = th.dataset.k; renderFacts(); });
+function openFact(id){
+  const f = facts.get(id); if (!f) return;
+  let n = byId.get(nodeIdForFact(f));
+  if (!n){ const s = (f.sites || [])[0]; if (s) n = byId.get("mod:" + s.file) || byId.get("file:" + s.file); }
+  showView("mapView");
+  if (n){ if (!visible(n)){ st.groups[n.group] = 1; st.req[n.req] = 1; st.ev[n.ev] = 1; buildToggles(); start(.2); } select(n); centerOn(n); }
+}
+$("#ftbody").addEventListener("click", e => { const tr = e.target.closest("tr"); if (tr) openFact(tr.dataset.id); });
+$("#ftbody").addEventListener("keydown", e => { if (e.key === "Enter"){ const tr = e.target.closest("tr"); if (tr) openFact(tr.dataset.id); } });
+
+/* ---------------------------------------------------------------- docker plan */
+const human = k => String(k).replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+function inlineObj(o){
+  return Object.entries(o).filter(([, b]) => b != null && b !== "" && !(Array.isArray(b) && !b.length))
+    .map(([a, b]) => `<span class="kv">${esc(human(a))}:</span> ${esc(typeof b === "object" ? (Array.isArray(b) ? b.join(", ") : Object.entries(b).map(([x, y]) => x + " " + y).join(", ")) : String(b))}`).join("; ");
+}
+function renderVal(v){
+  const empty = v == null || (Array.isArray(v) && !v.length) || (typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length);
+  if (empty) return `<p class="muted">Nothing found.</p>`;
+  if (typeof v !== "object") return `<p>${esc(String(v))}</p>`;
+  if (Array.isArray(v)) return "<ul>" + v.map(x => `<li>${typeof x === "object" && x ? inlineObj(x) : esc(String(x))}</li>`).join("") + "</ul>";
+  return "<ul>" + Object.entries(v).map(([a, b]) => {
+    let body;
+    if (b == null || b === "" || (Array.isArray(b) && !b.length)) body = `<span class="muted">none</span>`;
+    else if (Array.isArray(b) && b.every(x => typeof x !== "object")) body = esc(b.join(", "));
+    else if (typeof b === "object") body = renderVal(b);
+    else body = esc(String(b));
+    return `<li><span class="kv">${esc(human(a))}:</span> ${body}</li>`;
+  }).join("") + "</ul>";
+}
+function renderPlan(){
+  const el = $("#plan"), r = D && (D.recommendations || D.expected_docker_decisions);
+  let h = "";
+  const P = EXTRA.plan;
+  if (P){
+    h += `<h3>Step 4 plan (${esc(EXTRA.planName)}) - the Dockerfile X-Ray wrote</h3>` + renderVal({
+      "Base image": P.base_image && (P.base_image.choice + " - " + P.base_image.why),
+      "Linux packages": (P.apt_packages || []).map(a => `${a.installed_as || a.name}: ${a.why}`),
+      "pip install": P.pip_install, "Copied into the image": P.copy, "Volumes": P.volumes,
+      "Writable folders": P.writable_dirs, "Runs as": P.user && `${P.user.name} (uid ${P.user.uid})`,
+      "Command": P.cmd && P.cmd.join(" "), "Code changes required": P.code_changes_required});
+  }
+  if (D && D.runtime_adjustments && D.runtime_adjustments.length)
+    h += `<h3>What running the app added</h3>` + renderVal(D.runtime_adjustments);
+  if (D && !r && D.observations)
+    h += `<h3>What the run observed</h3>` + renderVal({"Env vars set but never read by the code": D.observations.env_set_but_not_read_by_code,
+      "Programs started by libraries": D.observations.binaries_run_by_libraries, "System": D.observations.system});
+  if (!r){ el.innerHTML = h || `<p class="muted">This file has no Docker recommendations.</p>`; return; }
+  const title = D.recommendations ? "Docker plan suggested by the static map" : "Expected Docker decisions from the answer key";
+  h += `<h3>${title}</h3><p class="muted">Each item is evidence to verify with a real build, not a final answer.</p>`;
+  for (const [k, v] of Object.entries(r)) h += `<h3>${esc(human(k))}</h3>` + renderVal(v);
+  el.innerHTML = h;
+}
+
+/* ---------------------------------------------------------------- entry tree (same rules as xray_needs.py) */
+const BUNDLES = [
+  ["camera","Cameras & video streams","where frames come from"],
+  ["screen","Screen / windows","imshow & co. - a container has no screen"],
+  ["model","Model files","weights the code loads"],
+  ["data","Data files read","images, json, csv, videos"],
+  ["writes","Files written","outputs the code saves"],
+  ["env","Environment variables","settings read from the environment"],
+  ["network","Network: databases, APIs, URLs","things it connects to"],
+  ["packages","Python packages","pip installs"],
+  ["system","System: Linux, programs, GPU, threads","what the OS must provide"],
+  ["config","Config files","yml / ini / toml / .env"],
+  ["side","Library side effects","caches, temp files, env reads done by libraries - not your code"],
+  ["problems","Check these","hardcoded values, secrets, missing files, name clashes"]];
+const BTITLE = Object.fromEntries(BUNDLES.map(b => [b[0], b[1]]));
+const COLLAPSED = new Set(["packages", "side"]);
+const CONFIG_EXT = [".yml",".yaml",".ini",".toml",".cfg",".conf",".env",".properties"];
+const SYSTEM_CATS = new Set(["native_library","system_package_candidate","subprocess_binary","os_data","gpu_usage",
+  "thread_config","multiprocessing","ipc_shared_memory","hardware_identity","device"]);
+const PROBLEM_CATS = new Set(["secret","hardcoded_config","dangling_reference","shadowing","packaging"]);
+const PROJECT_CATS = new Set(["unused_asset","duplicate_asset"]);
+const SIDE_PREFIXES = ["/root/","/home/","~/","/tmp","/var/","/proc/","/sys/","/dev/shm"];
+const OS_ENV = new Set(["HOME","PATH","USER","LOGNAME","LANG","LANGUAGE","PWD","SHELL","TERM","HOSTNAME","TZ","TMPDIR",
+  "TEMP","TMP","PYTHONPATH","PYTHONHASHSEED","LD_LIBRARY_PATH"]);
+const dtxt = f => Array.isArray(f.detail) ? f.detail.join(" ") : String(f.detail || "");
+const fromStatic = f => ("required_static" in f) ? f.required_static !== null : f.evidence !== "confirmed";
+function isCamera(f){
+  const s = String(f.subject || ""), c = f.category;
+  if (c === "device") return s.startsWith("/dev/video") || s.startsWith("camera:");
+  if (["network_endpoint","file_write","data_file_read"].includes(c))
+    return /^(rtsp|rtmp|rtp|udp|srt):\/\//.test(s) || dtxt(f).includes("VideoCapture");
+  return false;
+}
+function sideEffect(f){
+  const d = dtxt(f), s = String(f.subject || "");
+  if (f.category === "env_var") return d.includes("(read by ") || (OS_ENV.has(s) && !fromStatic(f));
+  if (f.category === "file_write") return !fromStatic(f) && (SIDE_PREFIXES.some(p => s.startsWith(p)) || s === "/tmp");
+  return false;
+}
+const setByCode = f => f.mechanism === "env_set" || dtxt(f).includes("set by the code at runtime");
+function bundleOf(f){
+  const c = f.category, s = String(f.subject || "");
+  if (c === "local_module" || c === "stdlib_import") return null;
+  if (c === "dynamic_import") return s.startsWith("<") ? "problems" : null;
+  if (isCamera(f)) return "camera";
+  if (sideEffect(f)) return "side";
+  if (c === "gui_usage") return "screen";
+  if (c === "model_file") return "model";
+  if (c === "data_file_read" || c === "config_file") return CONFIG_EXT.some(e => s.toLowerCase().endsWith(e)) ? "config" : "data";
+  if (c === "file_write") return "writes";
+  if (c === "env_var") return "env";
+  if (["network_endpoint","listen_port","runtime_download"].includes(c)) return "network";
+  if (c === "third_party_import") return "packages";
+  if (SYSTEM_CATS.has(c)) return "system";
+  if (PROBLEM_CATS.has(c)) return "problems";
+  if (PROJECT_CATS.has(c)) return null;
+  return "system";
+}
+const usedF = f => f.required_at_runtime === "yes" || f.required_at_runtime === "conditional" || ["seen","new"].includes(runOf(f));
+const treeSt = {all:false};
+function entryList(){ return (D.entrypoints || []).map(e => typeof e === "string" ? e : e.path).filter(Boolean); }
+
+function renderProgress(){
+  const s1 = D && (D.tool === "xray-static" || D.tool === "xray-merged" || D.answer_key_version || D.fixture_id);
+  const s2 = D && (D.tool === "xray-merged" || D.tool === "xray-trace");
+  const steps = [
+    [s1, "Step 1 - read the code", s1 ? EXTRA.mainName : "python3 xray_static.py ..."],
+    [s2, "Step 2 - watched it run", s2 ? (D.tool === "xray-merged" ? "merged with step 1" : EXTRA.mainName) : "xray_trace.py run / facts / merge"],
+    [!!EXTRA.pkg, "Step 3 - packages", EXTRA.pkg ? EXTRA.pkgName : "xray_pkg.py facts -> X-pkg.json"],
+    [!!EXTRA.plan, "Step 4 - slim Dockerfile", EXTRA.plan ? EXTRA.planName : "xray_plan.py plan -> plans/X/plan.json"]];
+  $("#progress").innerHTML = steps.map(([ok, t, fn]) =>
+      `<div class="step${ok ? " done" : ""}"><b>${esc(t)}</b><span class="fn" title="${esc(fn)}">${esc(ok ? fn : "not loaded: " + fn)}</span></div>`).join("") +
+    `<label><input type="checkbox" id="tAll" ${treeSt.all ? "checked" : ""}> also show what the entry point never uses</label>`;
+  $("#tAll").onchange = e => { treeSt.all = e.target.checked; renderTree(); };
+}
+
+function renderTree(){
+  if (!D) return;
+  renderProgress();
+  const all = treeSt.all, fs = [...facts.values()].filter(f => !f.negative);
+  const g = D.graph || {nodes:[], edges:[]};
+  const kids = new Map();
+  for (const e of g.edges || []){
+    if (e.type !== "import" || !String(e.source).startsWith("mod:") || !String(e.target).startsWith("mod:")) continue;
+    if (!all && e.required === "no") continue;
+    const s = e.source.slice(4), t = e.target.slice(4);
+    if (!kids.has(s)) kids.set(s, new Set()); kids.get(s).add(t);
+  }
+  const perFile = new Map(), project = [];
+  for (const f of fs){
+    if (PROJECT_CATS.has(f.category)){ project.push(f); continue; }
+    const b = bundleOf(f);
+    if (!b || (!all && !usedF(f))) continue;
+    const files = [...new Set((f.sites || []).map(x => x.file).filter(x => x && x.endsWith(".py")))];
+    if (!files.length){ project.push(f); continue; }
+    for (const fn of files){
+      if (!perFile.has(fn)) perFile.set(fn, new Map());
+      const m = perFile.get(fn); if (!m.has(b)) m.set(b, []); m.get(b).push(f);
+    }
+  }
+  const shown = new Set();
+  const item = (f, fn) => {
+    const lines = (f.sites || []).filter(x => x.file === fn && x.line).map(x => x.line);
+    return `<li><button type="button" data-fact="${esc(f.id)}" title="${esc(dtxt(f) || f.docker_implication || "")}">${esc(String(f.subject))}</button>` +
+      (lines.length ? `<span class="ln">line ${lines.slice(0, 4).join(", ")}</span>` : "") +
+      (f.required_at_runtime === "conditional" ? `<span class="pill req-conditional">maybe</span>` : f.required_at_runtime === "no" ? `<span class="pill req-no">not needed</span>` : "") +
+      runPill(f) + `</li>`;
+  };
+  const bundleHtml = (b, list, fn) => {
+    const [, title, sub] = BUNDLES.find(x => x[0] === b);
+    const head = `<span>${esc(title)}</span><span class="muted">${list.length} - ${esc(sub)}</span>`;
+    const body = `<ul class="items">${list.map(f => item(f, fn)).join("")}</ul>`;
+    return COLLAPSED.has(b) && list.length > 3
+      ? `<details class="bundle" style="--c:var(--b-${b})"><summary class="bhead">${head}</summary>${body}</details>`
+      : `<div class="bundle" style="--c:var(--b-${b})"><div class="bhead">${head}</div>${body}</div>`;
+  };
+  const nodeHtml = (fn, depth, path) => {
+    if (path.has(fn)) return `<div class="tref">${esc(fn)} - imports back (see above)</div>`;
+    if (shown.has(fn)) return `<div class="tref">${esc(fn)} - see above</div>`;
+    shown.add(fn);
+    const m = perFile.get(fn) || new Map(), p2 = new Set(path).add(fn);
+    const ch = [...(kids.get(fn) || [])].sort().filter(k => !(k.endsWith("__init__.py") && !perFile.has(k) && !kids.has(k)));
+    const chips = BUNDLES.filter(([b]) => m.has(b)).map(([b, t]) =>
+      `<span class="chip" title="${esc(t)}" style="--c:var(--b-${b})"><span class="dot"></span>${m.get(b).length}</span>`).join("");
+    const body = BUNDLES.filter(([b]) => m.has(b)).map(([b]) => bundleHtml(b, m.get(b), fn)).join("") +
+      ch.map(k => nodeHtml(k, depth + 1, p2)).join("");
+    return `<details class="tnode" ${depth < 2 ? "open" : ""}><summary><span class="tfile">${esc(fn)}</span>` +
+      (depth === 0 ? `<span class="tentry">entry point</span>` : "") + `<span class="tchips">${chips}</span></summary>` +
+      `<div class="tbody">${body || `<p class="muted" style="font-size:12.5px;margin:4px 0">nothing to show here</p>`}</div></details>`;
+  };
+  const eps = entryList();
+  let h = `<p class="muted" style="margin:0 0 10px;font-size:13px">Each file shows what <b>that file</b> does, grouped by colour; the files it imports are nested below it.
+    Click an item to see it on the map. ${all ? "" : "Only what the entry point uses is shown."}</p>`;
+  h += eps.length ? eps.map(e => nodeHtml(e, 0, new Set())).join("") : `<p class="muted">This file lists no entry points.</p>`;
+  const unused = project.filter(f => f.category === "unused_asset");
+  if (unused.length) h += `<details class="bundle" style="--c:var(--b-side);margin-top:18px"><summary class="bhead"><span>Not used by this entry point</span><span class="muted">${unused.length} - left out of the image</span></summary><ul class="items">${unused.map(f => item(f, null)).join("")}</ul></details>`;
+  const other = project.filter(f => f.category !== "unused_asset" && f.category !== "duplicate_asset" && bundleOf(f));
+  if (other.length) h += `<details class="bundle" style="--c:var(--b-problems)"><summary class="bhead"><span>Project-level findings</span><span class="muted">${other.length} - requirements, duplicates, not tied to one file</span></summary><ul class="items">${other.map(f => item(f, null)).join("")}</ul></details>`;
+  $("#tree").innerHTML = h;
+  $("#tree").querySelectorAll("button[data-fact]").forEach(b => b.onclick = () => openFact(b.dataset.fact));
+  renderNeeds(fs.filter(usedF));
+}
+
+function renderNeeds(use){
+  const site = f => (f.sites || []).filter(x => x.line).slice(0, 2).map(x => `${x.file}:${x.line}`).join(", ");
+  const box = (b, k, v, w) => `<div class="need"><div class="k" style="--c:var(--b-${b})"><span class="dot"></span>${esc(k)}</div>` +
+    (v ? `<div class="v">${v}</div>` : "") + (w ? `<div class="w">${w}</div>` : "") + `</div>`;
+  let h = `<h3>To run it in a container, you provide</h3><p class="muted" style="font-size:12.5px;margin:0 0 8px">From what the entry point uses. Nothing here is run for you.</p>`;
+  let n = 0;
+  const cams = new Map();
+  for (const f of use.filter(isCamera)){
+    const s = String(f.subject);
+    if (s.startsWith("/dev/video") || s.startsWith("camera:")){
+      const i = s.replace(/\D/g, "") || "0";
+      cams.set("w" + i, box("camera", `camera - webcam ${i}`, esc(site(f)),
+        `Linux: <code>--device /dev/video${i}</code><br>Windows / Docker Desktop has no webcam: trace with <code>--camera ${i}=/data/your_video.mp4</code>`));
+    } else if (s.includes("<") || f.mechanism === "data_driven"){
+      const m = dtxt(f).match(/seed data lists (.*?)(;|$)/);
+      const urls = m ? [...new Set(m[1].match(/[a-z]+:\/\/[^\s,;()]+/g) || [])] : [];
+      cams.set("c" + site(f), box("camera", "camera - URL computed at runtime", esc(s) + " - " + esc(site(f)),
+        urls.length ? `${urls.length} URLs found in the project's data files (e.g. DB seed): ${urls.slice(0, 4).map(u => `<code>${esc(u)}</code>`).join(" ")}` :
+                      "the source is a variable (a list, a config, a DB row...): look at that line"));
+    } else {
+      const host = s.replace(/^[a-z]+:\/\/([^/@]*@)?/, "").split("/")[0].split(":")[0];
+      const local = ["localhost","127.0.0.1","0.0.0.0"].includes(host);
+      cams.set("s" + s, box("camera", "camera - stream", esc(s) + " - " + esc(site(f)),
+        local ? "localhost inside a container is the container itself: use the host's IP / host.docker.internal" :
+                "nothing to pass: the container reaches it over the network like any program"));
+    }
+  }
+  for (const v of cams.values()){ h += v; n++; }
+  const gui = use.filter(f => f.category === "gui_usage");
+  if (gui.length){
+    const maybe = gui.every(f => f.required_at_runtime !== "yes") && !gui.some(f => runOf(f) === "seen");
+    h += box("screen", "screen" + (maybe ? " (maybe)" : ""), esc([...new Set(gui.map(f => f.subject))].join(", ")),
+      `trace: <code>--gui off</code> (X-Ray saves the shown frames to &lt;trace&gt;/gui/)<br>real window on Linux: <code>-e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix</code>`); n++;
+  }
+  const envs = new Map(), codeSets = new Set();
+  for (const f of use.filter(f => f.category === "env_var" && !sideEffect(f))){
+    if (setByCode(f)){ codeSets.add(f.subject); continue; }
+    if (!envs.has(f.subject)) envs.set(f.subject, f);
+  }
+  if (envs.size){
+    const rows = [...envs].map(([name, f]) => {
+      const d = f.default, has = d != null && d !== "", must = !has && f.required_at_runtime === "yes";
+      return `<div title="${esc(site(f))}"><code>-e ${esc(name)}=${esc(has ? d : "<value>")}</code>${must ? " <b>must set - no default in the code</b>" : ""}</div>`;
+    });
+    const musts = [...envs.values()].filter(f => (f.default == null || f.default === "") && f.required_at_runtime === "yes").length;
+    h += box("env", `env vars (${envs.size})`, rows.join(""),
+      (musts ? `${musts} must be set. ` : "") + "The rest have a default in the code: pass them only to change it (the value shown is the code default). Hover a line to see where it is read."); n++;
+  }
+  if (codeSets.size) h += `<p class="muted" style="font-size:12.5px">Env the code sets itself (nothing to pass): ${esc([...codeSets].join(", "))}</p>`;
+  const changes = [];
+  for (const f of use){
+    const c = f.category, s = String(f.subject);
+    if (["network_endpoint","listen_port","runtime_download"].includes(c) && !isCamera(f)){
+      h += box("network", {network_endpoint:"connects to", listen_port:"listens on", runtime_download:"downloads"}[c], esc(s), esc(f.docker_implication || "")); n++;
+      if (c === "listen_port" && /^(127\.0\.0\.1|localhost):/.test(s))
+        changes.push(`${s} (${site(f)}): only reachable from inside its own container - bind 0.0.0.0 or read the host from an env var`);
+    }
+    if ((c === "secret" || c === "hardcoded_config") && f.docker_implication) changes.push(`${s}: ${f.docker_implication}`);
+  }
+  const models = [...new Set(use.filter(f => f.category === "model_file").map(f => String(f.subject)))];
+  for (const m of models){ h += box("model", "model", esc(m), "must be inside the image (COPY) or mounted"); n++; }
+  const data = [...new Set(use.filter(f => ["data_file_read","config_file"].includes(f.category) && !String(f.subject).startsWith("<")).map(f => String(f.subject)))].filter(x => !models.includes(x));
+  for (const m of data){ h += box(bundleOf({category:"data_file_read", subject:m}), "data", esc(m), "must be inside the image or mounted"); n++; }
+  const ws = [...new Set(use.filter(f => f.category === "file_write" && !sideEffect(f)).map(f => String(f.subject)))].sort(), roots = [];
+  for (const w of ws) if (!roots.some(r => w === r || w.startsWith(r.replace(/\/$/, "") + "/"))) roots.push(w);
+  for (const r of roots){
+    const k = ws.filter(w => w !== r && w.startsWith(r.replace(/\/$/, "") + "/")).length;
+    h += box("writes", "writes", esc(r) + (k ? ` <span class="muted">(+${k} inside)</span>` : ""), "mount it with <code>-v</code> to keep the files; the folder must be writable"); n++;
+  }
+  const gpu = use.filter(f => f.category === "gpu_usage");
+  if (gpu.length){
+    const need = gpu.some(f => f.required_at_runtime === "yes" && !["gpu_probe","env_default","provider_string"].includes(f.mechanism));
+    h += box("system", "GPU", "", need ? "<b>required</b>" : "optional - the code checks for one and falls back to the CPU; no <code>--gpus</code> needed"); n++;
+  }
+  const sys = [...new Set(use.filter(f => ["subprocess_binary","system_package_candidate","ipc_shared_memory"].includes(f.category)).map(f => String(f.subject)))];
+  if (sys.length){ h += box("system", "system", esc(sys.join(", ")), "Linux packages / programs / shared memory the image must provide"); n++; }
+  if (!n) h += `<p class="muted">Nothing: it runs with no inputs.</p>`;
+  h += `<h3 class="sub">Code changes needed</h3>` + (changes.length ? `<ul style="padding-left:18px;margin:4px 0;font-size:13px">${[...new Set(changes)].map(c => `<li>${esc(c)}</li>`).join("")}</ul>` : `<p class="muted" style="margin:4px 0">None found.</p>`);
+  if (EXTRA.pkg){
+    const rp = EXTRA.pkg.requirements_plan || {}, sm = EXTRA.pkg.summary || {};
+    const big = ((EXTRA.pkg.observations || {}).largest_python_packages || []).slice(0, 5);
+    h += `<h3 class="sub">Step 3: packages</h3>` + renderVal({
+      "Keep": rp.keep, "Remove": (rp.remove || []).map(x => typeof x === "object" ? `${x.name} - ${x.why}` : x),
+      "Swap": (rp.swap || []).map(x => typeof x === "object" ? `${x.name || x.from} - ${x.why || ""}` : x), "Add": rp.add,
+      "Python packages installed": sm.python_packages_bytes ? (sm.python_packages_bytes / 1e9).toFixed(2) + " GB" : null,
+      "Linux packages the full image has but slim does not": sm.apt_packages_not_in_slim_kb ? (sm.apt_packages_not_in_slim_kb / 1e6).toFixed(2) + " GB" : null,
+      "Largest": big.map(x => typeof x === "object" ? `${x.name} ${x.mb != null ? x.mb + " MB" : x.size_mb != null ? x.size_mb + " MB" : ""}` : x)});
+  }
+  if (EXTRA.plan){
+    const P = EXTRA.plan;
+    h += `<h3 class="sub">Step 4: the slim Dockerfile</h3>` + renderVal({"Base": P.base_image && P.base_image.choice,
+      "Linux packages": (P.apt_packages || []).map(a => a.installed_as || a.name), "pip": P.pip_install, "Copies": P.copy,
+      "Runs as": P.user && P.user.name}) + `<p class="muted" style="font-size:12.5px">Details: Docker plan tab.</p>`;
+  }
+  $("#needs").innerHTML = h;
+}
+
+/* ---------------------------------------------------------------- tabs */
+function showView(id){
+  document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.view === id ? "true" : "false"));
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("on", v.id === id));
+  if (id === "mapView") requestAnimationFrame(() => { resize(); if (!userMoved && nodes.length){ fit(); draw(); } });
+}
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => showView(b.dataset.view));
+renderDetails();
+})();
+</script>
+</body>
+</html>
