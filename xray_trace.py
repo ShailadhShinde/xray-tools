@@ -1773,6 +1773,9 @@ def adjustments(merged, rt):
 
 # ============================================================================ main
 def main(argv=None):
+    for _s in (sys.stdout, sys.stderr):   # Windows consoles / pipes: never crash on tree characters or paths
+        if hasattr(_s, "reconfigure"):
+            _s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="X-Ray Phase 2 runtime tracer")
     sub = ap.add_subparsers(dest="cmd_name", required=True)
     r = sub.add_parser("run", help="(in the container) run the app under the tracer")

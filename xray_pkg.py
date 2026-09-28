@@ -880,6 +880,9 @@ def cmd_facts(a):
 
 
 def main(argv=None):
+    for _s in (sys.stdout, sys.stderr):   # Windows consoles / pipes: never crash on tree characters or paths
+        if hasattr(_s, "reconfigure"):
+            _s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="X-Ray Phase 3 package analyzer")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("scan", help="(inside the app image) inventory of installed packages and project files")

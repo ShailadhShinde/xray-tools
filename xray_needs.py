@@ -21,7 +21,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -400,6 +400,9 @@ def print_needs(nd, out=print):
 
 
 def main():
+    for _s in (sys.stdout, sys.stderr):   # Windows consoles / pipes: never crash on tree characters or paths
+        if hasattr(_s, "reconfigure"):
+            _s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("json", help="an X-Ray output: static map, merged map or runtime facts")
     ap.add_argument("--all", action="store_true", help="also show what the entry point never uses")
@@ -425,7 +428,7 @@ def main():
         print(f"\nNOT USED BY THIS ENTRY POINT ({len(unused)}): " + ", ".join(str(x["subject"]) for x in unused[:12])
               + (" ..." if len(unused) > 12 else "") + "   -> left out of the image")
     if a.out:
-        json.dump(r, open(a.out, "w"), indent=1)
+        json.dump(r, open(a.out, "w", encoding="utf-8"), indent=1)
         print(f"\n-> {a.out}")
 
 

@@ -713,6 +713,9 @@ def cmd_verify(a):
 
 
 def main(argv=None):
+    for _s in (sys.stdout, sys.stderr):   # Windows consoles / pipes: never crash on tree characters or paths
+        if hasattr(_s, "reconfigure"):
+            _s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="X-Ray Phase 4 planner")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan")

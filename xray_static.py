@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-VERSION = "0.5.5"
+VERSION = "0.5.6"
 PLACE = "<var>"
 REQ = {"no": 0, "conditional": 1, "yes": 2}
 
@@ -459,8 +459,17 @@ def as_int(p):
         return None
     try:
         return int(float(p.t))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # float("inf") / float("nan") are numbers, not ints
         return None
+
+
+def lit_key(fv):
+    """a folded literal as a dict key / argument value: 3.0 -> 3; inf, nan and text stay text"""
+    if fv.num:
+        i = as_int(fv)
+        if i is not None:
+            return i
+    return fv.t
 
 
 DOTTED_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
@@ -671,6 +680,13 @@ class Folder:
             return self.fold_call(node, d)
         if isinstance(node, ast.Subscript):
             return self.fold_subscript(node, d)
+        if isinstance(node, ast.IfExp):
+            # int(SRC) if SRC.isdigit() else SRC: when only one side folds, it is the likely value (not exact)
+            a, b = self.fold(node.body, d + 1), self.fold(node.orelse, d + 1)
+            if a is not None and b is not None:
+                return a if (a.t, a.exact) == (b.t, b.exact) else None
+            p = a if a is not None else b
+            return FV(p.t, False, p.origin, p.envs, p.num) if p is not None else None
         return None
 
     def fold_name(self, n, d):
@@ -1686,6 +1702,8 @@ class ModuleVisitor(ast.NodeVisitor):
             self.consume(argnode)
         if fv is None:
             fv = FV(PLACE, False)
+        if op == "write" and fv.exact and not fv.t.strip():
+            return None   # SAVE_VIDEO = "": an empty path means the feature is switched off
         if re.match(r"^[A-Za-z][A-Za-z0-9+.\-]{1,15}://", fv.t):
             return None   # a URL, not a local path (the network handlers report it)
         info = self.m.classify_path(fv)
@@ -2534,7 +2552,7 @@ class CallGraphBuilder(ast.NodeVisitor):
         else:
             fv = Folder(self.m, self.mod).fold(key)
             if fv is not None and fv.exact and not fv.origin:
-                e["key"] = int(float(fv.t)) if fv.num else fv.t
+                e["key"] = lit_key(fv)
         self.m.cg_lookups.append(e)
 
     KEY_ONLY_FUNCS = {"len", "list", "sorted", "set", "tuple", "str", "repr", "frozenset"}
@@ -2576,7 +2594,7 @@ class CallGraphBuilder(ast.NodeVisitor):
             return ("param", d[0], d[1])
         fv = Folder(self.m, self.mod).fold(a)
         if fv is not None and fv.exact and not fv.origin:
-            return ("lit", int(float(fv.t)) if fv.num else fv.t)
+            return ("lit", lit_key(fv))
         return ("top",)
 
     def argmap(self, node, callee):
@@ -4714,6 +4732,9 @@ class Mapper:
 
 # =============================================================== cli
 def main(argv=None):
+    for _s in (sys.stdout, sys.stderr):   # Windows consoles / pipes: never crash on tree characters or paths
+        if hasattr(_s, "reconfigure"):
+            _s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="X-Ray static mapper (Phase 1): map a Python project without running it.")
     ap.add_argument("--root", required=True, help="project root folder")
     ap.add_argument("--entry", action="append", required=True, help="entrypoint path relative to --root (repeatable)")

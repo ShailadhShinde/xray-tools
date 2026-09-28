@@ -26,6 +26,12 @@ Read this guide once from top to bottom before you start. Then follow it step by
 This guide writes `python3`; change it if you are on Windows.
 Check it works: `python3 --version` must print 3.8 or newer. X-Ray needs nothing else (no pip install).
 
+**Windows PowerShell:** run this once in each new PowerShell window, so the tree lines (`├─`) show correctly
+in the window and in log files:
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+```
+
 ---
 
 ## 1. Get the tools (once per machine)

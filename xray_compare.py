@@ -495,6 +495,9 @@ def cmd_grade(a):
 
 
 def main(argv=None):
+    for _s in (sys.stdout, sys.stderr):   # Windows consoles / pipes: never crash on tree characters or paths
+        if hasattr(_s, "reconfigure"):
+            _s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="X-Ray Phase 5 comparator")
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("compare")
