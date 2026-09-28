@@ -406,8 +406,10 @@ function load(data, name){
     .map(e => ({...e, s:byId.get(e.source), t:byId.get(e.target)}));
   adj = new Map(nodes.map(n => [n.id, new Set()]));
   for (const e of edges){ e.s.deg++; e.t.deg++; adj.get(e.s.id).add(e.t.id); adj.get(e.t.id).add(e.s.id); }
+  const incoming = new Map(nodes.map(n => [n, []]));
+  for (const e of edges) incoming.get(e.t).push(e);
   for (const n of nodes){
-    const inc = edges.filter(e => e.t === n);
+    const inc = incoming.get(n);
     if (n.type === "module"){ n.req = n.required || (inc.length ? maxReq(inc) : "yes"); n.ev = "static"; }
     else {
       n.req = inc.length ? maxReq(inc) : (reqOfSubjectFact(n) || "conditional");
@@ -530,11 +532,12 @@ function seed(){
 }
 function tick(){
   const cell = 110, grid = new Map(), vis = nodes.filter(visible);
-  for (const n of vis){ const k = Math.floor(n.x / cell) + "," + Math.floor(n.y / cell); (grid.get(k) || grid.set(k, []).get(k)).push(n); }
+  const key = (x, y) => (x + 32768) * 65536 + (y + 32768);   // number keys: no strings to garbage-collect
+  for (const n of vis){ const k = key(Math.floor(n.x / cell), Math.floor(n.y / cell)); (grid.get(k) || grid.set(k, []).get(k)).push(n); }
   for (const n of vis){
     const cx = Math.floor(n.x / cell), cy = Math.floor(n.y / cell);
     for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++){
-      const arr = grid.get((cx + i) + "," + (cy + j)); if (!arr) continue;
+      const arr = grid.get(key(cx + i, cy + j)); if (!arr) continue;
       for (const m of arr){
         if (m === n) continue;
         let dx = n.x - m.x, dy = n.y - m.y, d2 = dx * dx + dy * dy;
@@ -548,28 +551,43 @@ function tick(){
     if (!visible(e.s) || !visible(e.t)) continue;
     const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
     const L = (e.s.group === "code" && e.t.group === "code") ? 75 : 52;
-    const f = (d - L) / d * 0.07 * alpha, fx = dx * f, fy = dy * f;
-    e.s.vx += fx; e.s.vy += fy; e.t.vx -= fx; e.t.vy -= fy;
+    // a dot with many links (a package every file imports) moves less per link, as in d3-force:
+    // without this, hubs with hundreds of links overshoot and the layout blows up (blank map)
+    const f = (d - L) / d * 0.14 * alpha, fx = dx * f, fy = dy * f;
+    const bs = e.t.deg / (e.s.deg + e.t.deg), bt = 1 - bs;
+    e.s.vx += fx * bs; e.s.vy += fy * bs; e.t.vx -= fx * bt; e.t.vy -= fy * bt;
   }
   for (const n of vis){
     if (n.fixed){ n.vx = n.vy = 0; continue; }
     n.vx -= n.x * 0.005 * alpha; n.vy -= n.y * 0.005 * alpha;
-    n.vx *= 0.6; n.vy *= 0.6; n.x += n.vx; n.y += n.vy;
+    n.vx *= 0.6; n.vy *= 0.6;
+    const sp = Math.hypot(n.vx, n.vy);
+    if (sp > 40){ n.vx *= 40 / sp; n.vy *= 40 / sp; }     // speed limit: no dot jumps more than 40 px a step
+    n.x += n.vx; n.y += n.vy;
   }
 }
+// big graphs (hundreds of visible dots): cool faster, and redraw a few times a second instead of every frame -
+// drawing thousands of lines per frame is what made the Map tab slow on large projects
+let visCount = 0, lastDraw = 0;
+const cooling = () => visCount > 700 ? 0.97 : 0.985;
+const mapShown = () => $("#mapView").classList.contains("on");
 function start(a){
   alpha = Math.max(alpha, a);
+  visCount = nodes.reduce((c, n) => c + (visible(n) ? 1 : 0), 0);
   if (reduceMotion.matches){
-    for (let i = 0; i < 500 && alpha > 0.01; i++){ tick(); alpha *= 0.985; }
+    for (let i = 0; i < 500 && alpha > 0.01; i++){ tick(); alpha *= cooling(); }
     alpha = 0; if (fitPending && !userMoved){ fit(); fitPending = false; } draw(); return;
   }
   if (!running){ running = true; requestAnimationFrame(loop); }
 }
 function loop(){
-  for (let i = 0; i < 3; i++){ tick(); alpha *= 0.985; }
+  const t0 = performance.now();
+  do { tick(); alpha *= cooling(); } while (alpha >= 0.012 && performance.now() - t0 < 12);
   if (fitPending && !userMoved && (alpha < 0.3 || alpha < 0.012)) fit();
   if (alpha < 0.012){ running = false; alpha = 0; if (fitPending && !userMoved) fit(); fitPending = false; draw(); return; }
-  draw(); requestAnimationFrame(loop);
+  const now = performance.now();
+  if (mapShown() && (visCount <= 400 || now - lastDraw > 120)){ draw(); lastDraw = now; }
+  requestAnimationFrame(loop);
 }
 function fit(){
   const vs = nodes.filter(visible); if (!vs.length || !W) return;

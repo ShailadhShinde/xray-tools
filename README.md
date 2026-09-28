@@ -12,7 +12,7 @@ Python standard library only (Python 3.8+). Nothing to install.
 | 4 | `xray_plan.py plan` / `verify` | your machine | writes a slim Dockerfile, .dockerignore and compose override; checks the new image behaves the same |
 | 5 | `xray_compare.py` | your machine | several projects: one shared base image |
 
-Open `xray_viewer.html` in a browser and load any of the JSON files to look at them.
+See results in the browser: `python3 xray_view.py app.json` (writes and opens `app.view.html` with the file built in).
 
 ## Step 1 (safe: reads files only)
 ```
