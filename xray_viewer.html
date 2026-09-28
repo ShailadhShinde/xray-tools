@@ -1114,7 +1114,13 @@ function showView(id){
 }
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => showView(b.dataset.view));
 renderDetails();
+/* ---------------------------------------------------------------- files built in by xray_view.py */
+// xray_view.py sets window.XRAY_EMBEDDED = [{name, json}, ...] in the head of a copy of this page,
+// so it opens with the files already loaded (for browsers / PCs where the file picker is blocked).
+if (Array.isArray(window.XRAY_EMBEDDED) && window.XRAY_EMBEDDED.length)
+  readFiles(window.XRAY_EMBEDDED.map(e => ({name: e.name, text: async () => JSON.stringify(e.json)})));
 })();
+
 </script>
 </body>
 </html>

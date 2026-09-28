@@ -161,8 +161,14 @@ out of the slim image. Check: is anything here actually used (e.g. started by an
 script is another entry point - add it with `--entry`.
 
 ### 3.4 Look at it in the viewer (optional but easier)
-Open `xray_viewer.html` in Chrome / Edge (double-click it; from WSL: `explorer.exe .` first).
-Click **Open files...** and choose `app.json`.
+```bash
+python3 xray_view.py app.json
+```
+This writes `app.view.html` (a copy of the viewer with `app.json` built in) and opens it in the browser.
+Nothing to upload or pick: the page opens already loaded. If it does not open by itself, double-click
+`app.view.html`. Later, put all of a project's files in one page:
+`python3 xray_view.py app.json app-merged.json app-pkg.json plans/app/plan.json`.
+(You can also double-click `xray_viewer.html` and use **Open files...**, if your browser allows it.)
 - **Entry tree**: the same tree, clickable, colour groups per file, and the "to run it in a container" box.
 - **Map**: the whole project as a graph. Hollow shapes = not needed.
 - **Facts**: every finding in a table; click one to see the file and line.
