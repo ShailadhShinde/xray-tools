@@ -33,7 +33,7 @@ import sys
 import time
 from collections import defaultdict
 
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK_DIR = os.path.join(HERE, "xray_hook")
 
@@ -660,8 +660,25 @@ class Builder:
             info[pid] = {"pid": pid, "ppid": st.get("ppid"), "role": role, "argv": argv[:6],
                          "clean_exit": ex is not None, "uid": st.get("uid"),
                          "torch_threads": (ex or {}).get("torch_threads"), "cv2_threads": (ex or {}).get("cv2_threads"),
-                         "mp_start_method": (ex or {}).get("mp_start_method")}
+                         "mp_start_method": (ex or {}).get("mp_start_method"),
+                         "peak_rss_mb": (ex or {}).get("peak_rss_mb"), "cpu_s": (ex or {}).get("cpu_s"),
+                         "wall_s": (ex or {}).get("wall_s"), "gpu_peak_mb": (ex or {}).get("gpu_peak_mb")}
         return info
+
+    def resources(self):
+        """What the run cost: RAM / CPU / torch GPU memory per process and in total (compare a GPU and a CPU run)."""
+        ps = [p for p in self.procs.values() if p.get("peak_rss_mb") is not None]
+        if not ps:
+            return None
+        wall = max((p.get("wall_s") or 0) for p in ps)
+        cpu = round(sum(p.get("cpu_s") or 0 for p in ps), 1)
+        out = {"processes": len(ps), "peak_ram_mb_sum": round(sum(p["peak_rss_mb"] for p in ps), 1),
+               "peak_ram_mb_max": max(p["peak_rss_mb"] for p in ps), "cpu_s": cpu, "wall_s": wall,
+               "avg_cpu_cores_busy": round(cpu / wall, 2) if wall else None,
+               "gpu_peak_mb_torch": round(sum(p.get("gpu_peak_mb") or 0 for p in ps), 1) or None,
+               "per_process": [{k: p.get(k) for k in ("pid", "role", "peak_rss_mb", "cpu_s", "wall_s", "gpu_peak_mb")}
+                               for p in sorted(ps, key=lambda p: p["pid"])]}
+        return out
 
     def role(self, pid):
         return self.procs.get(pid, {}).get("role", "?")
@@ -1432,6 +1449,7 @@ class Builder:
                             "processes": len(self.procs), "exit_code": self.run.get("exit_code"),
                             "traces": len(self.runs)},
                 "facts": facts, "processes": sorted(self.procs.values(), key=lambda p: p["pid"]),
+                "resources": self.resources(),
                 "coverage": self.coverage(), "observations": self.observations(), "warnings": self.warnings}
 
 
@@ -1719,6 +1737,8 @@ def cmd_merge(a):
     out["sources"] = {"static": f"{st.get('tool')} {st.get('version')}", "runtime": f"{rt.get('tool')} {rt.get('version')}",
                       "scenario": rt.get("scenario")}
     out["facts"] = merged
+    if rt.get("resources"):
+        out["resources"] = rt["resources"]
     lab = defaultdict(int)
     for f in merged:
         lab[f["label"]] += 1

@@ -21,7 +21,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -297,8 +297,8 @@ def needs(d, facts, show_all):
                                                                                           "provider_string") for f in gpu)
         out["system"].append(("GPU: wanted, no CPU fallback in the code - run with --gpus all (+ onnxruntime-gpu / CUDA torch); "
                                "without a GPU onnxruntime usually falls back to the CPU with a warning (Step 2 shows which ran) - "
-                               if need else "GPU: optional - the code checks for one and falls back "
-                              "to the CPU; no --gpus needed. ") + f"({len(gpu)} places, e.g. {gpu[0]['subject']})")
+                               if need else "GPU: used when available (the code falls back to the CPU without one) - "
+                              "on a GPU machine build a GPU image and run with --gpus all. ") + f"({len(gpu)} places, e.g. {gpu[0]['subject']})")
     for k in ("models", "data", "writes", "system", "code_changes"):
         out[k] = sorted(set(out[k]))
     out["data"] = [x for x in out["data"] if x not in out["models"]]
@@ -425,6 +425,14 @@ def main():
     if not r["tree"]:
         print("(no entry points in this file)")
     print_needs(r["needs"])
+    res = d.get("resources")
+    if res:
+        print("\nWHAT THE RUN USED (whole run, all processes)")
+        print(f"  RAM      {res['peak_ram_mb_sum']:.0f} MB peak (sum of {res['processes']} process(es); largest one "
+              f"{res['peak_ram_mb_max']:.0f} MB)")
+        print(f"  CPU      {res['cpu_s']} CPU-seconds in {res['wall_s']} s = {res.get('avg_cpu_cores_busy')} cores busy on average")
+        print("  GPU      " + (f"{res['gpu_peak_mb_torch']:.0f} MB reserved by torch" if res.get("gpu_peak_mb_torch")
+                               else "torch did not use the GPU (onnxruntime GPU memory is not measured: watch nvidia-smi)"))
     unused = [x for x in r["project"] if x["category"] == "unused_asset"]
     if unused:
         print(f"\nNOT USED BY THIS ENTRY POINT ({len(unused)}): " + ", ".join(str(x["subject"]) for x in unused[:12])

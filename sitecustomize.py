@@ -1093,6 +1093,23 @@ def _install():
             except OSError:
                 pass
             info = {"k": "exit", "libs": libs, "cpu_count": os.cpu_count()}
+            try:   # resources used by this process: peak RAM (VmHWM), CPU seconds, wall seconds
+                with open("/proc/self/status") as fh:
+                    for line in fh:
+                        if line.startswith("VmHWM:"):
+                            info["peak_rss_mb"] = round(int(line.split()[1]) / 1024, 1)
+                t = os.times()
+                info["cpu_s"] = round(t.user + t.system, 2)
+                info["wall_s"] = round(time.time() - T0, 2)
+            except Exception:
+                pass
+            tc = getattr(sys.modules.get("torch"), "cuda", None)
+            if tc is not None:
+                try:
+                    if tc.is_initialized():
+                        info["gpu_peak_mb"] = round(tc.max_memory_reserved() / 2 ** 20, 1)
+                except Exception:
+                    pass
             try:
                 info["affinity"] = len(os.sched_getaffinity(0))
             except Exception:
