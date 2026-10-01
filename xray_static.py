@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-VERSION = "0.5.6"
+VERSION = "0.5.7"
 PLACE = "<var>"
 REQ = {"no": 0, "conditional": 1, "yes": 2}
 
@@ -1743,6 +1743,14 @@ class ModuleVisitor(ast.NodeVisitor):
         ops = f.setdefault("ops", [])
         if op not in ops:
             ops.append(op)
+        if info["loc"] == "absolute" and re.match(r"^/(home|Users)/[^/<]+/", info["subject"]) and not info["env"]:
+            # /home/alice/project/out/x.jpg: a folder of one developer's / server's machine
+            self.fact(node, "hardcoded_config", info["subject"], "machine_path",
+                      detail="absolute path of one machine hardcoded in code - inside a container it exists only if "
+                             "you mount a folder at exactly this path (-v HOST_DIR:" + info["subject"].split("<")[0].rstrip("/")
+                             + "); better: read it from an env var")
+            self.m.code_changes.append(f"{self.mod.rel}:{getattr(node, 'lineno', '?')}: machine path {info['subject']} "
+                                       "- mount at exactly this path, or read it from an env var")
         if info["loc"] == "absolute" and re.match(r"^[A-Za-z]:/", info["subject"]) and not info["env"]:
             # C:\Users\...\video.mp4: exists on the developer's Windows PC only - a Linux container never has it
             self.fact(node, "hardcoded_config", info["subject"], "windows_path",
@@ -2315,6 +2323,12 @@ class ModuleVisitor(ast.NodeVisitor):
         name = self.assign_names.get(id(node))
         for scheme, rest in urls:
             full = f"{scheme}://{rest}"
+            if scheme.lower() in ("http", "https") and posixpath.splitext(urlsplit(full).path)[1].lower() in MODEL_EXT:
+                # https://download.pytorch.org/models/vgg16_bn-6c64b313.pth: weights fetched only if the code downloads them
+                self.fact(node, "runtime_download", mask_url(full), "model_url", cap="conditional",
+                          detail="model weights URL - downloaded at runtime only if the code fetches it (e.g. "
+                                 "pretrained=True): bake the file into the image or mount a cache; no code change")
+                continue
             if scheme.lower() in URL_SCHEMES:
                 detail = f"URL {mask_url(full)} hardcoded in code - externalize to env/config"
                 if re.match(r"(localhost|127\.0\.0\.1)(:|/|$)", rest):
@@ -4031,8 +4045,27 @@ class Mapper:
             f["category"] in ("config_file", "model_file", "data_file_read") and f.get("op") in ("ref", "ref_literal")
             and f["subject"] in writes)]
 
+    def unresolved_read_scope(self):
+        """Reads whose path X-Ray could not work out: (patterns for partly known paths, folders whose model files the
+        code next to them may load). Such files are 'maybe used', never 'unused' - leaving one out crashes the app."""
+        pats, dirs = [], {}
+        for f in self.facts:
+            if f["category"] not in ("model_file", "config_file", "data_file_read") or f.get("required_at_runtime") == "no":
+                continue
+            s = str(f["subject"])
+            if PLACE not in s:
+                continue
+            site = f["sites"][0] if f.get("sites") else {}
+            where = f"{site.get('file')}:{site.get('line')}"
+            if s.strip("/") == PLACE:                     # nothing known: model files next to the code that reads
+                dirs.setdefault(posixpath.dirname(site.get("file") or ""), where)
+            elif not s.startswith(("/", "<", "~")) and not re.match(r"^[A-Za-z]:/", s):
+                pats.append((re.compile("^" + "[^/]*".join(re.escape(x) for x in s.split(PLACE)) + "$"), where))
+        return pats, dirs
+
     def scan_files(self):
         used = self.used_data_paths()
+        maybe_pats, maybe_dirs = self.unresolved_read_scope()
         caution = ""
         if self.unresolved_dynamic:
             caution = ("; CAUTION: unresolved dynamic imports at " + ", ".join(self.unresolved_dynamic[:5])
@@ -4056,6 +4089,18 @@ class Mapper:
                 except OSError:
                     continue
                 status = self.file_status(r, fn, p.suffix.lower(), used)
+                maybe = None
+                if status == "unreferenced":
+                    maybe = next((w for rx, w in maybe_pats if rx.match(r)), None)
+                    if maybe is None and p.suffix.lower() in MODEL_EXT:
+                        maybe = maybe_dirs.get(posixpath.dirname(r))
+                    if maybe is not None:
+                        status = "maybe_used"
+                        self.derived("model_file" if p.suffix.lower() in MODEL_EXT else "data_file_read", r,
+                                     "unresolved_read_candidate",
+                                     f"may be the file read at {maybe} (its path is computed at runtime) - kept in "
+                                     "the image; the runtime trace (Step 2) shows whether it is really read",
+                                     required="conditional", sites=[{"file": r, "line": None}])
                 entry = {"path": r, "size": size, "status": status}
                 if 32 <= size <= 512 * 1024 * 1024 and status != "junk":
                     try:
@@ -4067,7 +4112,7 @@ class Mapper:
                 self.files.append(entry)
                 entries.append(entry)
         unused = {"code_unreached", "code_not_needed", "unreferenced"}
-        blocking = {"code_used", "data_used", "deploy_used", "key_material"}
+        blocking = {"code_used", "data_used", "deploy_used", "key_material", "maybe_used"}
         dirs = {}
         for e in entries:
             parts = e["path"].split("/")[:-1]

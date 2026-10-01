@@ -21,7 +21,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -295,7 +295,9 @@ def needs(d, facts, show_all):
     if gpu:
         need = any(f.get("required_at_runtime") == "yes" and f.get("mechanism") not in ("gpu_probe", "env_default",
                                                                                           "provider_string") for f in gpu)
-        out["system"].append(("GPU: REQUIRED - " if need else "GPU: optional - the code checks for one and falls back "
+        out["system"].append(("GPU: wanted, no CPU fallback in the code - run with --gpus all (+ onnxruntime-gpu / CUDA torch); "
+                               "without a GPU onnxruntime usually falls back to the CPU with a warning (Step 2 shows which ran) - "
+                               if need else "GPU: optional - the code checks for one and falls back "
                               "to the CPU; no --gpus needed. ") + f"({len(gpu)} places, e.g. {gpu[0]['subject']})")
     for k in ("models", "data", "writes", "system", "code_changes"):
         out[k] = sorted(set(out[k]))
