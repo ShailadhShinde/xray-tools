@@ -33,7 +33,7 @@ import sys
 import time
 from collections import defaultdict
 
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK_DIR = os.path.join(HERE, "xray_hook")
 
@@ -673,12 +673,15 @@ class Builder:
         ps = [p for p in self.procs.values() if p.get("peak_rss_mb") is not None]
         if not ps:
             return None
+        ort = sorted({(r.get("providers_active") or ["?"])[0] for recs in self.ev.values() for r in recs
+                      if r.get("k") == "model_load" and r.get("providers_active")})
         wall = max((p.get("wall_s") or 0) for p in ps)
         cpu = round(sum(p.get("cpu_s") or 0 for p in ps), 1)
         out = {"processes": len(ps), "peak_ram_mb_sum": round(sum(p["peak_rss_mb"] for p in ps), 1),
                "peak_ram_mb_max": max(p["peak_rss_mb"] for p in ps), "cpu_s": cpu, "wall_s": wall,
                "avg_cpu_cores_busy": round(cpu / wall, 2) if wall else None,
                "gpu_peak_mb_torch": round(sum(p.get("gpu_peak_mb") or 0 for p in ps), 1) or None,
+               "onnxruntime_ran_on": ort or None,
                "per_process": [{k: p.get(k) for k in ("pid", "role", "peak_rss_mb", "cpu_s", "wall_s", "gpu_peak_mb")}
                                for p in sorted(ps, key=lambda p: p["pid"])]}
         return out

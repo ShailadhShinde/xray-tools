@@ -21,7 +21,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -217,6 +217,7 @@ def slim(f, path):
 
 def needs(d, facts, show_all):
     """What a person must provide to run it in a container, with the docker flags."""
+    runtime_only = d.get("tool") == "xray-trace"
     use = [f for f in facts if not f.get("negative") and used(f)]
     out = {"cameras": [], "screen": None, "env": [], "network": [], "models": [], "data": [], "writes": [],
            "system": [], "code_changes": []}
@@ -276,8 +277,11 @@ def needs(d, facts, show_all):
         e["why"] = (f"MUST be set in Docker: the default {e['default']!r} is a path on your PC - mount the file's "
                     "folder with -v and pass the path inside the container" if pc_path else
                     f"code default {e['default']!r} - pass it only to change it" if has_def else
-                    "no default in the code - you must set it" if e["required"] == "yes" else "optional")
+                    ("read by the code (its default is in the Step 1 report)" if runtime_only else
+                     "no default in the code - you must set it") if e["required"] == "yes" else "optional")
     out["env_set_by_code"] = code_sets
+    out["_pc_defaults"] = [str(e["default"]) for e in envs.values()
+                           if e["default"] and re.match(r"^([A-Za-z]:[\\/]|/(home|Users)/)", str(e["default"]))]
     out["env"] = list(envs.values())
     for f in use:
         c, s = f["category"], str(f.get("subject"))
@@ -392,10 +396,23 @@ def print_needs(nd, out=print):
     for n in nd["network"]:
         none = False
         out(f"  network  {n['what']} {n['subject']}" + (f" - {n['docker']}" if n.get("docker") else ""))
+    # a PC path that is only an env var's default (C:/.../a.onnx) is not what the container uses: hide it when
+    # the run saw the file under its container path
+    pcs = [x.replace("\\", "/") for x in nd.get("_pc_defaults", [])]
+    def overridden(m):
+        m2 = str(m).replace("\\", "/")
+        if not any(m2 == p or m2.startswith(p) for p in pcs):
+            return False
+        base = m2.rsplit("/", 1)[-1]
+        return any(str(x).endswith("/" + base) and x != m for x in nd["models"] + nd["data"])
     for m in nd["models"]:
+        if overridden(m):
+            continue
         none = False
         out(f"  model    {m}   (must be inside the image or mounted)")
     for m in nd["data"]:
+        if overridden(m):
+            continue
         none = False
         out(f"  data     {m}   (must be inside the image or mounted)")
     for w in nd["writes"]:
@@ -444,8 +461,15 @@ def main():
             print(f"  CPU      {res['cpu_s']} CPU-seconds in {res['wall_s']} s = {res.get('avg_cpu_cores_busy')} cores busy on average")
         else:
             print(f"  CPU      {res['cpu_s']} CPU-seconds (the run was too short to say how many cores were busy)")
-        print("  GPU      " + (f"{res['gpu_peak_mb_torch']:.0f} MB reserved by torch" if res.get("gpu_peak_mb_torch")
-                               else "torch did not use the GPU (onnxruntime GPU memory is not measured: watch nvidia-smi)"))
+        if res.get("onnxruntime_ran_on"):
+            on = res["onnxruntime_ran_on"]
+            gpu = any("CUDA" in x or "Tensorrt" in x for x in on)
+            print(f"  GPU      onnxruntime ran on {', '.join(on)} ({'the GPU' if gpu else 'the CPU - no GPU used'})"
+                  + ("; its GPU memory is not measured here: see nvidia-smi or the app's own log" if gpu else ""))
+        if res.get("gpu_peak_mb_torch"):
+            print(f"  GPU      {res['gpu_peak_mb_torch']:.0f} MB reserved by torch")
+        elif not res.get("onnxruntime_ran_on"):
+            print("  GPU      no GPU use seen (torch / onnxruntime); other libraries: watch nvidia-smi")
     unused = [x for x in r["project"] if x["category"] == "unused_asset"]
     if unused:
         print(f"\nNOT USED BY THIS ENTRY POINT ({len(unused)}): " + ", ".join(str(x["subject"]) for x in unused[:12])
