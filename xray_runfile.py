@@ -30,7 +30,7 @@ import os
 import re
 import sys
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -118,7 +118,7 @@ def plan(st, project, name, image, dockerfile, stop_after):
         elif d and (n in via_env and "w" in via_env[n] or str(d) in writes) and not os.path.isabs(str(d)) \
                 and not PC_PATH.match(str(d)):
             p["out_mount"] = True
-            p["env"].append((n, "/xout/" + split_path(str(d))[1], f"output file; was {d} - kept in runs/{name}/out"))
+            p["env"].append((n, "/xout/" + split_path(str(d))[1], f"output file; was {d} - kept in runs/{name}/out (out-cpu, out-slim for the other runs)"))
         elif d and PC_PATH.match(str(d)):
             p["out_mount"] = True
             p["env"].append((n, "/xout/" + split_path(str(d))[1], f"output; was {d} - kept in runs/{name}/out"))
@@ -415,17 +415,22 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False):
         tdir = "trace" + suffix + ("-" + stem if stem else "")
         log = "step2" + suffix + ("-" + stem if stem else "") + ".log"
         trace_names.append(tdir)
-        fdirs = [R + sep + "files" + sep + sub for sub, cont, why in p["file_mounts"]]
+        # every run gets its own fresh output folders (out, out-cpu, out-slim ...): the outputs can be compared, and
+        # the planned image (a non-root user) cannot overwrite files an earlier run wrote as root
+        outd, filesd = "out" + suffix, "files" + suffix
+        fdirs = [R + sep + filesd + sep + sub for sub, cont, why in p["file_mounts"]]
+        fresh = [tdir] + ([outd] if p["out_mount"] else []) + ([filesd] if fdirs else [])
         if sh.bat:
-            L += ['if exist "%RUN%\\' + tdir + '" rmdir /s /q "%RUN%\\' + tdir + '"',
-                  'mkdir "%RUN%\\' + tdir + '" "%RUN%\\out" ' + " ".join('"' + d + '"' for d in fdirs) + ' 2>nul']
+            L += ['if exist "%RUN%\\' + d + '" rmdir /s /q "%RUN%\\' + d + '"' for d in fresh]
+            L += ['mkdir "%RUN%\\' + tdir + '" ' + ('"%RUN%\\' + outd + '" ' if p["out_mount"] else "")
+                  + " ".join('"' + d + '"' for d in fdirs) + ' 2>nul']
         else:
-            L += ['rm -rf "$RUN/' + tdir + '"; mkdir -p "$RUN/' + tdir + '" "$RUN/out" ' + " ".join('"' + d + '"' for d in fdirs)
-                  + '; chmod 777 "$RUN/' + tdir + '" "$RUN/out" ' + " ".join('"' + d + '"' for d in fdirs)]
+            mk = '"$RUN/' + tdir + '" ' + ('"$RUN/' + outd + '" ' if p["out_mount"] else "") + " ".join('"' + d + '"' for d in fdirs)
+            L += ["rm -rf " + " ".join('"$RUN/' + d + '"' for d in fresh) + "; mkdir -p " + mk + "; chmod 777 " + mk]
         # explanations go above the command: a CMD ^ block cannot contain comments
         L += [sh.rem + "what goes into the container:"]
         L += [sh.rem + "  " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
-        L += [sh.rem + "  runs" + sep + name + sep + "files" + sep + sub + "  mounted as  " + cont + "   (" + why + ")"
+        L += [sh.rem + "  runs" + sep + name + sep + filesd + sep + sub + "  mounted as  " + cont + "   (" + why + ")"
               for sub, cont, why in p["file_mounts"]]
         if p["mac"]:
             L += [sh.rem + "  --mac-address " + p["mac"] + "   (licence / machine check: the MAC it expects)"]
@@ -440,9 +445,9 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False):
         for host, cont, mode, why in p["mounts"]:
             a.append('  -v "' + host + ":" + cont + ":" + mode + '"')
         if p["out_mount"]:
-            a.append('  -v "' + R + sep + 'out:/xout"')
+            a.append('  -v "' + R + sep + outd + ':/xout"')
         for sub, cont, why in p["file_mounts"]:
-            a.append('  -v "' + R + sep + "files" + sep + sub + ":" + cont + '"')
+            a.append('  -v "' + R + sep + filesd + sep + sub + ":" + cont + '"')
         for n, v, why in envs:
             a.append("  -e " + n + "=" + v)
         a.append("  " + image)
