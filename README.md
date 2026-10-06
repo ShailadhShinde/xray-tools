@@ -7,7 +7,7 @@ Python standard library only (Python 3.8+). Nothing to install.
 | Step | Tool | Runs where | What it does |
 |---|---|---|---|
 | 1 | `xray_static.py` + `xray_needs.py` | your machine | reads the code (runs nothing): packages, files, models, env vars, network, GPU, cameras |
-| 2 | `xray_trace.py run` / `facts` / `merge` | inside the app's container / your machine | runs the app and records what it really did |
+| 2 | `xray_runfile.py` writes the run files; they run `xray_trace.py run` / `facts` / `merge` | inside the app's container / your machine | runs the app and records what it really did |
 | 3 | `xray_pkg.py baseline` / `scan` / `facts` | inside containers / your machine | what is installed in the image and what is really needed |
 | 4 | `xray_plan.py plan` / `verify` | your machine | writes a slim Dockerfile, .dockerignore and compose override; checks the new image behaves the same |
 | 5 | `xray_compare.py` | your machine | several projects: one shared base image |

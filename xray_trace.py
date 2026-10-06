@@ -33,7 +33,7 @@ import sys
 import time
 from collections import defaultdict
 
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK_DIR = os.path.join(HERE, "xray_hook")
 
@@ -44,6 +44,9 @@ DOWNLOAD_EXT = MODEL_EXT + (".zip", ".tar", ".gz", ".tgz", ".npy", ".csv", ".txt
 ENV_BORING = {"PATH", "HOME", "HOSTNAME", "LANG", "LC_ALL", "TERM", "PWD", "SHLVL", "GPG_KEY", "PYTHON_VERSION",
               "PYTHON_SHA256", "PYTHON_PIP_VERSION", "PYTHON_SETUPTOOLS_VERSION", "PYTHON_GET_PIP_URL",
               "PYTHON_GET_PIP_SHA256", "PYTHONPATH", "_", "OLDPWD", "NO_PROXY", "no_proxy"}
+# set by base images (nvidia/cuda, python, Debian), not by the person running the app: never "set but not read"
+IMAGE_ENV_PREFIXES = ("XRAY_", "NV_", "NVIDIA_", "CUDA_", "NCCL_", "CUDNN_", "LC_", "LD_LIBRARY_PATH", "DEBIAN_FRONTEND",
+                      "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "VIRTUAL_ENV", "PIP_", "LIBRARY_PATH", "NVARCH")
 SECRETISH = ("PASS", "SECRET", "TOKEN", "KEY", "PWD", "CREDENTIAL", "AUTH")
 # Debian packages python:3.x-slim already has (base system + CPython's runtime libraries). An assumption until
 # Phase 3 checks the real slim image; only used to keep them out of system_package_candidate facts.
@@ -1401,7 +1404,7 @@ class Builder:
             pkg = owners.get(lib)
             sl.append({"path": lib, "package": pkg, "priority": info.get(pkg, {}).get("priority") if pkg else None,
                        "in_python_slim": (pkg in PY_SLIM_BASE) if pkg else None, "processes": sorted(libs[lib])})
-        unread = sorted(n for n in set_names - env_read if n not in ENV_BORING and not n.startswith(("XRAY_",)))
+        unread = sorted(n for n in set_names - env_read if n not in ENV_BORING and not n.startswith(IMAGE_ENV_PREFIXES))
         return {"packages_loaded": pk, "system_libraries": sl, "env_set_but_not_read_by_code": unread,
                 "binaries_run_by_libraries": {k: sorted(v) for k, v in sorted(self.lib_exec.items())},
                 "libraries_dlopened_by_libraries": {k: sorted(v) for k, v in sorted(self.lib_dlopen.items())},

@@ -21,7 +21,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.3"
+VERSION = "0.1.5"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -247,7 +247,11 @@ def needs(d, facts, show_all):
                                             "note": ("localhost inside a container is the container itself: "
                                                      "use the host's IP / host.docker.internal (code or env change)")
                                             if local else "nothing to pass - the container reaches it over the "
-                                                          "network like any program"})
+                                                          "network like any program"}
+                            if re.match(r"^[a-z]+://", s) else
+                            {"kind": "file", "url": s, "where": site, "run": run_state(f),
+                             "note": "a video FILE, not a stream: mount its folder with -v and pass the path "
+                                     "(env var / argument)"})
     out["cameras"] = list(cams.values())
     gui = [f for f in use if f["category"] == "gui_usage"]
     if gui:
@@ -266,8 +270,12 @@ def needs(d, facts, show_all):
             e["where"] += [f"{x['file']}:{x['line']}" for x in f.get("sites") or [] if x.get("line")]
     for e in envs.values():
         has_def = e["default"] not in (None, "")
-        e["flag"] = f"-e {e['name']}=" + (str(e["default"]) if has_def else "<value>")
-        e["why"] = (f"code default {e['default']!r} - pass it only to change it" if has_def else
+        pc_path = has_def and bool(re.match(r"^([A-Za-z]:[\\/]|/(home|Users)/)", str(e["default"])))
+        e["flag"] = f"-e {e['name']}=" + ("<path inside the container>" if pc_path else
+                                          str(e["default"]) if has_def else "<value>")
+        e["why"] = (f"MUST be set in Docker: the default {e['default']!r} is a path on your PC - mount the file's "
+                    "folder with -v and pass the path inside the container" if pc_path else
+                    f"code default {e['default']!r} - pass it only to change it" if has_def else
                     "no default in the code - you must set it" if e["required"] == "yes" else "optional")
     out["env_set_by_code"] = code_sets
     out["env"] = list(envs.values())
@@ -366,6 +374,8 @@ def print_needs(nd, out=print):
             out(f"           Linux: {c['linux']}   |   Windows: {c['windows']}")
         elif c["kind"] == "stream":
             out(f"  camera   {c['url']} ({c['where']}) - {c['note']}")
+        elif c["kind"] == "file":
+            out(f"  video    {c['url']} ({c['where']}) - {c['note']}")
         else:
             out(f"  camera   {c['pattern']} ({c['where']}): URL computed at runtime")
             out(f"           {c['note']}")
@@ -430,7 +440,10 @@ def main():
         print("\nWHAT THE RUN USED (whole run, all processes)")
         print(f"  RAM      {res['peak_ram_mb_sum']:.0f} MB peak (sum of {res['processes']} process(es); largest one "
               f"{res['peak_ram_mb_max']:.0f} MB)")
-        print(f"  CPU      {res['cpu_s']} CPU-seconds in {res['wall_s']} s = {res.get('avg_cpu_cores_busy')} cores busy on average")
+        if (res.get("wall_s") or 0) >= 2:
+            print(f"  CPU      {res['cpu_s']} CPU-seconds in {res['wall_s']} s = {res.get('avg_cpu_cores_busy')} cores busy on average")
+        else:
+            print(f"  CPU      {res['cpu_s']} CPU-seconds (the run was too short to say how many cores were busy)")
         print("  GPU      " + (f"{res['gpu_peak_mb_torch']:.0f} MB reserved by torch" if res.get("gpu_peak_mb_torch")
                                else "torch did not use the GPU (onnxruntime GPU memory is not measured: watch nvidia-smi)"))
     unused = [x for x in r["project"] if x["category"] == "unused_asset"]

@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-VERSION = "0.5.7"
+VERSION = "0.5.9"
 PLACE = "<var>"
 REQ = {"no": 0, "conditional": 1, "yes": 2}
 
@@ -1411,6 +1411,9 @@ class ModuleVisitor(ast.NodeVisitor):
             self.fact(node, "env_var", "<unresolved>", "env_dynamic_name", "unresolved", detail=unparse(node))
             return
         dflt = arg_or_kw(node, 1, "default")
+        if (isinstance(dflt, ast.Constant) and isinstance(dflt.value, str)
+                and re.match(r"^([A-Za-z]:[\\/]|/(home|Users)/)", dflt.value)):
+            self.consume(dflt)   # os.getenv("X", r"C:\...") - overridable: the env var is the fix, not a code change
         if c == "os.environ.setdefault":
             mech = "env_set_default"
         elif dflt is not None:
@@ -4517,7 +4520,7 @@ class Mapper:
                     f"{x['file']}:{x['line']}" for g in gui_live[:3] for x in g["sites"][:1])
                     + " must stay disabled in production")
         for d, b in BINARY_SWAP.items():
-            if d in declared:
+            if d in declared and d not in removes:   # not imported by reachable code: remove it, don't swap it
                 swaps.append((d, b, "prebuilt wheel, no compiler"))
         cpu_swaps = []
         if not gpu_yes and not any("download.pytorch.org/whl/cpu" in i for i in self.indexes):
