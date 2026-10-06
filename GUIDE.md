@@ -209,6 +209,11 @@ paths, env var **names**, hosts and ports, but secrets are masked (`***`).
 
 ## 4. Step 2 - Watch it run (needs Docker and an image that runs the app)
 
+**Shortcut:** `python xray_runfile.py --static runs/NAME/NAME.json --project PROJECT --name NAME` writes these files into
+`runs/NAME/` (`.bat` on Windows, `.sh` on Linux): `build-naive`, `run-step2` (+ `run-step2-cpu` for GPU apps),
+`run-step3-4` (package scan + plan), `build-slim` and `run-slim` (the same run on the new image, then `verify.txt`).
+Run them in that order. The sections below explain what they do.
+
 Why: reading code cannot tell which `if` really runs, which of two installed packages is loaded, whether the GPU is
 really used, what a library writes. Step 2 runs the app **inside its current image** with X-Ray watching.
 
@@ -315,8 +320,12 @@ python3 xray_plan.py plan --project PROJECT_FOLDER --dockerfile PROJECT_FOLDER/D
 - The compose services that build this folder are found automatically; `--service NAME` picks one.
 - No compose file: `--compose none`.
 - Read every `NOTE:` line. Example: "the Dockerfile CMD runs api.py, which is not in the project".
-- **GPU apps:** the plan says the base image "needs a decision". X-Ray has not been tested on a real GPU yet:
-  send `step4.log` + `app-runtime.json` to Claude to choose the `FROM` line from the CUDA libraries the run loaded.
+- **GPU apps** (the run really used the GPU), `--gpu-base`:
+  - `auto` (default): the same `nvidia/cuda` image family as your naive Dockerfile (`-runtime`, never `-devel`),
+    with Ubuntu's python3 in a venv. It is the family that already worked on your GPU.
+  - `pip`: `python:X.Y-slim`, with the CUDA libraries coming from pip (`onnxruntime-gpu[cuda,cudnn]`, plus an
+    `LD_LIBRARY_PATH` pointing at them). It is about 1.5-2 GB smaller. Use it only if the verify run says PASS: verify
+    checks that the GPU was really used.
 
 You get `plans/app/Dockerfile` (every line has a comment why), `Dockerfile.dockerignore`, `compose.xray.yml`,
 `plan.json`. Read the Dockerfile before building.
