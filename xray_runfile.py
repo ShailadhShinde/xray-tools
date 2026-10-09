@@ -10,6 +10,8 @@ Reads the Step 1 map (xray_static.py output) and writes, into runs/NAME/:
   run-step3-4.bat      Step 3 (package scan of the naive image) + Step 4 (plan: plan/Dockerfile + .dockerignore)
   build-slim.bat       docker build of plan/Dockerfile -> image NAME-slim, then both image sizes
   run-slim.bat         the Step 2 run again on NAME-slim, then verify (verify.txt: PASS = same behaviour)
+  run-load.bat A       a 5-minute load test (no line counting, GPU logged every 2 s, the app's own log folders
+                       kept) into runs/NAME/load-A/; run it again with B, C ... after changing cameras / solutions
 Every line is commented. Open them in Notepad, change what you want, then run them. Docker is never started by
 this script itself. Standard library only.
 
@@ -30,7 +32,16 @@ import os
 import re
 import sys
 
-VERSION = "0.1.4"
+try:                                  # same folder: the folder constants (NAME = "/abs/path") of the project
+    from xray_needs import path_constants, const_of
+except ImportError:                   # pragma: no cover - xray_needs.py missing next to this file
+    def path_constants(root):
+        return []
+
+    def const_of(path, consts, outer=False):
+        return None
+
+VERSION = "0.1.6"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -90,7 +101,7 @@ def plan(st, project, name, image, dockerfile, stop_after):
     p = {"name": name, "image": image or f"{name}-naive", "project": project, "workdir": wd, "dockerfile": dfile,
          "entries": entries, "mounts": [], "env": [], "env_cpu": [], "env_optional": [], "notes": [], "ports": [],
          "gpu": False, "gui": False, "shm": False, "stop_after": stop_after, "out_mount": False,
-         "file_mounts": [], "mac": None}
+         "file_mounts": [], "mac": None, "app_dirs": []}
     # files reached through env vars: inputs (read) vs outputs (written)
     via_env = {}
     for c in ("model_file", "data_file_read", "config_file", "file_write"):
@@ -102,7 +113,8 @@ def plan(st, project, name, image, dockerfile, stop_after):
     seen = set()
     for f in by.get("env_var", []):
         n = f["subject"]
-        if n in seen or n.startswith("<") or f.get("mechanism") in ("env_set", "env_set_default"):
+        if n in seen or n.startswith("<") or f.get("mechanism") in ("env_set", "env_set_default") or \
+                "set by the code at runtime" in str(f.get("detail")):     # the code sets it itself when missing
             continue
         seen.add(n)
         d = f.get("default")
@@ -152,12 +164,14 @@ def plan(st, project, name, image, dockerfile, stop_after):
     # folders the code writes to that are hardcoded paths of one machine (/home/alice/app/images/...): inside the
     # container they do not exist - mount a TEST folder at exactly that path, so the run can write and you see it
     prefixes = []
+    consts = path_constants(project)
     for f in by.get("file_write", []):
         subj = str(f["subject"])
         if f.get("path_envs") or not re.match(r"^/(home|Users)/[^/<]+/", subj):
             continue
-        pre = subj.split("<")[0].rstrip("/")
-        if "/" in pre and "." in pre.rsplit("/", 1)[1]:
+        k = const_of(subj, consts, outer=True)
+        pre = k[1] if k else subj.split("<")[0].rstrip("/")
+        if not k and "/" in pre and "." in pre.rsplit("/", 1)[1]:
             pre = pre.rsplit("/", 1)[0]
         if pre and pre not in prefixes:
             prefixes.append(pre)
@@ -175,6 +189,13 @@ def plan(st, project, name, image, dockerfile, stop_after):
         p["notes"].append("the code writes to hardcoded folders (" + ", ".join(conts) + "): for this run a test folder is "
                           "mounted at each one (runs/NAME/files/); in production mount the real folder at the same "
                           "path, or change the code (code-changes.txt)")
+    # folders the app writes below its own folder (logs/...): kept from the load runs (they hold the app's own timings)
+    for f in by.get("file_write", []):
+        subj = str(f["subject"]).replace("\\", "/")
+        top = subj.split("/")[0]
+        if "/" in subj and not os.path.isabs(subj) and not PC_PATH.match(subj) and top and "<" not in top \
+                and top not in (".", "..", "~") and top not in p["app_dirs"]:
+            p["app_dirs"].append(top)
     # licence / MAC check: pin the MAC the licence expects
     hw = by.get("hardware_identity", [])
     if hw:
@@ -245,6 +266,7 @@ def suggest(text, kind, what):
 
 def code_changes(st, project):
     items, seen = [], set()
+    consts = path_constants(project)
     for f in st.get("facts", []):
         if not live(f):
             continue
@@ -281,6 +303,16 @@ def code_changes(st, project):
                                 break
                     if text is None:
                         continue
+                    k = const_of(subj, consts) if new is None and env is None else None
+                    if k:             # the folder comes from a constant in another file (constants.py)
+                        cf, cl = k[2].rsplit(":", 1)
+                        if (cf, int(cl)) in seen:
+                            continue
+                        seen.add((cf, int(cl)))
+                        lines, text = read_line(project, cf, int(cl))
+                        x = {"file": cf, "line": int(cl)}
+                        new, env, note = suggest(text, c, subj)
+                        note += "; every path built from " + k[0] + " follows it"
                 need_import = new is not None and lines is not None and not any(
                     re.match(r"^\s*(import os\b|from os import)", ln) for ln in lines)
                 items.append({"where": f"{x['file']}:{x['line']}", "now": text.strip(), "new": new and new.strip(),
@@ -397,36 +429,62 @@ def write_build_slim(p, sh, out_dir):
     return nl.join(L) + nl
 
 
-def write_run(p, sh, xdir, out_dir, cpu, slim=False):
+def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
     name = p["name"]
     X, R, PY = ("%X%", "%RUN%", "%PY%") if sh.bat else ("$X", "$RUN", "$PY")
     sep = "\\" if sh.bat else "/"
     trace_names = []
-    L = head(sh, xdir, out_dir, "the traced run on the " + ("planned image " + name + "-slim + verify" if slim else
-                                                              "naive image" + (" without the GPU" if cpu else "")))
+    L = head(sh, xdir, out_dir, "a 5-minute LOAD TEST (usage: run-load A, then B, C ... for the next setups)" if load else
+             "the traced run on the " + ("planned image " + name + "-slim + verify" if slim else
+                                         "naive image" + (" without the GPU" if cpu else "")))
     if p["notes"]:
         L += [sh.rem + "CHECK BEFORE RUNNING:"] + [sh.rem + "  - " + n for n in p["notes"]] + [""]
     suffix = "-cpu" if cpu else "-slim" if slim else ""
     image = name + "-slim" if slim else p["image"]
+    if load:
+        LB = "load-%L%" if sh.bat else "load-$L"
+        if sh.bat:
+            L += ['set "L=%~1"', 'if "%L%"=="" set "L=A"',
+                  sh.rem + "the small image if it was built, else the naive one",
+                  'set "IMG=' + name + '-slim"', "docker image inspect %IMG% >nul 2>&1 || set \"IMG=" + p["image"] + '"',
+                  'echo Load test %L% on image %IMG% - 5 minutes. Results: runs\\' + name + '\\load-%L%\\', ""]
+        else:
+            L += ['L="${1:-A}"', 'IMG=' + name + '-slim',
+                  'docker image inspect "$IMG" >/dev/null 2>&1 || IMG=' + p["image"],
+                  'echo "Load test $L on image $IMG - 5 minutes. Results: runs/' + name + '/load-$L/"', ""]
+        image = "%IMG%" if sh.bat else "$IMG"
     entries = p["entries"] or ["main.py"]
     envs = list(p["env"]) + (p["env_cpu"] if cpu else [])
     for e in entries:
         stem = safe(os.path.splitext(os.path.basename(e))[0]) if len(entries) > 1 else ""
-        tdir = "trace" + suffix + ("-" + stem if stem else "")
-        log = "step2" + suffix + ("-" + stem if stem else "") + ".log"
+        if load:
+            tdir = LB + sep + "trace" + ("-" + stem if stem else "")
+            log = LB + sep + "run" + ("-" + stem if stem else "") + ".log"
+            outd, filesd = LB + sep + "out", LB + sep + "files"
+        else:
+            tdir = "trace" + suffix + ("-" + stem if stem else "")
+            log = "step2" + suffix + ("-" + stem if stem else "") + ".log"
+            # every run gets its own fresh output folders (out, out-cpu, out-slim ...): the outputs can be compared,
+            # and the planned image (a non-root user) cannot overwrite files an earlier run wrote as root
+            outd, filesd = "out" + suffix, "files" + suffix
         trace_names.append(tdir)
-        # every run gets its own fresh output folders (out, out-cpu, out-slim ...): the outputs can be compared, and
-        # the planned image (a non-root user) cannot overwrite files an earlier run wrote as root
-        outd, filesd = "out" + suffix, "files" + suffix
         fdirs = [R + sep + filesd + sep + sub for sub, cont, why in p["file_mounts"]]
-        fresh = [tdir] + ([outd] if p["out_mount"] else []) + ([filesd] if fdirs else [])
+        adirs = [R + sep + LB + sep + "applog" + sep + d for d in p["app_dirs"]] if load else []
+        fresh = ([LB] if load and e == entries[0] else []) if load else \
+            [tdir] + ([outd] if p["out_mount"] else []) + ([filesd] if fdirs else [])
         if sh.bat:
             L += ['if exist "%RUN%\\' + d + '" rmdir /s /q "%RUN%\\' + d + '"' for d in fresh]
             L += ['mkdir "%RUN%\\' + tdir + '" ' + ('"%RUN%\\' + outd + '" ' if p["out_mount"] else "")
-                  + " ".join('"' + d + '"' for d in fdirs) + ' 2>nul']
+                  + " ".join('"' + d + '"' for d in fdirs + adirs) + ' 2>nul']
         else:
-            mk = '"$RUN/' + tdir + '" ' + ('"$RUN/' + outd + '" ' if p["out_mount"] else "") + " ".join('"' + d + '"' for d in fdirs)
-            L += ["rm -rf " + " ".join('"$RUN/' + d + '"' for d in fresh) + "; mkdir -p " + mk + "; chmod 777 " + mk]
+            mk = '"$RUN/' + tdir + '" ' + ('"$RUN/' + outd + '" ' if p["out_mount"] else "") + " ".join('"' + d + '"' for d in fdirs + adirs)
+            L += (["rm -rf " + " ".join('"$RUN/' + d + '"' for d in fresh) + "; "] if fresh else [""])
+            L[-1] += "mkdir -p " + mk + "; chmod 777 " + mk
+        if load and p["gpu"] and e == entries[0]:
+            gq = "nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,memory.total --format=csv -l 2 -f "
+            L += [sh.rem + "GPU use every 2 seconds -> gpu.csv (stopped when the run ends)",
+                  ('start "gpu-log" /min ' + gq + '"%RUN%\\' + LB + '\\gpu.csv"') if sh.bat else
+                  (gq + '"$RUN/' + LB + '/gpu.csv" & GPULOG=$!')]
         # explanations go above the command: a CMD ^ block cannot contain comments
         L += [sh.rem + "what goes into the container:"]
         L += [sh.rem + "  " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
@@ -448,12 +506,17 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False):
             a.append('  -v "' + R + sep + outd + ':/xout"')
         for sub, cont, why in p["file_mounts"]:
             a.append('  -v "' + R + sep + filesd + sep + sub + ":" + cont + '"')
+        for d in (p["app_dirs"] if load else []):
+            a.append('  -v "' + R + sep + LB + sep + "applog" + sep + d + ":" + p["workdir"].rstrip("/") + "/" + d + '"')
         for n, v, why in envs:
             a.append("  -e " + n + "=" + v)
+        if load:
+            a.append("  -e XRAY_COVERAGE=0")       # no line counting: it would slow the app and skew the numbers
         a.append("  " + image)
-        flags = (" --gui off" if p["gui"] else "") + (" --stop-after " + str(p["stop_after"]) if p["stop_after"] else "")
+        stop = 300 if load else p["stop_after"]
+        flags = (" --gui off" if p["gui"] else "") + (" --stop-after " + str(stop) if stop else "")
         a.append("  python /xray/xray_trace.py run --out /xray-out --root " + p["workdir"] + flags + " -- python " + e)
-        msg = ("Step 2" + (" (CPU)" if cpu else " (planned image)" if slim else "") + ": " + e
+        msg = ("Load test" if load else "Step 2" + (" (CPU)" if cpu else " (planned image)" if slim else "")) + (": " + e
                + " - the window stays quiet until it ends. Log: " + log)
         L += ["echo " + msg if sh.bat else "echo '" + msg + "'"]
         # one command over several lines: each line but the last ends with the continuation mark; the log
@@ -461,6 +524,14 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False):
         L += [x + sh.cont for x in a[:-1]] + [a[-1] + ' > "' + R + sep + log + '" 2>&1', ""]
     traces = " ".join('--trace "' + R + sep + t + '"' for t in trace_names)
     pyv = '"' + PY + '"'
+    if load:
+        if p["gpu"]:
+            L += ["taskkill /im nvidia-smi.exe /f >nul 2>&1" if sh.bat else "kill $GPULOG 2>/dev/null"]
+        L += [pyv + ' "' + X + sep + 'xray_trace.py" facts ' + traces + ' --out "' + R + sep + LB + sep + 'runtime.json"',
+              pyv + ' "' + X + sep + 'xray_needs.py" "' + R + sep + LB + sep + 'runtime.json" > "' + R + sep + LB + sep
+              + 'needs.txt"']
+        return finish(sh, L, LB + sep + "needs.txt", "Done. In the load folder: needs.txt - WHAT THE RUN USED "
+                      "is at the end -, gpu.csv, run.log, applog = the logs the app wrote.")
     rt = name + "-runtime" + suffix + ".json"
     L += [pyv + ' "' + X + sep + 'xray_trace.py" facts ' + traces + ' --out "' + R + sep + rt + '"']
     if slim:
@@ -524,6 +595,7 @@ def main(argv=None):
     files["run-step3-4" + ext] = write_step34(p, sh, HERE, out_dir)
     files["build-slim" + ext] = write_build_slim(p, sh, out_dir)
     files["run-slim" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, slim=True)
+    files["run-load" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, load=True)
     changes = code_changes(st, os.path.abspath(a.project))
     files["code-changes.txt"] = write_code_changes(changes, a.name).replace("\n", "\r\n" if sh.bat else "\n")
     for fn, txt in files.items():

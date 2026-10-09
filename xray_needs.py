@@ -17,11 +17,12 @@ The bundle rules are shared with xray_viewer.html (Entry tree tab): keep BUNDLES
 """
 import argparse
 import json
+import os
 import posixpath
 import re
 import sys
 
-VERSION = "0.1.6"
+VERSION = "0.1.8"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -81,6 +82,49 @@ def side_effect(f):
         s = str(f.get("subject", ""))
         return not from_static(f) and (s.startswith(SIDE_PREFIXES) or s == "/tmp")
     return False
+
+
+# module-level  NAME = "/abs/path"  (a folder constant other files build their paths from)
+CONST_RE = re.compile(r"""^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[rRuU]?(["'])((?:[A-Za-z]:[\\/]|/)[^"']{3,})\2\s*(#.*)?$""")
+SKIP_DIRS = {"venv", ".venv", "env", "__pycache__", "node_modules", "site-packages", ".git", ".idea"}
+
+
+def path_constants(root):
+    """[(name, value with / separators, 'file:line')] for every module-level path constant in the project"""
+    out = []
+    if not root or not os.path.isdir(str(root)):
+        return out
+    for dirpath, dirs, fns in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in SKIP_DIRS and not x.startswith(".")]
+        for fn in fns:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fn)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    lines = fh.read().splitlines()
+            except OSError:
+                continue
+            for i, ln in enumerate(lines, 1):
+                m = CONST_RE.match(ln)
+                if m:
+                    out.append((m.group(1), m.group(3).replace("\\", "/").rstrip("/"),
+                                os.path.relpath(path, root).replace(os.sep, "/") + ":" + str(i)))
+    return out
+
+
+def const_of(path, consts, outer=False):
+    """the path constant this path starts with: the longest one (the literal really used), or with outer=True the
+    shortest FOLDER constant (the one folder to mount); None if none"""
+    p = str(path).replace("\\", "/")
+    best = None
+    for c in consts:
+        if outer and "." in c[1].rsplit("/", 1)[-1]:
+            continue                       # a file constant (/var/log/app.log) is not a folder to group under
+        if (p == c[1] or p.startswith(c[1] + "/")) and (
+                best is None or (len(c[1]) < len(best[1]) if outer else len(c[1]) > len(best[1]))):
+            best = c
+    return best
 
 
 def set_by_code(f):
@@ -221,6 +265,8 @@ def needs(d, facts, show_all):
     use = [f for f in facts if not f.get("negative") and used(f)]
     out = {"cameras": [], "screen": None, "env": [], "network": [], "models": [], "data": [], "writes": [],
            "system": [], "code_changes": []}
+    consts = path_constants(d.get("root"))
+    const_changes = {}
     cams = {}
     for f in use:
         if not is_camera(f):
@@ -302,7 +348,11 @@ def needs(d, facts, show_all):
         elif c in ("subprocess_binary", "system_package_candidate", "ipc_shared_memory"):
             out["system"].append(f"{CAT.get(c, c)}: {s}")
         elif c in ("secret", "hardcoded_config") and f.get("docker_implication"):
-            out["code_changes"].append(f"{s}: {f['docker_implication']}")
+            k = const_of(s, consts) if f.get("mechanism") in ("machine_path", "windows_path") else None
+            if k:                                   # 10 paths built from one folder constant -> one change
+                const_changes.setdefault(k, set()).add(s)
+            else:
+                out["code_changes"].append(f"{s}: {f['docker_implication']}")
     gpu = out.pop("_gpu", [])
     if gpu:
         need = any(f.get("required_at_runtime") == "yes" and f.get("mechanism") not in ("gpu_probe", "env_default",
@@ -314,12 +364,25 @@ def needs(d, facts, show_all):
     for k in ("models", "data", "writes", "system", "code_changes"):
         out[k] = sorted(set(out[k]))
     out["data"] = [x for x in out["data"] if x not in out["models"]]
+    for k, paths in sorted(const_changes.items()):
+        out["code_changes"].append(f"{k[0]} ({k[2]}) = {k[1]!r}: {len(paths)} hardcoded paths are built from it - "
+                                   f"read it from an env var: {k[0]} = os.getenv(\"{k[0]}\", {k[1]!r})")
+    grouped, rest = {}, []
+    for w in out["writes"]:                       # paths built from a folder constant -> one line per constant
+        k = const_of(w, consts, outer=True)
+        (grouped.setdefault(k, []) if k else rest).append(w)
+    out["writes"] = rest
     roots = []
     for w in out["writes"]:                       # /data/output + 5 files below it -> one line
         if not any(w == r or w.startswith(r.rstrip("/") + "/") for r in roots):
             roots.append(w)
-    out["writes"] = [{"path": r, "inside": sum(1 for w in out["writes"] if w != r and w.startswith(r.rstrip("/") + "/"))}
-                     for r in roots]
+    out["writes"] = [{"path": k[1], "inside": len([w for w in ws if w.replace("\\", "/") != k[1]]), "const": k[0],
+                      "where": k[2],
+                      "subfolders": sorted({(lambda r: r.split("/")[0] + ("/" if "/" in r else ""))(
+                          w.replace("\\", "/")[len(k[1]) + 1:]) for w in ws if len(w.replace("\\", "/")) > len(k[1]) + 1})}
+                     for k, ws in sorted(grouped.items())] + \
+        [{"path": r, "inside": sum(1 for w in out["writes"] if w != r and w.startswith(r.rstrip("/") + "/"))}
+         for r in roots]
     return out
 
 
@@ -392,10 +455,16 @@ def print_needs(nd, out=print):
         none = False
         out(f"  env      {e['flag']:<40} {e['why']} ({', '.join(e['where'][:2])})")
     if nd.get("env_set_by_code"):
-        out(f"  (env the code sets itself - nothing to pass: {', '.join(nd['env_set_by_code'])})")
+        out(f"  (env the code sets itself when it is not set - nothing to pass; -e NAME=value overrides it: "
+            f"{', '.join(nd['env_set_by_code'])})")
+    shown = set()
     for n in nd["network"]:
+        line = f"  network  {n['what']} {n['subject']}" + (f" - {n['docker']}" if n.get("docker") else "")
+        if line in shown:          # the same host from several files: one line
+            continue
+        shown.add(line)
         none = False
-        out(f"  network  {n['what']} {n['subject']}" + (f" - {n['docker']}" if n.get("docker") else ""))
+        out(line)
     # a PC path that is only an env var's default (C:/.../a.onnx) is not what the container uses: hide it when
     # the run saw the file under its container path
     pcs = [x.replace("\\", "/") for x in nd.get("_pc_defaults", [])]
@@ -417,6 +486,11 @@ def print_needs(nd, out=print):
         out(f"  data     {m}   (must be inside the image or mounted)")
     for w in nd["writes"]:
         none = False
+        if w.get("const"):
+            subs = ", ".join(w["subfolders"][:6]) + (" ..." if len(w["subfolders"]) > 6 else "")
+            out(f"  writes   {w['path']}   = {w['const']} ({w['where']})"
+                + (f"; {w['inside']} path(s) below it" if w["inside"] else "") + (f" in {subs}" if subs else "") + "   (mount this ONE folder with -v; it must be writable)")
+            continue
         out(f"  writes   {w['path']}" + (f" (+{w['inside']} paths inside)" if w["inside"] else "")
             + "   (mount it with -v to keep the files; the folder must be writable)")
     for s in nd["system"]:
