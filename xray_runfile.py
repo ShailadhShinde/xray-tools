@@ -41,7 +41,7 @@ except ImportError:                   # pragma: no cover - xray_needs.py missing
     def const_of(path, consts, outer=False):
         return None
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -574,6 +574,8 @@ def main(argv=None):
     ap.add_argument("--name", required=True, help="short project name (zip, pet ...): runs/NAME/")
     ap.add_argument("--image", help="image to run (default NAME-naive)")
     ap.add_argument("--dockerfile", help="the naive Dockerfile (default PROJECT/Dockerfile.naive or PROJECT/Dockerfile)")
+    ap.add_argument("--mac", help="the MAC address a licence check expects (written into every run file as "
+                    "--mac-address), e.g. f0:2f:74:dd:7f:09")
     ap.add_argument("--stop-after", type=int, default=180, help="stop the app after this many seconds (default 180; "
                     "0 = never - only for scripts that end by themselves)")
     ap.add_argument("--shell", choices=("bat", "sh"), default="bat" if os.name == "nt" else "sh",
@@ -583,6 +585,12 @@ def main(argv=None):
     out_dir = os.path.abspath(os.path.join(HERE, "runs", a.name))
     os.makedirs(out_dir, exist_ok=True)
     p = plan(st, os.path.abspath(a.project), a.name, a.image, a.dockerfile, a.stop_after or None)
+    if a.mac:
+        m = re.sub(r"[^0-9a-fA-F]", "", a.mac).lower()
+        if len(m) != 12:
+            sys.exit(f"--mac {a.mac}: expected 12 hex digits, e.g. f0:2f:74:dd:7f:09")
+        p["mac"] = ":".join(m[i:i + 2] for i in range(0, 12, 2))
+        p["notes"] = [n for n in p["notes"] if not n.startswith("licence / machine check found")]
     sh = Shell(a.shell)
     ext = ".bat" if sh.bat else ".sh"
     files = {}
