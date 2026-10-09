@@ -22,7 +22,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -540,6 +540,15 @@ def main():
             gpu = any("CUDA" in x or "Tensorrt" in x for x in on)
             print(f"  GPU      onnxruntime ran on {', '.join(on)} ({'the GPU' if gpu else 'the CPU - no GPU used'})"
                   + ("; its GPU memory is not measured here: see nvidia-smi or the app's own log" if gpu else ""))
+        g = res.get("gpu_whole")
+        if g:
+            used = g["mem_used_max_mb"] - (g.get("mem_used_before_mb") or 0)
+            print(f"  GPU      whole card (nvidia-smi, every 2 s): busy {g['util_avg']:.0f}% on average, {g['util_max']:.0f}% max; "
+                  f"memory up to {g['mem_used_max_mb']:.0f} of {g['mem_total_mb']:.0f} MB"
+                  + (f" ({used:.0f} MB more than before the app started)" if g.get("mem_used_before_mb") is not None else ""))
+        if res.get("sampled_only"):
+            print(f"  note     {res['sampled_only']} process(es) were stopped (stop-after / kill): their numbers are from the "
+                  "last 5-second sample")
         if res.get("gpu_peak_mb_torch"):
             print(f"  GPU      {res['gpu_peak_mb_torch']:.0f} MB reserved by torch")
         elif not res.get("onnxruntime_ran_on"):

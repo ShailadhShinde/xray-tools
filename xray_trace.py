@@ -30,10 +30,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK_DIR = os.path.join(HERE, "xray_hook")
 
@@ -201,6 +202,7 @@ def cmd_run(a):
     print(f"[xray-trace] root={root} out={out}", flush=True)
     print(f"[xray-trace] running: {' '.join(full)}", flush=True)
     t0 = time.time()
+    gpu = GpuSampler(out)
     proc = subprocess.Popen(full, env=env)
     stopped_by, drc = None, None
 
@@ -210,7 +212,10 @@ def cmd_run(a):
         if proc.poll() is not None:
             return
         stopped_by = stopped_by or why
-        for pid in app_pids(proc.pid, bool(a.strace)):
+        main = app_pids(proc.pid, bool(a.strace))
+        # the app's own child processes too (camera / solution workers): else the main process waits for them
+        # and nothing ends until the grace period is over
+        for pid in main + [d for m in main for d in descendants(m)]:
             try:
                 os.kill(pid, signal.SIGINT)
             except OSError:
@@ -245,12 +250,14 @@ def cmd_run(a):
         stop("Ctrl+C")
         rc = proc.wait()
     dur = round(time.time() - t0, 1)
+    gpu_samples = gpu.stop()
     print(f"[xray-trace] app exited with code {rc} after {dur}s"
           + (f" (stopped: {stopped_by})" if stopped_by else "") + " - collecting system info...", flush=True)
     jdump({"cmd": cmd, "out": out, "strace": bool(a.strace), "exit_code": rc, "duration_s": dur, "root": root,
            "driver": a.driver, "driver_exit_code": drc, "stopped_by": stopped_by,
            "camera_swap": a.camera or [], "gui": a.gui,
-           "cwd": os.getcwd(), "started": t0, "tool": "xray-trace", "version": VERSION}, os.path.join(out, "run.json"))
+           "cwd": os.getcwd(), "started": t0, "gpu_samples": gpu_samples,
+           "tool": "xray-trace", "version": VERSION}, os.path.join(out, "run.json"))
     try:
         collect(out, root)
     except Exception as e:  # the trace itself is still usable
@@ -262,6 +269,63 @@ def cmd_run(a):
     if a.driver:
         return 0 if drc == 0 else 1
     return 0 if rc == 0 or stopped_by else 1
+
+
+class GpuSampler:
+    """whole-GPU use while the app runs (nvidia-smi is in the container with --gpus all): every 2 s"""
+    def __init__(self, out, every=2.0):
+        self.rows, self.base, self.alive = [], None, True
+        self.exe = shutil.which("nvidia-smi")
+        if not self.exe:
+            return
+        self.base = self.query()                     # before the app: what other programs already use
+        self.t = threading.Thread(target=self.loop, args=(every,), daemon=True)
+        self.t.start()
+
+    def query(self):
+        try:
+            r = subprocess.run([self.exe, "--query-gpu=utilization.gpu,memory.used,memory.total",
+                                "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
+            first = r.stdout.strip().splitlines()[0]
+            u, m, tot = [float(x) for x in first.split(",")[:3]]
+            return u, m, tot
+        except Exception:
+            return None
+
+    def loop(self, every):
+        while self.alive:
+            q = self.query()
+            if q:
+                self.rows.append(q)
+            time.sleep(every)
+
+    def stop(self):
+        self.alive = False
+        if not self.exe or not self.rows:
+            return None
+        us = [r[0] for r in self.rows]
+        ms = [r[1] for r in self.rows]
+        return {"samples": len(self.rows), "util_avg": round(sum(us) / len(us), 1), "util_max": max(us),
+                "mem_used_max_mb": max(ms), "mem_used_before_mb": self.base[1] if self.base else None,
+                "mem_total_mb": self.rows[0][2]}
+
+
+def descendants(pid):
+    """all child, grandchild ... pids of pid (from /proc)"""
+    kids = {}
+    for st in glob.glob("/proc/[0-9]*/stat"):
+        try:
+            with open(st) as fh:
+                f = fh.read().rsplit(")", 1)[1].split()
+            kids.setdefault(int(f[1]), []).append(int(st.split("/")[2]))
+        except (OSError, IndexError, ValueError):
+            pass
+    out, todo = [], [pid]
+    while todo:
+        for k in kids.get(todo.pop(), []):
+            out.append(k)
+            todo.append(k)
+    return out
 
 
 def app_pids(pid, under_strace):
@@ -646,6 +710,8 @@ class Builder:
         for pid, recs in self.ev.items():
             st = next((r for r in recs if r.get("k") == "start"), {})
             ex = next((r for r in recs if r.get("k") == "exit"), None)
+            # a process stopped by a signal has no exit record: its last periodic sample has the numbers
+            last = ex or next((r for r in reversed(recs) if r.get("k") == "res"), None)
             argv = st.get("argv") or []
             if pid in targets:
                 role = f"child:{(targets[pid] or '?').replace('__mp_main__.', '').replace('__main__.', '')}"
@@ -664,8 +730,9 @@ class Builder:
                          "clean_exit": ex is not None, "uid": st.get("uid"),
                          "torch_threads": (ex or {}).get("torch_threads"), "cv2_threads": (ex or {}).get("cv2_threads"),
                          "mp_start_method": (ex or {}).get("mp_start_method"),
-                         "peak_rss_mb": (ex or {}).get("peak_rss_mb"), "cpu_s": (ex or {}).get("cpu_s"),
-                         "wall_s": (ex or {}).get("wall_s"), "gpu_peak_mb": (ex or {}).get("gpu_peak_mb")}
+                         "peak_rss_mb": (last or {}).get("peak_rss_mb"), "cpu_s": (last or {}).get("cpu_s"),
+                         "wall_s": (last or {}).get("wall_s"), "gpu_peak_mb": (last or {}).get("gpu_peak_mb"),
+                         "measured": "exit" if ex else ("sampled" if last else None)}
         return info
 
     def resources(self):
@@ -682,6 +749,8 @@ class Builder:
                "avg_cpu_cores_busy": round(cpu / wall, 2) if wall else None,
                "gpu_peak_mb_torch": round(sum(p.get("gpu_peak_mb") or 0 for p in ps), 1) or None,
                "onnxruntime_ran_on": ort or None,
+               "sampled_only": sum(1 for p in ps if p.get("measured") == "sampled"),
+               "gpu_whole": next((r.get("gpu_samples") for r in self.runs if r.get("gpu_samples")), None),
                "per_process": [{k: p.get(k) for k in ("pid", "role", "peak_rss_mb", "cpu_s", "wall_s", "gpu_peak_mb")}
                                for p in sorted(ps, key=lambda p: p["pid"])]}
         return out

@@ -1076,6 +1076,53 @@ def _install():
         ent[0].add(frame.f_lineno)
         return ltrace
 
+    # ------------------------------------------------------------------ resources
+    def _res_sample():
+        """peak RAM (VmHWM), CPU seconds, wall seconds and torch GPU memory of this process, right now"""
+        info = {}
+        try:
+            with open("/proc/self/status") as fh:
+                for line in fh:
+                    if line.startswith("VmHWM:"):
+                        info["peak_rss_mb"] = round(int(line.split()[1]) / 1024, 1)
+            t = os.times()
+            info["cpu_s"] = round(t.user + t.system, 2)
+            info["wall_s"] = round(time.time() - T0, 2)
+        except Exception:
+            pass
+        tc = getattr(sys.modules.get("torch"), "cuda", None)
+        if tc is not None:
+            try:
+                if tc.is_initialized():
+                    info["gpu_peak_mb"] = round(tc.max_memory_reserved() / 2 ** 20, 1)
+            except Exception:
+                pass
+        return info
+
+    try:
+        RES_EVERY = float(os.environ.get("XRAY_RES_EVERY", "5"))
+    except ValueError:
+        RES_EVERY = 5.0
+
+    def _sampler():
+        """a process that is killed (stop-after, docker stop) never runs atexit: sample every few seconds"""
+        TLS.busy = True                     # this thread's own file reads are not the app's
+        while True:
+            time.sleep(RES_EVERY)
+            try:
+                rec = _res_sample()
+                rec["k"] = "res"
+                _write(rec)
+            except Exception:
+                pass
+
+    def _start_sampler():
+        if RES_EVERY > 0:
+            try:
+                threading.Thread(target=_sampler, name="xray-res", daemon=True).start()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------ exit
     def at_exit():
         TLS.busy = True
@@ -1093,23 +1140,7 @@ def _install():
             except OSError:
                 pass
             info = {"k": "exit", "libs": libs, "cpu_count": os.cpu_count()}
-            try:   # resources used by this process: peak RAM (VmHWM), CPU seconds, wall seconds
-                with open("/proc/self/status") as fh:
-                    for line in fh:
-                        if line.startswith("VmHWM:"):
-                            info["peak_rss_mb"] = round(int(line.split()[1]) / 1024, 1)
-                t = os.times()
-                info["cpu_s"] = round(t.user + t.system, 2)
-                info["wall_s"] = round(time.time() - T0, 2)
-            except Exception:
-                pass
-            tc = getattr(sys.modules.get("torch"), "cuda", None)
-            if tc is not None:
-                try:
-                    if tc.is_initialized():
-                        info["gpu_peak_mb"] = round(tc.max_memory_reserved() / 2 ** 20, 1)
-                except Exception:
-                    pass
+            info.update(_res_sample())     # resources used by this process
             try:
                 info["affinity"] = len(os.sched_getaffinity(0))
             except Exception:
@@ -1208,6 +1239,9 @@ def _install():
             apply_patch(name, sys.modules[name])
     sys.meta_path.insert(0, _XRayPostImport())
     atexit.register(at_exit)
+    _start_sampler()                        # before settrace: the sampler thread is not traced
+    if hasattr(os, "register_at_fork"):
+        os.register_at_fork(after_in_child=_start_sampler)   # threads do not survive fork()
     if COVERAGE:
         sys.settrace(gtrace)
         threading.settrace(gtrace)
