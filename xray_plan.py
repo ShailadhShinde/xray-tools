@@ -26,7 +26,7 @@ import os
 import re
 import sys
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 APP_USER, APP_UID = "app", 1000
 APP_HOME = f"/home/{APP_USER}"
 ALWAYS_IGNORE = [".git/", "**/__pycache__/", "**/*.pyc", ".idea/", ".vscode/", "Dockerfile*", "docker-compose*.yml",
@@ -285,6 +285,12 @@ class Planner:
         swaps = list(plan.get("swap", []))
         # second opinion: the static map also knows a torch that has no GPU use should come from the CPU index
         gpu = self.gpu_used()
+        kept_gpu = []
+        if gpu:      # the run used the GPU: a CPU-only torch would break it (even if torch itself barely used CUDA)
+            for sw in [x for x in swaps if "download.pytorch.org/whl/cpu" in str(x.get("to"))]:
+                swaps.remove(sw)
+                kept_gpu.append(re.split(r"\s", sw["from"])[0])
+                self.evidence.append(f"requirements: kept {sw['from']} - the run used the GPU, no swap to the CPU torch")
         for sw in (self.rec.get("requirements") or {}).get("swap", []) if not gpu else []:
             m = re.match(r"^(\S+?)==(\S+) -> .*download\.pytorch\.org/whl/cpu", str(sw))
             if m and not any(canon(re.split(r"[=<>!~ ]", x["from"])[0]) == canon(m.group(1)) for x in swaps):
@@ -296,7 +302,8 @@ class Planner:
         keep = [k for k in plan.get("keep", []) if canon(re.split(r"[=<>!~ ]", k)[0]) not in swapped]
         out = {"keep": keep, "remove": plan.get("remove", []), "swap": [], "add": plan.get("add", [])}
         extra_index = None
-        pins = [k.split("  ")[0] for k in keep]
+        out["keep"] = kept_gpu + keep
+        pins = kept_gpu + [k.split("  ")[0] for k in keep]
         for s in swaps:
             to = s["to"]
             if "download.pytorch.org/whl/cpu" in to:
@@ -310,6 +317,9 @@ class Planner:
                 pins.append(to.split()[0])
         for a in out["add"]:
             pins.append(a["name"])
+        cu = next((m.group(1) for k in pins for m in [re.search(r"\+cu(\d+)\b", k)] if m), None)
+        if cu and not extra_index:   # torch==2.8.0+cu126 only exists on PyTorch's own index
+            extra_index = f"https://download.pytorch.org/whl/cu{cu}"
         if self.base_image().get("kind") == "pip-cuda":
             # python:X-slim has no CUDA: onnxruntime-gpu brings it with its [cuda,cudnn] extras (torch wheels already do)
             pins = [re.sub(r"(?i)^onnxruntime[-_]gpu(?=[=<>!~ ]|$)", "onnxruntime-gpu[cuda,cudnn]", k) for k in pins]
@@ -634,7 +644,7 @@ def cmd_plan(a):
           f"writable: {', '.join(p['writable_dirs']) or 'none'}")
     print(f"  code changes needed: {len(p['code_changes_required'])}")
     for e in p["evidence"]:
-        if e.startswith(("cmd:", "python ", "GPU base", "no Dockerfile", "services ", "WARNING", "apt: ")):
+        if e.startswith(("cmd:", "python ", "GPU base", "no Dockerfile", "services ", "WARNING", "apt: ", "requirements: kept")):
             print(f"  NOTE: {e}")
     return 0
 
