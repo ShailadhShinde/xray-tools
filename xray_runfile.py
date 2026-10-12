@@ -41,7 +41,7 @@ except ImportError:                   # pragma: no cover - xray_needs.py missing
     def const_of(path, consts, outer=False):
         return None
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -508,7 +508,10 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
             a.append('  -v "' + R + sep + filesd + sep + sub + ":" + cont + '"')
         for d in (p["app_dirs"] if load else []):
             a.append('  -v "' + R + sep + LB + sep + "applog" + sep + d + ":" + p["workdir"].rstrip("/") + "/" + d + '"')
-        for n, v, why in envs:
+        if p["env"] or p["env_optional"]:
+            # every env var in ONE file (runs/NAME/run.env): add or change values there, not in each run file
+            a.append('  --env-file "' + R + sep + 'run.env"')
+        for n, v, why in (p["env_cpu"] if cpu else []):
             a.append("  -e " + n + "=" + v)
         if load:
             a.append("  -e XRAY_COVERAGE=0")       # no line counting: it would slow the app and skew the numbers
@@ -604,6 +607,17 @@ def main(argv=None):
     files["build-slim" + ext] = write_build_slim(p, sh, out_dir)
     files["run-slim" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, slim=True)
     files["run-load" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, load=True)
+    if p["env"] or p["env_optional"]:
+        E = ["# Env vars for the runs of " + a.name + " (written by xray_runfile.py " + VERSION + "). Every run file",
+             "# reads this file (--env-file): change a value here once. One NAME=value per line, no quotes,",
+             "# no comment after a value. Lines starting with # are off: remove the # to switch one on."]
+        for n, v, why in p["env"]:
+            E += ["# " + why, n + "=" + v]
+        if p["env_optional"]:
+            E += ["", "# other env vars the code reads (its default is used while the line stays off):"]
+            for n, d, site in p["env_optional"]:
+                E += ["#   " + n + ": read at " + site, "# " + n + "=" + str(d)]
+        files["run.env"] = "\n".join(E) + "\n"
     changes = code_changes(st, os.path.abspath(a.project))
     files["code-changes.txt"] = write_code_changes(changes, a.name).replace("\n", "\r\n" if sh.bat else "\n")
     for fn, txt in files.items():
@@ -631,7 +645,7 @@ def main(argv=None):
     if not p["dockerfile"]:
         print("  NOTE: no Dockerfile.naive / Dockerfile in the project - build the image first (see the guide)")
     print("First read code-changes.txt. Then open the run files in Notepad if you want, and run them in this order: "
-          + ", ".join(fn for fn in files if not fn.endswith(".txt")))
+          + ", ".join(fn for fn in files if not fn.endswith((".txt", ".env"))))
     return 0
 
 

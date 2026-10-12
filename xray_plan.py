@@ -26,7 +26,7 @@ import os
 import re
 import sys
 
-VERSION = "0.1.4"
+VERSION = "0.1.8"
 APP_USER, APP_UID = "app", 1000
 APP_HOME = f"/home/{APP_USER}"
 ALWAYS_IGNORE = [".git/", "**/__pycache__/", "**/*.pyc", ".idea/", ".vscode/", "Dockerfile*", "docker-compose*.yml",
@@ -323,7 +323,18 @@ class Planner:
         if self.base_image().get("kind") == "pip-cuda":
             # python:X-slim has no CUDA: onnxruntime-gpu brings it with its [cuda,cudnn] extras (torch wheels already do)
             pins = [re.sub(r"(?i)^onnxruntime[-_]gpu(?=[=<>!~ ]|$)", "onnxruntime-gpu[cuda,cudnn]", k) for k in pins]
+        pins = list(dict.fromkeys(pins))          # the same pin twice (kept + re-added) once
         return out, pins, extra_index
+
+    def source_builds(self, pins):
+        """kept packages pip compiles while building the image (no prebuilt wheel): they need a compiler then"""
+        names = {canon(re.split(r"[\[=<>!~ ]", k)[0]) for k in pins}
+        out = sorted({str(f["subject"]) for f in self.pfacts("packaging")
+                      if f.get("mechanism") == "source_build" and canon(f["subject"]) in names})
+        if out:
+            self.evidence.append("build: " + ", ".join(out) + " are compiled by pip (no prebuilt wheel): gcc is "
+                                 "installed for the pip step and removed in the same step")
+        return out
 
     def copy_and_ignore(self):
         copy = list(self.rec.get("copy") or ["src/"])
@@ -462,8 +473,17 @@ class Planner:
         out["ports"] = sorted(ports)
         return out
 
-    def code_changes(self):
+    def code_changes(self, ignore=()):
         out = list(self.rec.get("code_changes_required") or [])
+        # a line in a file that is not copied into the image (unused folder, test script) is not a change for it
+        def left_out(item):
+            fn = str(item).split(":", 1)[0]
+            return any(fn == ig.rstrip("/") or (ig.endswith("/") and fn.startswith(ig)) for ig in ignore)
+        dropped = [x for x in out if left_out(x)]
+        if dropped:
+            out = [x for x in out if x not in dropped]
+            self.evidence.append(f"code changes: {len(dropped)} left out - their files are not in the image "
+                                 f"({', '.join(sorted({str(x).split(':', 1)[0] for x in dropped})[:6])})")
         for f in self.rfacts("listen_port"):
             if str(f["subject"]).startswith("127.0.0.1:"):
                 s = f["sites"][0] if f.get("sites") else {}
@@ -496,9 +516,10 @@ class Planner:
                            "compose": self.compose_path or None},
                 "images": images, "base_image": self.base_image(), "apt_packages": self.apt(),
                 "requirements": reqs, "pip_install": pins, "pip_extra_index": extra_index,
+                "build_from_source": self.source_builds(pins),
                 "copy": copy, "dockerignore": ignore, "env": env, "secrets": self.secrets(), "volumes": vols,
                 "writable_dirs": dirs, "env_remap": {k: v[1] for k, v in remap.items()},
-                "compose_runtime": self.compose_runtime(), "code_changes_required": self.code_changes(),
+                "compose_runtime": self.compose_runtime(), "code_changes_required": self.code_changes(ignore),
                 "user": {"name": APP_USER, "uid": APP_UID, "home": APP_HOME},
                 "cmd": self.naive["cmd"], "workdir": self.naive["workdir"], "python": self.naive["python"],
                 "image_env": {k: v for k, v in self.naive["env"].items() if k == "PYTHONPATH"},
@@ -530,7 +551,15 @@ def dockerfile(p):
     L += ["", f"WORKDIR {p['workdir']}", "", "# Python packages: keep / swap / add from the package analyzer "
           "(removed: " + (", ".join(r["name"] for r in p["requirements"]["remove"]) or "none") + ")"]
     idx = f"--extra-index-url {p['pip_extra_index']} " if p.get("pip_extra_index") else ""
-    L.append(f"RUN pip install --no-cache-dir {idx}\\\n    " + " \\\n    ".join(p["pip_install"]))
+    src = p.get("build_from_source") or []
+    tools = ("gcc libc6-dev python3-dev" if kind == "nvidia" else "gcc libc6-dev")
+    if src:      # compiled by pip: a compiler only for this step, removed in the same layer (not in the image)
+        L.append(f"# {', '.join(src)}: no prebuilt wheel, pip compiles them - gcc only during this step")
+        L.append(f"RUN apt-get update && apt-get install -y --no-install-recommends {tools} \\\n"
+                 f" && pip install --no-cache-dir {idx}\\\n    " + " \\\n    ".join(p["pip_install"])
+                 + f" \\\n && apt-get purge -y --auto-remove {tools} && rm -rf /var/lib/apt/lists/*")
+    else:
+        L.append(f"RUN pip install --no-cache-dir {idx}\\\n    " + " \\\n    ".join(p["pip_install"]))
     if kind == "pip-cuda" and any(x.startswith("onnxruntime-gpu[") for x in p["pip_install"]):
         sp = f"/usr/local/lib/python{p.get('python')}/site-packages/nvidia"
         L += ["# onnxruntime finds the CUDA / cuDNN libraries of the pip wheels here",
@@ -616,6 +645,70 @@ def compose_override(p, services, out_dir, compose_path):
     return "\n".join(L) + "\n"
 
 
+ENV_NOISE = {"TEMP", "TMP", "TMPDIR", "HOME", "PATH", "PWD", "HOSTNAME", "PYTHONPATH", "OMP_NUM_THREADS",
+             "MKL_NUM_THREADS", "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE"}
+
+
+def env_key(path):
+    """/home/x/.../recognized_people -> RECOGNIZED_PEOPLE_DIR (the .env name for a host folder)"""
+    return re.sub(r"[^A-Z0-9]+", "_", os.path.basename(str(path).rstrip("/")).upper()).strip("_") + "_DIR"
+
+
+def compose_new(p, out_dir, mac_needed):
+    """no compose file in the project: a compose.yml for the planned image + .env.example (one place for every
+    value that changes per site: env vars, host folders, the licence MAC)"""
+    name = slug(p["fixture"])
+    svc = re.sub(r"[^a-z0-9_-]+", "-", name) or "app"
+    env = [e for e in p["env"] if e["name"] not in ENV_NOISE]
+    vols = [(env_key(v["container_path"]), "./" + os.path.basename(v["container_path"].rstrip("/")),
+             v["container_path"]) for v in p["volumes"]]
+    wd = p["workdir"].rstrip("/")
+    dirs = [(env_key(d), "./" + d, wd + "/" + d) for d in p["writable_dirs"] if d not in (".", "") and
+            not d.startswith("/")]
+    cr = p["compose_runtime"]
+    shm = cr.get("shm_size")
+    if shm and cr.get("shm_measured_mb"):        # frames between processes grow with cameras / resolution: room x4
+        shm = f"{max(256, int(cr['shm_measured_mb'] * 4 // 64 + 1) * 64)}m"
+    L = [f"# Generated by xray_plan.py {VERSION}: runs the planned image. Everything that changes per machine / site",
+         "# is in .env (copy .env.example to .env and fill it in). Keep .env out of git: it holds passwords.",
+         "#   docker compose build      docker compose up -d      docker compose logs -f      docker compose down",
+         "services:", f"  {svc}:", f"    image: {name}-slim", "    build:",
+         f"      context: {p['inputs']['project']}", f"      dockerfile: {os.path.abspath(os.path.join(out_dir, 'Dockerfile'))}",
+         "    restart: unless-stopped", "    env_file: .env"]
+    if mac_needed:
+        L.append('    mac_address: "${MAC_ADDRESS:?set MAC_ADDRESS in .env (the MAC the licence expects)}"')
+    if shm:
+        L.append(f'    shm_size: "{shm}"')
+    if cr.get("ports"):
+        L.append("    ports:")
+        L += [f'      - "{x}"' for x in cr["ports"]]
+    if vols or dirs:
+        L.append("    volumes:")
+        L += [f"      - ${{{k}:-{d}}}:{c}" for k, d, c in vols + dirs]
+    if str(cr.get("gpus", "")).startswith("all"):
+        L += ["    deploy:", "      resources:", "        reservations:", "          devices:",
+              "            - driver: nvidia", "              count: all", "              capabilities: [gpu]"]
+    E = [f"# .env for {svc} - copy to .env next to compose.yml and fill in. Never commit .env (passwords).", ""]
+    if mac_needed:
+        E += ["# the licence check reads the network card: the MAC the licence was issued for", "MAC_ADDRESS=", ""]
+    if vols or dirs:
+        E.append("# folders on this machine (left: host, mounted into the container)")
+        E += [f"{k}={d}" for k, d, c in vols + dirs] + [""]
+    if env:
+        E.append("# env vars the code reads")
+        for e in env:          # comments on their own line: in an env file "X=1  # c" makes the value "1  # c"
+            dv = e.get("default_in_code")
+            if e.get("secret"):
+                E += ["# secret: fill it in here only - never in a Dockerfile, compose.yml or a chat", f"{e['name']}="]
+            elif dv is None:
+                E += ["# no default in the code: must be set", f"{e['name']}="]
+            else:
+                E.append(f"{e['name']}={dv}")
+    else:
+        E.append("# (the code reads no env vars yet: its settings are written in the code - see code_changes_required)")
+    return "\n".join(L) + "\n", "\n".join(E) + "\n"
+
+
 def cmd_plan(a):
     pl = Planner(a.fixture, jload(a.static) if a.static else None, jload(a.runtime) if a.runtime else None,
                  jload(a.pkg) if a.pkg else None, dockerfile=a.dockerfile,
@@ -634,7 +727,13 @@ def cmd_plan(a):
         with open(os.path.join(a.out, "compose.xray.yml"), "w", encoding="utf-8") as fh:
             fh.write(compose_override(p, pl.services, a.out, pl.compose_path))
     else:
-        print("  no compose service is built from this folder: no compose.xray.yml (build with docker build -f)")
+        mac = bool(pl.sfacts("hardware_identity"))
+        comp, envx = compose_new(p, a.out, mac)
+        with open(os.path.join(a.out, "compose.yml"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(comp)
+        with open(os.path.join(a.out, ".env.example"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(envx)
+        print("  no compose file built this folder: wrote compose.yml + .env.example (production: one .env per site)")
     print(f"xray-plan {VERSION}: {name} -> {a.out}/ (plan.json, Dockerfile, Dockerfile.dockerignore, compose.xray.yml)")
     print(f"  base {p['base_image']['choice']} ({p['base_image']['why']})")
     print(f"  GPU: {p['compose_runtime']['gpus']}")
@@ -644,7 +743,7 @@ def cmd_plan(a):
           f"writable: {', '.join(p['writable_dirs']) or 'none'}")
     print(f"  code changes needed: {len(p['code_changes_required'])}")
     for e in p["evidence"]:
-        if e.startswith(("cmd:", "python ", "GPU base", "no Dockerfile", "services ", "WARNING", "apt: ", "requirements: kept")):
+        if e.startswith(("cmd:", "python ", "GPU base", "no Dockerfile", "services ", "WARNING", "apt: ", "requirements: kept", "build: ")):
             print(f"  NOTE: {e}")
     return 0
 
@@ -744,7 +843,8 @@ VERIFY_CATS = ("local_module", "dynamic_import", "third_party_import", "model_fi
 def cmd_verify(a):
     """Same scenario on the naive image and on the planned image: did the program do the same things?"""
     old, new = jload(a.naive), jload(a.planned)
-    home = lambda s: str(s).replace("/root/", APP_HOME + "/")
+    # /root -> the app user's home; random temp names (/tmp/tmpab12cd/...) are the same thing in both runs
+    home = lambda s: re.sub(r"/tmp/tmp[\w-]{4,}", "/tmp/<tmp>", str(s).replace("/root/", APP_HOME + "/"))
 
     def index(rt):
         """third-party imports are compared by import name (psycopg2 -> psycopg2-binary is the same import)"""

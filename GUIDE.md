@@ -20,16 +20,16 @@ Read this guide once from top to bottom before you start. Then follow it step by
 | **image** | the packed-up app Docker runs. "Naive image" = the big one you have today. |
 | **container** | a running image |
 | **output JSON** | the file each X-Ray step writes (you open it in the viewer, or give it to the next step) |
-| **terminal** | Linux / WSL: the Ubuntu window. Windows: PowerShell or the PyCharm "Terminal" tab. |
+| **terminal** | Linux / WSL: the Ubuntu window. Windows: CMD (Command Prompt) or the PyCharm "Terminal" tab. Nothing in this guide needs PowerShell. |
 
 **`python3` or `python`?** On Linux / WSL / Mac type `python3`. On Windows type `python`.
 This guide writes `python3`; change it if you are on Windows.
 Check it works: `python3 --version` must print 3.8 or newer. X-Ray needs nothing else (no pip install).
 
-**Windows PowerShell:** run this once in each new PowerShell window, so the tree lines (`├─`) show correctly
-in the window and in log files:
-```powershell
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+**Windows CMD:** the X-Ray tools write UTF-8 themselves. If the tree lines (`├─`) look garbled in the CMD window,
+run this once in that window (the log files are fine either way - open them in Notepad):
+```bat
+chcp 65001
 ```
 
 ---
@@ -68,9 +68,9 @@ An entry point is the file that is started. Look in this order:
    ```bash
    grep -rl --include=*.py "__main__" PROJECT_FOLDER | grep -v -e venv -e site-packages
    ```
-   Windows PowerShell:
-   ```powershell
-   Get-ChildItem -Recurse -Filter *.py PROJECT_FOLDER | Select-String "__main__" -List | Select Path
+   Windows CMD:
+   ```bat
+   findstr /s /m /c:"__main__" PROJECT_FOLDER\*.py
    ```
    You will often find many (tests, old scripts, backups). **Only the ones that are really started count.**
    If you are not sure, ask the person who deploys it, or check which file the Dockerfile/compose runs.
@@ -176,7 +176,7 @@ Nothing to upload or pick: the page opens already loaded. If it does not open by
 
 ### 3.5 Things to investigate yourself (search the code)
 X-Ray finds these, but when something looks wrong, these searches show you the lines (run in the project folder;
-PowerShell: `Select-String -Path *.py -Pattern "..." -Recurse` style, or PyCharm "Find in Files", Ctrl+Shift+F):
+Windows CMD: `findstr /s /n /c:"VideoCapture" *.py`, or PyCharm "Find in Files", Ctrl+Shift+F):
 
 | Search for | Why |
 |---|---|
@@ -206,6 +206,32 @@ paths, env var **names**, hosts and ports, but secrets are masked (`***`).
 **Never** upload your company's code or these outputs to a public place.
 
 ---
+
+## 3b. Before the first build - check the requirements and write the naive Dockerfile
+
+Why: most first builds fail on the same three things. `xray_naive.py` finds them **before** you build, in about a
+minute, without installing anything (pip only reads the package index - it needs internet):
+
+| It reports | Meaning | What the tool does |
+|---|---|---|
+| COMPILED | no ready-made Linux package ("wheel") for that version: pip compiles it in the build (`gcc not found`, `pg_config not found` ...) | the Dockerfile gets a compiler + the right `-dev` library |
+| MISSING | that version does not exist for Linux / this Python (`No matching distribution`) | lists the nearest versions that do: change the pin |
+| WINDOWS | a Windows-only package (`pyreadline3`, `pywin32` ...) - a `pip freeze` from a Windows PC | left out |
+| INDEX | `torch==2.8.0+cu126`: exists only on PyTorch's own index | the index line is added |
+
+```bat
+python xray_naive.py --project "PROJECT_FOLDER" --requirements requirements.txt --entry main.py --name app --gpu
+```
+(`--cpu` for a CPU image; `--python 3.10` if the machine that runs the code today has Python 3.10.)
+It writes `runs\app\naive\`: `naive-check.txt` (read it), `Dockerfile.naive`, `Dockerfile.naive.dockerignore`,
+`requirements.docker.txt`. Copy the three Docker files into the project folder - the tool never overwrites the
+project's own files. Then `xray_runfile.py` writes `build-naive.bat` as usual.
+
+The recipe it follows (also good to know when you write a Dockerfile by hand):
+- CPU: `FROM python:3.X` - the full image already has gcc and the common `-dev` libraries.
+- GPU: `FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` + Ubuntu's Python in a venv, + `build-essential python3-dev`
+  only when something is compiled. (`onnxruntime-gpu` older than 1.19 needs CUDA 11.8 + cuDNN 8 instead.)
+- opencv-python needs `libgl1` and glib.
 
 ## 4. Step 2 - Watch it run (needs Docker and an image that runs the app)
 
@@ -283,6 +309,13 @@ In `step2-needs.log` every item now says **seen running**, **its line ran** or *
 Send `step2-needs.log` + the end of `step2.log` to Claude.
 
 ---
+
+
+**Env vars: one file.** `xray_runfile.py` writes every env var the code reads into `runs\NAME\run.env`; all run
+files read it (`--env-file`). To change or add a value, edit `run.env` once - one `NAME=value` per line, no quotes,
+no comment after a value. For production, Step 4 writes `compose.yml` + `.env.example` (when the project has no
+compose file): copy `.env.example` to `.env`, fill it in per machine / site (folders, MAC, passwords), and run
+`docker compose up -d`. Never commit `.env`.
 
 ## 5. Step 3 - What is inside the image
 
@@ -384,3 +417,132 @@ chat, not publicly.
 | 3 packages | `xray_pkg.py baseline` / `scan` (in containers), `facts` | app-pkg.json | the `requirements:` line |
 | 4 plan | `xray_plan.py plan --project --dockerfile --compose ...` | plans/app/ | `NOTE:` lines, the Dockerfile |
 | 4 verify | same run on the new image, `facts`, `verify` | verdict | `VERDICT: PASS` |
+
+## 10. Check it yourself - by hand, without X-Ray
+
+X-Ray does these looks automatically, over a whole run. Doing a few by hand is the best way to trust (or question)
+what it says, and to teach it. All commands are for Windows CMD; `IMAGE` is e.g. `app-naive` or `app-slim`.
+
+**Look inside an image (nothing of the app runs):**
+```bat
+docker run --rm -it --entrypoint bash IMAGE
+```
+Then, inside (type `exit` to leave):
+```bash
+id                                    # which user the app runs as (root or app)
+ls -la /app                           # the files that are in the image
+du -sh /app/* | sort -h               # their sizes
+pip list                              # installed packages
+du -sh $(python -c "import site;print(site.getsitepackages()[0])")/* | sort -h | tail -15   # biggest packages
+python -c "import cv2, numpy; print('imports ok')"                                          # does an import work?
+cat /etc/os-release                   # which Linux
+```
+**The GPU from inside a container:**
+```bat
+docker run --rm --gpus all --entrypoint "" IMAGE nvidia-smi
+docker run --rm --gpus all --entrypoint "" IMAGE python -c "import torch; print(torch.cuda.is_available())"
+docker run --rm --gpus all --entrypoint "" IMAGE python -c "import onnxruntime as o; print(o.get_available_providers())"
+```
+**Compare two images:**
+```bat
+docker images
+docker history IMAGE                  # which Dockerfile line added how many MB
+docker run --rm --entrypoint "" app-naive ls /app
+docker run --rm --entrypoint "" app-slim ls /app
+```
+**Inside a RUNNING container** (start the app normally, then in a second CMD):
+```bat
+docker ps                             # the CONTAINER ID
+docker stats                          # live CPU / RAM per container (Ctrl+C to stop)
+docker logs -f CONTAINER_ID           # the app's output
+docker exec -it CONTAINER_ID bash
+```
+inside:
+```bash
+ps aux                                # every process of the app (PID = 2nd column)
+# slim images have no "ps": this lists PID + command instead
+for p in /proc/[0-9]*; do printf "%s  " ${p#/proc/}; tr "\0" " " < $p/cmdline; echo; done
+ls -l /proc/PID/fd | grep -E "onnx|pt|jpg|mp4|csv"     # files that process has open RIGHT NOW (models, videos)
+awk '{print $6}' /proc/PID/maps | grep '\.so' | sort -u # libraries it loaded
+df -h /dev/shm                        # shared memory in use (frames between processes)
+nvidia-smi                            # GPU memory per process
+env | sort                            # the env vars the container really got
+ls -la /app/logs                      # what it wrote
+```
+**Check one X-Ray claim by hand**, e.g. "folder `old_models/` is not used": while the app runs,
+`ls -l /proc/*/fd 2>/dev/null | grep old_models` shows nothing -> nothing has it open. (A short look can miss a
+file that is read once at start; X-Ray watches the whole run, and verify proves it: the small image works without it.)
+
+
+## 11. Watch a whole run by hand - what X-Ray does, with standard Linux tools
+
+The same questions X-Ray answers, answered with `strace` (every file / network call), `/proc`, `lsof`, `ss`.
+Use the NAIVE image (it runs as root, so tools can be installed inside; `--rm` throws them away afterwards).
+
+**Window 1 - start a container that may be watched** (`SYS_PTRACE` lets strace / py-spy attach; `/out` is a
+folder on your PC for the results):
+```bat
+mkdir manual
+docker run --rm -it --gpus all --shm-size 2g --cap-add SYS_PTRACE --security-opt seccomp=unconfined ^
+  -v "%CD%\manual:/out" --entrypoint bash IMAGE
+```
+inside (Ubuntu / Debian based image):
+```bash
+apt-get update && apt-get install -y strace lsof procps iproute2
+touch /tmp/start                                     # marks the start: "files written after this"
+strace -f -e trace=openat,connect -o /out/trace.txt python -X importtime main.py 2> /out/imports.txt
+```
+(`-f` follows every child process; `-X importtime` lists every import. Let it run a few minutes, then Ctrl+C.)
+
+**Window 2 - look while it runs:**
+```bat
+docker ps
+docker exec -it CONTAINER_ID bash
+```
+```bash
+ps -ef                                               # all processes (PID column 2)
+lsof -p PID | grep -E '\.onnx|\.pt|\.so'             # files + libraries that process has open now
+ss -tnp                                              # network connections now (cameras :554, database :5432)
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv     # GPU memory per process
+df -h /dev/shm; ls -la /dev/shm                      # shared memory
+grep -E 'Threads|VmRSS|VmHWM' /proc/PID/status       # threads, RAM now, RAM peak
+pip install py-spy && py-spy dump --pid PID          # what that Python process is doing right now
+```
+
+**After Ctrl+C (still in window 1) - read the recording** (the files are also in `manual\` on your PC):
+```bash
+# models / data files the run opened
+grep -E '\.onnx|\.pt"|\.pth|\.names|\.json"|\.yaml' /out/trace.txt | grep -v ENOENT | awk -F'"' '{print $2}' | sort -u
+# files it wrote (+ everything changed since the start)
+grep -E 'O_WRONLY|O_RDWR' /out/trace.txt | grep -v ENOENT | awk -F'"' '{print $2}' | sort -u
+find / -xdev -newer /tmp/start -type f 2>/dev/null | grep -vE '^/(proc|sys|out)/'
+# network: which IP:port it connected to
+grep 'connect(' /out/trace.txt | grep -oE 'sin_port=htons\([0-9]+\), sin_addr=inet_addr\("[0-9.]+"\)' \
+  | sed -E 's/sin_port=htons\(([0-9]+)\), sin_addr=inet_addr\("([0-9.]+)"\)/\2:\1/' | sort -u
+# system libraries loaded, and which apt package each comes from
+grep '\.so' /out/trace.txt | grep -v ENOENT | awk -F'"' '{print $2}' | grep -v site-packages | sort -u > /out/libs.txt
+xargs -a /out/libs.txt dpkg -S 2>/dev/null | cut -d: -f1 | sort -u
+# Python modules imported (top level names)
+awk -F'|' '{print $3}' /out/imports.txt | sed 's/^ *//' | cut -d. -f1 | sort -u
+# project files that were NEVER opened (candidates for .dockerignore - check them before deleting anything)
+grep -v ENOENT /out/trace.txt | awk -F'"' 'NF>1 {p=$2; if (p !~ /^\//) p="/app/" p; print p}' | grep '^/app/' | sort -u > /out/opened.txt
+find /app -type f | sort > /out/present.txt
+comm -23 /out/present.txt /out/opened.txt
+# env vars the code reads (from the code itself)
+grep -rn --include=*.py -E 'getenv|environ' /app
+```
+What this does not show, and X-Ray does: which lines ran, files only some code paths use (a short run can miss
+them - run longer, or start from the code), env vars read with a computed name, and the before/after check
+(verify) that the small image still does the same.
+
+
+**Windows CMD equivalents** (no PowerShell needed anywhere):
+
+| Want | CMD |
+|---|---|
+| the end of a log | `notepad runs\NAME\step2.log`, then Ctrl+End |
+| watch a log while it grows | open it again in Notepad (it shows the current state), or `type runs\NAME\build.log` |
+| search in files | `findstr /s /n /c:"text" *.py` |
+| can this PC reach a host:port? | `docker run --rm busybox nc -zv -w 3 192.168.1.75 5432` ("open" = yes) |
+| ping a camera | `ping 10.10.10.17` |
+| folder size | Explorer: right-click the folder -> Properties |

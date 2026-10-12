@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GPU Docker Handbook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: a reference manual - sticky contents rail on wide screens, one reading column, tables that scroll inside themselves */
+:root {
+  --bg: #f5f7f6;
+  --surface: #ffffff;
+  --fg: #172022;
+  --muted: #56666a;
+  --line: #d6dfdd;
+  --accent: #0d6e66;
+  --accent-soft: #e2f1ee;
+  --code-bg: #edf2f1;
+  --warn: #9a5b00;
+  --warn-soft: #fbf0dc;
+  --bad: #a1262d;
+  --good: #1f7a3a;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1515; --surface: #141d1e; --fg: #e2ebea; --muted: #94a7a6; --line: #263334;
+    --accent: #5cc8bb; --accent-soft: #15302d; --code-bg: #182425; --warn: #f0b45a; --warn-soft: #2e2413;
+    --bad: #f07a80; --good: #6fd38c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1515; --surface: #141d1e; --fg: #e2ebea; --muted: #94a7a6; --line: #263334;
+  --accent: #5cc8bb; --accent-soft: #15302d; --code-bg: #182425; --warn: #f0b45a; --warn-soft: #2e2413;
+  --bad: #f07a80; --good: #6fd38c; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 15.5px; line-height: 1.6; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 80px;
+  display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 44px; }
+@media (max-width: 900px) { .wrap { grid-template-columns: minmax(0, 1fr); gap: 20px; padding-inline: 16px; } }
+nav.toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 20px); align-self: start;
+  font-size: 13.5px; display: flex; flex-direction: column; gap: 2px; max-height: calc(100vh - 40px); overflow: auto; }
+nav.toc .lbl { font-family: var(--f-display); text-transform: uppercase; letter-spacing: .08em; font-size: 12px;
+  color: var(--muted); margin-bottom: 6px; }
+nav.toc a { color: var(--fg); text-decoration: none; padding: 4px 10px; border-left: 2px solid var(--line); }
+nav.toc a:hover, nav.toc a:focus-visible { border-left-color: var(--accent); color: var(--accent); outline: none; }
+@media (max-width: 900px) {
+  nav.toc { position: static; max-height: none; flex-direction: row; flex-wrap: wrap; gap: 6px; }
+  nav.toc .lbl { width: 100%; }
+  nav.toc a { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 12.5px; }
+}
+main { min-width: 0; }
+header.top { display: flex; flex-direction: column; gap: 10px; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
+.eyebrow { font-family: var(--f-mono); font-size: 12.5px; color: var(--accent); letter-spacing: .02em; }
+h1 { font-family: var(--f-display); font-weight: 600; font-size: clamp(30px, 4.4vw, 44px); line-height: 1.08;
+  margin: 0; text-wrap: balance; letter-spacing: -.01em; }
+.lede { max-width: 68ch; color: var(--muted); margin: 0; font-size: 16.5px; }
+.finder { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 6px; }
+.finder label { font-size: 13px; color: var(--muted); }
+.finder input { font: inherit; font-size: 14px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--fg); min-width: 0; width: min(420px, 100%); }
+.finder input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.finder .hits { font-family: var(--f-mono); font-size: 12.5px; color: var(--muted); }
+section { padding-top: 34px; scroll-margin-top: 16px; }
+h2 { font-family: var(--f-display); font-weight: 600; font-size: 26px; margin: 0 0 6px; letter-spacing: -.005em;
+  text-wrap: balance; }
+h3 { font-family: var(--f-display); font-weight: 600; font-size: 18.5px; margin: 26px 0 6px; text-wrap: balance; }
+p { margin: 8px 0; max-width: 72ch; }
+.sub { color: var(--muted); max-width: 72ch; margin: 0 0 12px; }
+code { font-family: var(--f-mono); font-size: .88em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+  overflow-wrap: anywhere; }
+.codebox { position: relative; margin: 12px 0; }
+pre { font-family: var(--f-mono); font-size: 13px; line-height: 1.55; background: var(--code-bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 12px 14px; overflow-x: auto; margin: 0; }
+pre code { background: none; padding: 0; font-size: inherit; }
+.copy { position: absolute; top: 6px; right: 6px; font: 500 12px var(--f-body); border: 1px solid var(--line);
+  background: var(--surface); color: var(--muted); border-radius: 5px; padding: 3px 9px; cursor: pointer; }
+.copy:hover, .copy:focus-visible { color: var(--accent); border-color: var(--accent); outline: none; }
+.tbl { overflow-x: auto; margin: 12px 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 640px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+th { font-family: var(--f-display); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); background: var(--code-bg); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.n { font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.hide { display: none; }
+.note { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 10px 14px; border-radius: 0 6px 6px 0;
+  margin: 14px 0; max-width: 78ch; }
+.note b { color: var(--warn); }
+.tip { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 10px 14px; border-radius: 0 6px 6px 0;
+  margin: 14px 0; max-width: 78ch; }
+.layers { display: grid; gap: 8px; margin: 14px 0; max-width: 760px; }
+.layer { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 10px 14px;
+  display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; }
+.layer .k { font-family: var(--f-display); font-weight: 600; font-size: 14px; color: var(--accent); }
+.layer .v { font-size: 14px; }
+.layer.drv { border-style: dashed; }
+@media (max-width: 560px) { .layer { grid-template-columns: minmax(0, 1fr); gap: 2px; } }
+.pill { display: inline-block; font: 500 11.5px var(--f-mono); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line);
+  white-space: nowrap; }
+.pill.good { color: var(--good); border-color: currentColor; }
+.pill.warn { color: var(--warn); border-color: currentColor; }
+.pill.bad { color: var(--bad); border-color: currentColor; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 12px 0; }
+.card { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 12px 14px; min-width: 0; }
+.card h4 { margin: 0 0 4px; font-family: var(--f-display); font-size: 16px; font-weight: 600; }
+.card p { font-size: 14px; margin: 4px 0; }
+ul { padding-left: 20px; max-width: 74ch; }
+li { margin: 3px 0; }
+footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+a { color: var(--accent); }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<nav class="toc" aria-label="Contents">
+  <div class="lbl">Contents</div>
+  <a href="#layers">How the GPU gets in</a>
+  <a href="#match">The four things that must match</a>
+  <a href="#bases">Base images</a>
+  <a href="#cuda">CUDA libraries</a>
+  <a href="#frameworks">Frameworks and CUDA</a>
+  <a href="#compile">Compiling: when and with what</a>
+  <a href="#devlibs">Packages that need -dev libraries</a>
+  <a href="#runtime">Runtime system libraries</a>
+  <a href="#sizes">Sizes</a>
+  <a href="#choose">Which base to choose</a>
+  <a href="#errors">Errors and fixes</a>
+  <a href="#check">Check it in a container</a>
+</nav>
+
+<main>
+<header class="top">
+  <div class="eyebrow">nvidia/cuda · CUDA 11.8 → 13 · cuDNN 8/9 · sm_86 / sm_89 / sm_120 · gcc · apt</div>
+  <h1>GPU Docker Handbook</h1>
+  <p class="lede">What is inside a GPU image, where each CUDA library comes from, when pip has to compile something and
+    what it needs, and which system libraries ML packages expect. Sizes marked “measured” come from real project images;
+    other sizes are rough and change between versions.</p>
+  <div class="finder">
+    <label for="q">Find in tables</label>
+    <input id="q" type="search" placeholder="e.g. psycopg2, libgl1, cudnn, sm_120, gcc" autocomplete="off">
+    <span class="hits" id="hits" aria-live="polite"></span>
+  </div>
+</header>
+
+<section id="layers">
+  <h2>How the GPU gets into a container</h2>
+  <p class="sub">Three layers. Only the bottom one is in your image. Mixing them up causes most GPU problems.</p>
+  <div class="layers">
+    <div class="layer drv"><div class="k">Host driver</div><div class="v">Installed on the machine, never in the image.
+      Windows + Docker Desktop: the normal Windows NVIDIA driver (Docker uses it through WSL2). Linux: the NVIDIA driver +
+      the NVIDIA Container Toolkit. <code>nvidia-smi</code> on the host shows the highest CUDA version this driver supports.</div></div>
+    <div class="layer drv"><div class="k">Injected at run</div><div class="v"><code>docker run --gpus all</code> mounts the driver's
+      user-space parts into the container: <code>libcuda.so</code>, <code>libnvidia-ml.so</code> (NVML), <code>nvidia-smi</code>,
+      and with the <code>video</code> capability <code>libnvcuvid.so</code> / <code>libnvidia-encode.so</code> (hardware video decode/encode).</div></div>
+    <div class="layer"><div class="k">In the image</div><div class="v">The CUDA <b>toolkit libraries</b> your code links against:
+      <code>libcudart</code>, cuBLAS, cuDNN, cuFFT … They come either from an <code>nvidia/cuda</code> base image or from pip
+      wheels (<code>nvidia-*-cu12</code>, pulled in by torch / onnxruntime-gpu). Never both, if you can avoid it: that is the
+      same 3–5 GB twice.</div></div>
+  </div>
+  <h3>Which GPUs and which driver features a container gets</h3>
+  <div class="tbl"><table>
+    <tr><th>Setting</th><th>Where</th><th>Meaning</th></tr>
+    <tr><td><code>--gpus all</code></td><td>docker run</td><td>all GPUs. One GPU: <code>--gpus "device=0"</code>; two: <code>--gpus "\"device=0,1\""</code></td></tr>
+    <tr><td><code>deploy.resources.reservations.devices</code></td><td>compose</td><td><code>driver: nvidia</code>, <code>count: all</code> (or <code>device_ids: ["0"]</code>), <code>capabilities: [gpu]</code></td></tr>
+    <tr><td><code>NVIDIA_VISIBLE_DEVICES</code></td><td>env</td><td>which GPUs (<code>all</code>, <code>0</code>, <code>0,1</code>, GPU UUIDs)</td></tr>
+    <tr><td><code>NVIDIA_DRIVER_CAPABILITIES</code></td><td>env</td><td>default <code>compute,utility</code>. Add <code>video</code> for NVDEC/NVENC (ffmpeg <code>-hwaccel cuda</code>, PyNvVideoCodec, DeepStream); <code>graphics,display</code> for OpenGL/windows</td></tr>
+    <tr><td><code>CUDA_VISIBLE_DEVICES</code></td><td>env, read by the app</td><td>renumbers/limits GPUs inside the process (torch, onnxruntime see only these)</td></tr>
+  </table></div>
+</section>
+
+<section id="match">
+  <h2>The four things that must match</h2>
+  <p class="sub">A GPU image works only when all four line up. Check them in this order.</p>
+
+  <h3>1. Host driver ≥ the CUDA version in the image</h3>
+  <div class="tbl"><table>
+    <tr><th>CUDA in the image</th><th>Minimum Linux driver</th><th>Minimum Windows driver</th><th>Note</th></tr>
+    <tr><td>11.x</td><td class="n">≥ 450.80.02</td><td class="n">≥ 452.39</td><td>minor-version compatibility across 11.x</td></tr>
+    <tr><td>12.x</td><td class="n">≥ 525.60.13</td><td class="n">≥ 527.41</td><td>runs 12.0–12.9 builds; new features of 12.8 want a 570+ driver</td></tr>
+    <tr><td>13.x</td><td class="n">≥ 580</td><td class="n">≥ 580</td><td>CUDA 13 drops Maxwell, Pascal and Volta GPUs</td></tr>
+  </table></div>
+  <p>Quick check: the <b>“CUDA Version”</b> in the top right of <code>nvidia-smi</code> (on the host) is the newest CUDA the driver can run. The image's CUDA must not be newer.</p>
+
+  <h3>2. GPU architecture ↔ what the libraries were compiled for</h3>
+  <div class="tbl"><table>
+    <tr><th>GPUs</th><th>Architecture</th><th>Compute capability</th><th>Needs at least</th></tr>
+    <tr><td>GTX 10xx, P100</td><td>Pascal</td><td><code>sm_60 / sm_61</code></td><td>CUDA 8; not supported by CUDA 13</td></tr>
+    <tr><td>RTX 20xx, T4</td><td>Turing</td><td><code>sm_75</code></td><td>CUDA 10</td></tr>
+    <tr><td>A100</td><td>Ampere (datacenter)</td><td><code>sm_80</code></td><td>CUDA 11.0</td></tr>
+    <tr><td>RTX 3060 / 3090, A10, A40</td><td>Ampere</td><td><code>sm_86</code></td><td>CUDA 11.1</td></tr>
+    <tr><td>RTX 4090 / 4080, L4, L40</td><td>Ada Lovelace</td><td><code>sm_89</code></td><td>CUDA 11.8</td></tr>
+    <tr><td>H100</td><td>Hopper</td><td><code>sm_90</code></td><td>CUDA 11.8</td></tr>
+    <tr><td>RTX 5090 / 5080</td><td>Blackwell</td><td><code>sm_120</code></td><td><b>CUDA 12.8</b></td></tr>
+    <tr><td>B200</td><td>Blackwell (datacenter)</td><td><code>sm_100</code></td><td>CUDA 12.8</td></tr>
+  </table></div>
+  <div class="note"><b>RTX 50 series.</b> Everything that runs GPU code must be built with CUDA 12.8 or newer. PyTorch: the
+    <code>cu128</code> (or newer) wheels, torch 2.7+. A <code>torch==…+cu126</code> pin installs fine but its GPU kernels refuse
+    <code>sm_120</code> (“no kernel image is available”). onnxruntime-gpu: use a recent release and confirm on the card.
+    Check what a torch build supports with <code>torch.cuda.get_arch_list()</code>.</div>
+
+  <h3>3. Framework build ↔ CUDA / cuDNN major version</h3>
+  <p>cuDNN 8 and cuDNN 9 are not interchangeable, nor are CUDA 11 and 12 libraries. Details per framework are in
+    <a href="#frameworks">Frameworks and CUDA</a>.</p>
+
+  <h3>4. Python version + Linux ↔ the wheels that exist</h3>
+  <div class="tbl"><table>
+    <tr><th>Base OS</th><th>System Python</th><th>glibc</th><th>Note</th></tr>
+    <tr><td>Ubuntu 20.04</td><td>3.8</td><td class="n">2.31</td><td>end of standard support</td></tr>
+    <tr><td>Ubuntu 22.04</td><td>3.10</td><td class="n">2.35</td><td>libglib2.0-0, libgl1</td></tr>
+    <tr><td>Ubuntu 24.04</td><td>3.12</td><td class="n">2.39</td><td>package names end in <code>t64</code> (libglib2.0-0t64); <code>pip install</code> into system Python is blocked → use a venv</td></tr>
+    <tr><td>Debian 12 (bookworm)</td><td>3.11</td><td class="n">2.36</td><td>older <code>python:3.X</code> images</td></tr>
+    <tr><td>Debian 13 (trixie)</td><td>3.13</td><td class="n">2.41</td><td>current <code>python:3.X-slim</code> base; <code>t64</code> names</td></tr>
+  </table></div>
+  <p>The official <code>python:3.X</code> images carry their own Python (any version) on Debian; Ubuntu-based images
+    (<code>nvidia/cuda</code>) use Ubuntu's Python version. Wheels tagged <code>manylinux_2_28</code> need glibc ≥ 2.28, which all
+    of the above have. A pin that is old for the Python version has no wheel and gets compiled (see <a href="#compile">Compiling</a>).</p>
+</section>
+
+<section id="bases">
+  <h2>Base images</h2>
+  <h3>nvidia/cuda flavors</h3>
+  <p class="sub">Tag pattern <code>nvidia/cuda:&lt;CUDA&gt;-&lt;flavor&gt;-&lt;os&gt;</code>, e.g. <code>12.8.1-cudnn-runtime-ubuntu24.04</code>.
+    Older tags name the cuDNN major: <code>11.8.0-cudnn8-runtime-ubuntu22.04</code>. None of them contain Python.</p>
+  <div class="tbl"><table data-filter>
+    <tr><th>Flavor</th><th>Contains</th><th>Rough size (unpacked)</th><th>Use it for</th></tr>
+    <tr><td><code>base</code></td><td>CUDA runtime <code>libcudart</code> only</td><td class="n">≈ 0.2–0.4 GB</td><td>apps that bring their own CUDA libs (pip wheels)</td></tr>
+    <tr><td><code>runtime</code></td><td>base + cuBLAS, cuFFT, cuRAND, cuSOLVER, cuSPARSE, NPP, nvJPEG, NCCL</td><td class="n">≈ 2.5–3.5 GB</td><td>CUDA apps without cuDNN</td></tr>
+    <tr><td><code>cudnn-runtime</code></td><td>runtime + cuDNN</td><td class="n">≈ 4.5–5 GB (measured: CUDA part 4.5–4.9 GB)</td><td>onnxruntime-gpu / TensorFlow without pip CUDA; the safe production choice</td></tr>
+    <tr><td><code>devel</code></td><td>runtime + <code>nvcc</code> compiler, headers, static libs, tools</td><td class="n">≈ 6–8 GB</td><td>compiling CUDA code (build stage only)</td></tr>
+    <tr><td><code>cudnn-devel</code></td><td>devel + cuDNN + headers</td><td class="n">≈ 9–11 GB</td><td>compiling code that uses cuDNN (build stage only)</td></tr>
+  </table></div>
+  <p>OS variants: <code>ubuntu20.04 / 22.04 / 24.04</code>, <code>ubi8 / ubi9</code>, <code>rockylinux8 / 9</code>.</p>
+
+  <h3>Other bases you will meet</h3>
+  <div class="tbl"><table data-filter>
+    <tr><th>Image</th><th>What it is</th><th>Size</th><th>When</th></tr>
+    <tr><td><code>python:3.X-slim</code></td><td>Debian + Python, no compiler, few libs</td><td class="n">≈ 0.15 GB</td><td>CPU apps; GPU apps whose CUDA comes from pip wheels (torch)</td></tr>
+    <tr><td><code>python:3.X</code></td><td>Debian + Python + gcc + common <code>-dev</code> libraries</td><td class="n">≈ 1 GB</td><td>naive images and build stages: compiled packages just work</td></tr>
+    <tr><td><code>pytorch/pytorch:&lt;ver&gt;-cuda&lt;x&gt;-cudnn&lt;y&gt;-runtime</code></td><td>Ubuntu + conda Python + torch + CUDA</td><td class="n">≈ 6–8 GB</td><td>quick torch experiments; heavier than slim + wheel</td></tr>
+    <tr><td><code>nvcr.io/nvidia/pytorch:YY.MM-py3</code></td><td>NVIDIA NGC: torch, CUDA, cuDNN, TensorRT, compilers, tools</td><td class="n">≈ 15–20 GB</td><td>training / development, not slim deployment</td></tr>
+    <tr><td><code>nvcr.io/nvidia/tensorrt:YY.MM-py3</code></td><td>TensorRT + CUDA + Python</td><td class="n">large</td><td>building / running TensorRT engines</td></tr>
+    <tr><td><code>nvcr.io/nvidia/deepstream:&lt;ver&gt;</code></td><td>DeepStream SDK: GStreamer video analytics, TensorRT, NVDEC</td><td class="n">large</td><td>multi-camera video pipelines in DeepStream</td></tr>
+    <tr><td><code>tensorflow/tensorflow:&lt;ver&gt;-gpu</code></td><td>TensorFlow + matching CUDA/cuDNN</td><td class="n">≈ 5–7 GB</td><td>TensorFlow GPU</td></tr>
+  </table></div>
+</section>
+
+<section id="cuda">
+  <h2>CUDA libraries: what they are and who loads them</h2>
+  <p class="sub">Same libraries, two packagings: Debian packages in <code>nvidia/cuda</code> images, or pip wheels (<code>nvidia-*-cu12</code>)
+    that torch and <code>onnxruntime-gpu[cuda,cudnn]</code> install. Sizes are the pip wheels' installed size, measured.</p>
+  <div class="tbl"><table data-filter>
+    <tr><th>Library file</th><th>pip package</th><th>Size</th><th>What for / who needs it</th></tr>
+    <tr><td><code>libcudart.so.12</code></td><td><code>nvidia-cuda-runtime-cu12</code></td><td class="n">5 MB</td><td>every CUDA program</td></tr>
+    <tr><td><code>libcublas.so.12</code>, <code>libcublasLt.so.12</code></td><td><code>nvidia-cublas-cu12</code></td><td class="n">≈ 0.6–0.8 GB</td><td>matrix math: torch, onnxruntime, TensorFlow</td></tr>
+    <tr><td><code>libcudnn*.so.9</code></td><td><code>nvidia-cudnn-cu12</code></td><td class="n">≈ 1.0–1.2 GB</td><td>convolutions, attention: torch, onnxruntime, TF</td></tr>
+    <tr><td><code>libcufft.so.11</code></td><td><code>nvidia-cufft-cu12</code></td><td class="n">≈ 0.28 GB</td><td>FFT; onnxruntime's CUDA provider needs it to load</td></tr>
+    <tr><td><code>libcurand.so.10</code></td><td><code>nvidia-curand-cu12</code></td><td class="n">≈ 0.16 GB</td><td>random numbers; onnxruntime needs it to load</td></tr>
+    <tr><td><code>libnvrtc.so.12</code></td><td><code>nvidia-cuda-nvrtc-cu12</code></td><td class="n">≈ 0.22 GB</td><td>compiles kernels at run time (onnxruntime, torch JIT)</td></tr>
+    <tr><td><code>libnvJitLink.so.12</code></td><td><code>nvidia-nvjitlink-cu12</code></td><td class="n">≈ 0.09 GB</td><td>needed by cuFFT / cuSPARSE 12.x</td></tr>
+    <tr><td><code>libcusolver</code>, <code>libcusparse</code></td><td><code>nvidia-cusolver-cu12</code>, <code>nvidia-cusparse-cu12</code></td><td class="n">≈ 0.3 GB each</td><td>linear algebra / sparse (torch)</td></tr>
+    <tr><td><code>libnccl.so.2</code></td><td><code>nvidia-nccl-cu12</code></td><td class="n">≈ 0.2–0.3 GB</td><td>multi-GPU communication (torch distributed)</td></tr>
+    <tr><td><code>libcupti</code>, <code>libcusparseLt</code>, <code>nvshmem</code></td><td><code>nvidia-cuda-cupti-cu12</code> …</td><td class="n">small–medium</td><td>profiling and newer torch features</td></tr>
+    <tr><td><code>triton</code> (Python + LLVM)</td><td><code>triton</code></td><td class="n">≈ 0.5 GB (measured 566 MB)</td><td><code>torch.compile</code>; installed with torch</td></tr>
+    <tr><td><code>libnvinfer</code></td><td><code>tensorrt</code></td><td class="n">≈ 1–2 GB</td><td>TensorRT engines, onnxruntime's TensorRT provider</td></tr>
+    <tr><td><code>libnvcuvid</code>, <code>libnvidia-encode</code></td><td>from the driver (<code>video</code> capability)</td><td class="n">–</td><td>hardware video decode / encode</td></tr>
+    <tr><td><code>libnvidia-ml</code> (NVML)</td><td>from the driver (<code>utility</code>)</td><td class="n">–</td><td><code>nvidia-smi</code>, <code>pynvml</code> / <code>nvidia-ml-py</code></td></tr>
+  </table></div>
+  <div class="tip">Pip CUDA libraries live in <code>site-packages/nvidia/&lt;name&gt;/lib</code>. torch finds its own; onnxruntime needs them on
+    <code>LD_LIBRARY_PATH</code> (or <code>onnxruntime.preload_dlls()</code> in 1.21+). Without that: “Failed to load library
+    libonnxruntime_providers_cuda.so” and a silent fall back to the CPU.</div>
+<div class="codebox"><pre><code># python:3.12-slim image, CUDA from pip wheels: let onnxruntime find them
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.12/site-packages/nvidia/cufft/lib:/usr/local/lib/python3.12/site-packages/nvidia/curand/lib</code></pre></div>
+</section>
+
+<section id="frameworks">
+  <h2>Frameworks and the CUDA they need</h2>
+  <div class="tbl"><table data-filter>
+    <tr><th>Package</th><th>CUDA it brings / needs</th><th>Install</th><th>Watch out</th></tr>
+    <tr><td><code>torch</code> (Linux, PyPI)</td><td>brings its own CUDA as <code>nvidia-*-cu12</code> wheels</td><td><code>pip install torch</code> (PyPI default build) or <code>--index-url https://download.pytorch.org/whl/cu126</code> / <code>cu128</code> / <code>cpu</code></td><td><code>+cuXXX</code> pins exist only on PyTorch's index; RTX 50 needs cu128+; CPU-only: <code>/whl/cpu</code> saves ~4 GB</td></tr>
+    <tr><td><code>onnxruntime-gpu</code> ≥ 1.19</td><td>CUDA 12.x + cuDNN 9 (not bundled)</td><td><code>onnxruntime-gpu[cuda,cudnn]</code> pulls the pip libs, or use a <code>cudnn-runtime</code> base</td><td>needs <code>LD_LIBRARY_PATH</code> with pip libs; check <code>get_available_providers()</code> AND the session's active providers</td></tr>
+    <tr><td><code>onnxruntime-gpu</code> 1.17–1.18</td><td>default build: CUDA 11.8 + cuDNN 8</td><td>base <code>nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04</code></td><td>a CUDA 12 / cuDNN 9 base will not load it</td></tr>
+    <tr><td><code>onnxruntime</code> (CPU)</td><td>none</td><td><code>pip install onnxruntime</code></td><td>never install both <code>onnxruntime</code> and <code>onnxruntime-gpu</code>: they overwrite each other</td></tr>
+    <tr><td><code>tensorflow</code> 2.15+</td><td>CUDA 12 + cuDNN via pip extras</td><td><code>pip install "tensorflow[and-cuda]"</code></td><td>GPU only on Linux / WSL</td></tr>
+    <tr><td><code>opencv-python</code></td><td>none (CPU build; bundles its own ffmpeg for video/RTSP)</td><td>pip</td><td>OpenCV CUDA modules need a source build; needs <code>libgl1</code> + glib at run time</td></tr>
+    <tr><td><code>cupy-cuda12x</code></td><td>CUDA 12 runtime libs</td><td>pip</td><td>match <code>cuda11x</code>/<code>cuda12x</code> to the image</td></tr>
+    <tr><td><code>ultralytics</code>, <code>timm</code>, <code>torchvision</code></td><td>whatever torch has</td><td>pip</td><td>torchvision must match the torch version exactly (+ same cuXXX)</td></tr>
+    <tr><td><code>nvidia-ml-py</code> / <code>pynvml</code></td><td>NVML from the driver</td><td>pip</td><td>works only with <code>--gpus</code></td></tr>
+    <tr><td>detectron2, mmcv (full), apex, flash-attn, xformers (no wheel), custom torch ops</td><td>compile CUDA code</td><td><code>nvidia/cuda:*-devel</code> build stage, same CUDA as torch, <code>TORCH_CUDA_ARCH_LIST="8.6;8.9;12.0"</code></td><td>prefer published wheels; build once, copy the wheel into the runtime image</td></tr>
+  </table></div>
+</section>
+
+<section id="compile">
+  <h2>Compiling: when pip needs a compiler, and with what</h2>
+  <p class="sub">pip compiles when there is no prebuilt Linux wheel for that version and Python: the package publishes only source, the pin
+    is older than the Python version, or it is Windows-only. Signs in the build log: <code>Building wheel for X (pyproject.toml)</code>,
+    then <code>gcc: not found</code>, <code>pg_config executable not found</code>, <code>Python.h: No such file</code>.</p>
+  <div class="tip">Find these before building: <code>xray_naive.py</code> in xray-tools checks every requirement against Linux for a given Python,
+    or by hand for one package: <code>pip download --only-binary=:all: --platform manylinux2014_x86_64 --python-version 3.12 --no-deps -d tmp PACKAGE==VER</code> (fails = no wheel).</div>
+  <div class="tbl"><table data-filter>
+    <tr><th>Tool</th><th>apt package (Debian / Ubuntu)</th><th>Already in</th><th>Needed for</th></tr>
+    <tr><td>C / C++ compiler, make, libc headers</td><td><code>build-essential</code> (or just <code>gcc libc6-dev</code>)</td><td><code>python:3.X</code>, <code>*-devel</code>; not <code>-slim</code>, not <code>nvidia/cuda</code> runtime</td><td>every package with C / Cython code and no wheel</td></tr>
+    <tr><td>Python headers</td><td><code>python3-dev</code> (Ubuntu's Python)</td><td>all <code>python:3.X</code> images</td><td>same: building any C extension against Ubuntu's Python</td></tr>
+    <tr><td>CMake, Ninja</td><td><code>cmake ninja-build</code></td><td>–</td><td>C++ projects: dlib, onnx from source, some ops</td></tr>
+    <tr><td>pkg-config</td><td><code>pkg-config</code></td><td><code>python:3.X</code></td><td>finding <code>-dev</code> libraries (mysqlclient, pycairo, h5py)</td></tr>
+    <tr><td>Fortran + BLAS/LAPACK</td><td><code>gfortran libopenblas-dev liblapack-dev</code></td><td>–</td><td>numpy / scipy from source (pick a version with a wheel instead)</td></tr>
+    <tr><td>Rust</td><td><code>cargo rustc</code> (or rustup)</td><td>–</td><td>old tokenizers, cryptography, orjson, pydantic-core without wheels</td></tr>
+    <tr><td>CUDA compiler <code>nvcc</code></td><td>image <code>nvidia/cuda:*-devel</code></td><td><code>*-devel</code></td><td>CUDA extensions (see Frameworks table)</td></tr>
+  </table></div>
+
+  <h3>Three patterns that keep compilers out of the final image</h3>
+  <div class="grid2">
+    <div class="card"><h4>Compiler for one step</h4><p>Install, pip, remove in the same <code>RUN</code>: the compiler never lands in a layer.</p></div>
+    <div class="card"><h4>Build stage</h4><p>Build wheels in <code>python:3.X</code> (has gcc), install them in <code>python:3.X-slim</code>.</p></div>
+    <div class="card"><h4>Prebuilt alternative</h4><p>Swap to a package that ships wheels: <code>psycopg2-binary</code>, <code>opencv-python-headless</code>, <code>PyMySQL</code>, a newer pin.</p></div>
+  </div>
+<div class="codebox"><pre><code># pattern 1 - gcc only during pip (python:3.X-slim)
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends gcc libc6-dev \
+ &amp;&amp; pip install --no-cache-dir -r requirements.txt \
+ &amp;&amp; apt-get purge -y --auto-remove gcc libc6-dev &amp;&amp; rm -rf /var/lib/apt/lists/*</code></pre></div>
+<div class="codebox"><pre><code># pattern 2 - build stage + slim final image
+FROM python:3.12 AS build
+COPY requirements.txt .
+RUN pip wheel --no-cache-dir -w /wheels -r requirements.txt
+
+FROM python:3.12-slim
+COPY --from=build /wheels /wheels
+RUN pip install --no-cache-dir --no-index /wheels/* &amp;&amp; rm -rf /wheels</code></pre></div>
+</section>
+
+<section id="devlibs">
+  <h2>Packages that need a -dev library to compile</h2>
+  <p class="sub">The <code>-dev</code> package is for building; at run time only the plain library stays (shown in the last column).</p>
+  <div class="tbl"><table data-filter>
+    <tr><th>Package</th><th>Build needs (apt)</th><th>Prebuilt alternative</th><th>Run time needs</th></tr>
+    <tr><td><code>psycopg2</code></td><td><code>libpq-dev</code> + gcc</td><td><code>psycopg2-binary</code></td><td><code>libpq5</code></td></tr>
+    <tr><td><code>mysqlclient</code></td><td><code>default-libmysqlclient-dev pkg-config</code> + gcc</td><td><code>PyMySQL</code></td><td><code>libmariadb3</code></td></tr>
+    <tr><td><code>pyodbc</code></td><td><code>unixodbc-dev</code> + g++</td><td>–</td><td><code>unixodbc</code> + the database's ODBC driver</td></tr>
+    <tr><td><code>netifaces</code></td><td>gcc + Python headers</td><td><code>netifaces-plus</code> (a fork with wheels; test it) or <code>ifaddr</code> (code change)</td><td>nothing</td></tr>
+    <tr><td><code>cython-bbox</code>, old <code>lap</code>, old <code>pycocotools</code></td><td>gcc + Python headers (numpy + Cython at build, pip handles it)</td><td>newer <code>lap</code> has wheels</td><td>nothing</td></tr>
+    <tr><td><code>insightface</code></td><td>g++ + Python headers</td><td>–</td><td>onnxruntime(-gpu)</td></tr>
+    <tr><td><code>dlib</code>, <code>face_recognition</code></td><td><code>cmake build-essential libopenblas-dev liblapack-dev</code> (10–30 min)</td><td>–</td><td><code>libopenblas0</code></td></tr>
+    <tr><td><code>pyaudio</code></td><td><code>portaudio19-dev</code> + gcc</td><td>–</td><td><code>libportaudio2</code></td></tr>
+    <tr><td><code>python-ldap</code></td><td><code>libldap2-dev libsasl2-dev</code></td><td><code>ldap3</code> (pure Python)</td><td>the plain ldap / sasl libs</td></tr>
+    <tr><td><code>pycairo</code>, <code>pygobject</code></td><td><code>libcairo2-dev pkg-config</code> (+ <code>libgirepository1.0-dev</code>)</td><td>–</td><td><code>libcairo2</code></td></tr>
+    <tr><td>old <code>lxml</code></td><td><code>libxml2-dev libxslt1-dev</code></td><td>newer lxml has wheels</td><td><code>libxml2 libxslt1.1</code></td></tr>
+    <tr><td>old <code>h5py</code></td><td><code>libhdf5-dev pkg-config</code></td><td>newer h5py has wheels</td><td>bundled in wheels</td></tr>
+    <tr><td><code>gssapi</code>, <code>pykerberos</code></td><td><code>libkrb5-dev</code></td><td>–</td><td><code>libgssapi-krb5-2</code></td></tr>
+    <tr><td><code>pycurl</code></td><td><code>libcurl4-openssl-dev libssl-dev</code></td><td><code>requests</code> / <code>httpx</code> (code change)</td><td><code>libcurl4</code></td></tr>
+    <tr><td>old <code>numpy</code> / <code>scipy</code> / <code>pandas</code></td><td>compilers + Fortran + BLAS; often fails anyway</td><td>a version with a wheel for that Python</td><td>–</td></tr>
+  </table></div>
+  <p>Windows-only lines from a <code>pip freeze</code> on Windows (<code>pyreadline3</code>, <code>pywin32</code>, <code>pywinpty</code>, <code>wmi</code>, <code>comtypes</code>) are not needed in a Linux image: remove them.</p>
+</section>
+
+<section id="runtime">
+  <h2>Runtime system libraries ML packages expect</h2>
+  <p class="sub">The “ImportError: libXYZ.so: cannot open shared object file” table. Slim images lack these; add only what the code really loads.</p>
+  <div class="tbl"><table data-filter>
+    <tr><th>Package / use</th><th>apt package</th><th>Error without it</th></tr>
+    <tr><td><code>opencv-python</code></td><td><code>libgl1</code>, <code>libglib2.0-0</code> (<code>libglib2.0-0t64</code> on Ubuntu 24.04 / Debian 13)</td><td><code>libGL.so.1</code>, <code>libgthread-2.0.so.0</code></td></tr>
+    <tr><td>OpenCV windows (<code>cv2.imshow</code>)</td><td><code>libx11-6 libxcb1</code> + a display</td><td><code>could not connect to display</code>, Qt <code>xcb</code> plugin errors</td></tr>
+    <tr><td><code>opencv-python-headless</code></td><td>none (no GUI)</td><td><code>imshow</code> raises an error instead</td></tr>
+    <tr><td><code>lightgbm</code>, some <code>xgboost</code></td><td><code>libgomp1</code></td><td><code>libgomp.so.1</code></td></tr>
+    <tr><td><code>torch</code>, <code>scikit-learn</code>, <code>numpy</code>, <code>scipy</code></td><td>none (they bundle their libs)</td><td>–</td></tr>
+    <tr><td>audio / video tools: <code>openai-whisper</code>, <code>moviepy</code>, <code>pydub</code>, <code>ffmpeg-python</code></td><td><code>ffmpeg</code></td><td><code>ffmpeg not found</code></td></tr>
+    <tr><td><code>soundfile</code> (old), <code>librosa</code></td><td><code>libsndfile1</code></td><td><code>sndfile library not found</code></td></tr>
+    <tr><td><code>pytesseract</code></td><td><code>tesseract-ocr</code> (+ <code>tesseract-ocr-&lt;lang&gt;</code>)</td><td><code>tesseract is not installed</code></td></tr>
+    <tr><td><code>pdf2image</code></td><td><code>poppler-utils</code></td><td><code>Unable to get page count</code></td></tr>
+    <tr><td><code>pyzbar</code></td><td><code>libzbar0</code></td><td><code>Unable to find zbar shared library</code></td></tr>
+    <tr><td><code>python-magic</code></td><td><code>libmagic1</code></td><td><code>failed to find libmagic</code></td></tr>
+    <tr><td>Pillow drawing text with a font</td><td><code>fonts-dejavu-core</code> (or copy the .ttf)</td><td><code>cannot open resource</code></td></tr>
+    <tr><td><code>psycopg2</code> built from source</td><td><code>libpq5</code></td><td><code>libpq.so.5</code></td></tr>
+    <tr><td>time zones (<code>zoneinfo</code>, pytz with system tz)</td><td><code>tzdata</code></td><td><code>No time zone found with key</code></td></tr>
+    <tr><td>HTTPS from Ubuntu-based images</td><td><code>ca-certificates</code></td><td><code>CERTIFICATE_VERIFY_FAILED</code></td></tr>
+  </table></div>
+</section>
+
+<section id="sizes">
+  <h2>Sizes</h2>
+  <p class="sub">Installed sizes measured in real project images (Python 3.12, Linux).</p>
+  <div class="tbl"><table data-filter>
+    <tr><th>What</th><th>Size</th><th>Source</th></tr>
+    <tr><td><code>torch 2.8.0+cu126</code> (package itself)</td><td class="n">1664 MB</td><td>measured</td></tr>
+    <tr><td>+ its CUDA wheels: cuDNN / cuBLAS / triton</td><td class="n">1054 / 601 / 566 MB</td><td>measured</td></tr>
+    <tr><td>all pip CUDA libs for onnxruntime-gpu[cuda,cudnn]</td><td class="n">2.7 GB</td><td>measured</td></tr>
+    <tr><td><code>onnxruntime-gpu</code> 1.19 / 1.22</td><td class="n">622 / 457 MB</td><td>measured</td></tr>
+    <tr><td><code>opencv-python</code></td><td class="n">196 MB</td><td>measured</td></tr>
+    <tr><td><code>sympy</code> (dependency of onnxruntime / torch)</td><td class="n">70 MB</td><td>measured</td></tr>
+    <tr><td><code>numpy</code></td><td class="n">68 MB</td><td>measured</td></tr>
+    <tr><td>CUDA + cuDNN Debian packages in <code>nvidia/cuda:12.8.1-cudnn-runtime</code></td><td class="n">4.5–4.9 GB</td><td>measured</td></tr>
+    <tr><td>torch CPU-only build</td><td class="n">≈ 0.7–1 GB</td><td>rough</td></tr>
+    <tr><td>video app, ONNX on GPU: naive → planned image</td><td class="n">17.2 → 3.37 GB</td><td>measured (content size)</td></tr>
+    <tr><td>multi-camera worker, torch + ONNX on GPU: naive → planned</td><td class="n">7.4 → 4.17 GB</td><td>measured (content size)</td></tr>
+  </table></div>
+  <p><code>docker images</code> on Docker Desktop shows DISK USAGE (packed + unpacked) and CONTENT SIZE (what is pulled). Compare images by CONTENT SIZE.</p>
+</section>
+
+<section id="choose">
+  <h2>Which base to choose</h2>
+  <div class="tbl"><table data-filter>
+    <tr><th>Situation</th><th>Base</th><th>Why</th></tr>
+    <tr><td>CPU only</td><td><code>python:3.X-slim</code> + the runtime libs it loads</td><td>smallest; compile in a build stage if needed</td></tr>
+    <tr><td>First (naive) image, any app</td><td><code>python:3.X</code> (CPU) or <code>nvidia/cuda:12.x-cudnn-runtime</code> + build tools (GPU)</td><td>it only has to build and run</td></tr>
+    <tr><td>GPU with torch (± onnxruntime-gpu)</td><td><code>python:3.X-slim</code> + torch CUDA wheel; onnxruntime-gpu uses the same pip CUDA libs</td><td>torch brings CUDA; an nvidia base would add 4–5 GB again</td></tr>
+    <tr><td>GPU with onnxruntime only</td><td><code>nvidia/cuda:12.x-cudnn-runtime</code> + venv, or slim + <code>onnxruntime-gpu[cuda,cudnn]</code></td><td>first is simplest; second is ~1.5–2 GB smaller (verify the GPU is used)</td></tr>
+    <tr><td>Needs <code>nvcc</code></td><td><code>*-devel</code> in a build stage, <code>*-runtime</code> or slim in the final image</td><td>devel is 3–5 GB of compilers you do not run</td></tr>
+    <tr><td>RTX 50 series in the fleet</td><td>CUDA 12.8+: torch <code>cu128</code>, <code>12.8.x</code> bases</td><td><code>sm_120</code></td></tr>
+    <tr><td>GPU video decoding</td><td>any + <code>NVIDIA_DRIVER_CAPABILITIES=compute,utility,video</code></td><td>NVDEC libs come from the driver</td></tr>
+    <tr><td>TensorRT / DeepStream</td><td>NGC images (<code>nvcr.io/nvidia/…</code>)</td><td>versions must match exactly; NVIDIA ships them together</td></tr>
+  </table></div>
+  <h3>Never</h3>
+  <ul>
+    <li>install the NVIDIA driver inside an image;</li>
+    <li>ship a <code>devel</code> image to production;</li>
+    <li>mix cuDNN 8 and 9, or CUDA 11 and 12 libraries, in one process;</li>
+    <li>install <code>onnxruntime</code> and <code>onnxruntime-gpu</code> together;</li>
+    <li>pin <code>torch==…+cu126</code> for RTX 50 GPUs.</li>
+  </ul>
+</section>
+
+<section id="errors">
+  <h2>Errors and fixes</h2>
+  <div class="tbl"><table data-filter>
+    <tr><th>You see</th><th>Cause</th><th>Fix</th></tr>
+    <tr><td><code>could not select device driver "" with capabilities: [[gpu]]</code></td><td>no GPU support in Docker on this host</td><td>Windows: Docker Desktop + WSL2 + NVIDIA driver; Linux: NVIDIA Container Toolkit</td></tr>
+    <tr><td><code>CUDA driver version is insufficient for CUDA runtime version</code></td><td>image CUDA newer than the host driver</td><td>update the host driver, or an older CUDA base / torch build</td></tr>
+    <tr><td><code>no kernel image is available for execution on the device</code>, <code>sm_120 is not compatible</code></td><td>libraries not built for this GPU</td><td>RTX 50: CUDA 12.8+ builds (torch cu128)</td></tr>
+    <tr><td><code>libcudnn.so.9: cannot open shared object file</code></td><td>cuDNN missing / not on the path</td><td><code>cudnn-runtime</code> base, or pip cuDNN + <code>LD_LIBRARY_PATH</code></td></tr>
+    <tr><td><code>Failed to load library libonnxruntime_providers_cuda.so</code>, providers show only CPU</td><td>CUDA/cuDNN libs missing or wrong major version</td><td>match the onnxruntime-gpu table above; <code>ldd</code> the provider (see Check)</td></tr>
+    <tr><td><code>gcc: No such file or directory</code></td><td>package compiled, no compiler in image</td><td>compile pattern 1 or 2, or a prebuilt alternative</td></tr>
+    <tr><td><code>pg_config executable not found</code></td><td>psycopg2 from source</td><td><code>libpq-dev</code>, or <code>psycopg2-binary</code></td></tr>
+    <tr><td><code>Python.h: No such file or directory</code></td><td>no Python headers</td><td><code>python3-dev</code> (Ubuntu) or a <code>python:3.X</code> base</td></tr>
+    <tr><td><code>No matching distribution found for X==1.2.3</code></td><td>version not available for this Python / Linux / index</td><td>change the pin; <code>+cuXXX</code> needs PyTorch's index</td></tr>
+    <tr><td><code>A module that was compiled using NumPy 1.x cannot be run in NumPy 2</code></td><td>old compiled package + numpy 2</td><td><code>numpy&lt;2</code>, or upgrade that package</td></tr>
+    <tr><td><code>libGL.so.1: cannot open shared object file</code></td><td>opencv-python without GL</td><td><code>libgl1</code> or <code>opencv-python-headless</code></td></tr>
+    <tr><td><code>qt.qpa.xcb: could not connect to display</code></td><td><code>cv2.imshow</code> with no screen</td><td>switch display off in Docker, or mount a display</td></tr>
+    <tr><td><code>Bus error</code>, DataLoader / shared memory errors</td><td><code>/dev/shm</code> is 64 MB by default</td><td><code>--shm-size 1g</code> / compose <code>shm_size</code></td></tr>
+    <tr><td><code>PermissionError: [Errno 13]</code> writing a file</td><td>non-root user, folder owned by root</td><td>create + chown the folder in the Dockerfile; on Linux hosts <code>chown 1000</code> the mounted folder</td></tr>
+    <tr><td><code>CUDA out of memory</code> with several processes</td><td>every process loads its own CUDA context + models</td><td>fewer processes per GPU, share one model process, bigger GPU</td></tr>
+  </table></div>
+</section>
+
+<section id="check">
+  <h2>Check it in a container</h2>
+  <p class="sub">From Windows CMD. <code>IMAGE</code> is your image name.</p>
+<div class="codebox"><pre><code>docker run --rm --gpus all --entrypoint "" IMAGE nvidia-smi
+docker run --rm --gpus all --entrypoint "" IMAGE python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_arch_list())"
+docker run --rm --gpus all --entrypoint "" IMAGE python -c "import torch; print(torch.backends.cudnn.version())"
+docker run --rm --gpus all --entrypoint "" IMAGE python -c "import onnxruntime as o; print(o.__version__, o.get_available_providers())"</code></pre></div>
+  <p>Which CUDA library is missing for onnxruntime (inside the container, <code>docker run --rm -it --gpus all --entrypoint bash IMAGE</code>):</p>
+<div class="codebox"><pre><code>ldd $(python -c "import onnxruntime,os;print(os.path.dirname(onnxruntime.__file__))")/capi/libonnxruntime_providers_cuda.so | grep "not found"
+# only libcuda.so.1 may be "not found" when the container was started WITHOUT --gpus</code></pre></div>
+  <p>Which libraries a running process really loaded, and which GPU memory each process holds:</p>
+<div class="codebox"><pre><code>awk '{print $6}' /proc/PID/maps | grep '\.so' | sort -u
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+pip list | grep -i -E "nvidia|torch|onnx|opencv"</code></pre></div>
+  <p>Does a package have a Linux wheel for Python 3.12 (no download of the package itself, run anywhere pip runs):</p>
+<div class="codebox"><pre><code>pip install --dry-run --no-deps --ignore-installed --only-binary=:all: --target tmp --python-version 3.12 --implementation cp --abi cp312 --abi abi3 --abi none --platform manylinux2014_x86_64 --platform manylinux_2_28_x86_64 PACKAGE==VERSION</code></pre></div>
+</section>
+
+<footer>Driver minimums, architectures and image contents follow NVIDIA's published compatibility tables; sizes marked rough vary by version.
+  Measured sizes come from real project builds. Re-check versions against the vendor pages before pinning production images.</footer>
+</main>
+</div>
+
+<script>
+(function () {
+  // copy buttons on code blocks
+  document.querySelectorAll('.codebox').forEach(function (box) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'copy'; b.textContent = 'Copy';
+    b.addEventListener('click', function () {
+      var text = box.querySelector('pre').innerText;
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1400); };
+      try {
+        navigator.clipboard.writeText(text).then(done, function () { select(box); });
+      } catch (e) { select(box); }
+    });
+    box.appendChild(b);
+  });
+  function select(box) {
+    var r = document.createRange(); r.selectNodeContents(box.querySelector('pre'));
+    var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+  }
+  // filter every table row by the search box
+  var q = document.getElementById('q'), hits = document.getElementById('hits');
+  var rows = Array.prototype.slice.call(document.querySelectorAll('table tr')).filter(function (r) { return !r.querySelector('th'); });
+  q.addEventListener('input', function () {
+    var t = q.value.trim().toLowerCase(), n = 0;
+    rows.forEach(function (r) {
+      var show = !t || r.textContent.toLowerCase().indexOf(t) !== -1;
+      r.classList.toggle('hide', !show);
+      if (show && t) n++;
+    });
+    hits.textContent = t ? (n + (n === 1 ? ' row' : ' rows')) : '';
+  });
+})();
+</script>
+</body>
+</html>

@@ -25,7 +25,7 @@ import subprocess
 import sys
 from collections import defaultdict
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache"}
 DEPLOY_FILES = re.compile(r"(^|/)(Dockerfile[^/]*|docker-compose[^/]*\.ya?ml|compose[^/]*\.ya?ml|\.dockerignore|"
                           r"requirements[^/]*\.txt|README[^/]*|SCENARIO\.md|answer_key\.json|\.gitattributes|"
@@ -487,8 +487,10 @@ class PkgFacts:
         local_tools |= {f"bdist_wheel ({self.d['wheel']['version']})"} if "wheel" in self.d else set()
         for n, i in self.d.items():
             plat = [t for t in i["wheel_tags"] if not t.endswith("-any")]
+            # PyPI only takes manylinux / musllinux wheels for Linux: a plain linux_x86_64 tag with compiled files
+            # was built here (pip's build isolation uses a temporary setuptools, so the generator may not match)
             if plat and all("manylinux" not in t and "musllinux" not in t for t in plat) and i["so_files"] and \
-                    (i.get("generator") or "").strip() in local_tools:
+                    ((i.get("generator") or "").strip() in local_tools or any("linux_" in t for t in plat)):
                 binary = f"{n}-binary" if n == "psycopg2" else None
                 self.add("packaging", n, "source_build", "yes" if n in needed else "no",
                          f"built from source inside the image (wheel tag {plat[0]}, built by the {i['generator']} "
