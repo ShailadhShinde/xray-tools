@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Linux x86_64 platform tags (pip matches the listed tags exactly; pure-Python "any" wheels always match)
@@ -161,6 +161,72 @@ def pip_dry(req, py, only_binary, opts, cu_index, want=None):
             bad = re.findall(r"(https?://[^\s'\"]+|/whl/\S+)", out)
             return None, "could not read the package index" + (f" ({bad[0]})" if bad else "")
         return False, out
+
+
+def resolve_together(results, py, opts):
+    """install the whole file at once (dry run, WITH dependencies), like the build does: two lines that cannot be
+    installed together (torch pins its own nvidia-* versions, torchaudio must match torch ...) only show up here.
+    -> (ok True / False / None = not checked, pip's explanation lines)"""
+    reqs = [r["raw"].split(" #")[0].strip() for r in results if r["status"] == "OK"]
+    if len(reqs) < 2:
+        return True, []
+    idx = sorted({r["index"] for r in results if r.get("index")})
+    with tempfile.TemporaryDirectory() as tmp:
+        cmd = [sys.executable, "-m", "pip", "install", "--dry-run", "--ignore-installed",
+               "--disable-pip-version-check", "--no-input", "--target", os.path.join(tmp, "t"),
+               "--python-version", py, "--implementation", "cp", "--abi", "cp" + py.replace(".", ""),
+               "--abi", "abi3", "--abi", "none", "--only-binary=:all:"]
+        for p in PLATFORMS:
+            cmd += ["--platform", p]
+        for k, v in opts:
+            cmd += [k, v]
+        for u in idx:
+            if ("--extra-index-url", u) not in opts:
+                cmd += ["--extra-index-url", u]
+        try:
+            r = subprocess.run(cmd + reqs, capture_output=True, text=True, timeout=900)
+        except subprocess.TimeoutExpired:
+            return None, ["pip timed out"]
+    if r.returncode == 0:
+        return True, []
+    out = (r.stdout + r.stderr).strip()
+    if re.search(NET_ERR, out) and "conflict" not in out.lower():
+        return None, ["the package index could not be read"]
+    keep = [ln.rstrip() for ln in out.splitlines()
+            if re.search(r"Cannot install|conflict is caused by|depends on|requested|No matching distribution|"
+                         r"ResolutionImpossible|Could not find a version", ln)]
+    return False, keep[:30] or out.splitlines()[-15:]
+
+
+def torch_family(results):
+    """rules that need no network: torchvision / torchaudio must be built for the same torch, all with the same
+    +cuNNN, and a CUDA torch pins its own exact nvidia-* versions (extra nvidia-* pins usually clash)"""
+    v = {}
+    for r in results:
+        m = re.match(r"^(torch|torchvision|torchaudio)\s*==\s*(\d+)\.(\d+)[\d.]*(\+\w+)?", r["raw"].strip())
+        if m:
+            v[m.group(1)] = (int(m.group(2)), int(m.group(3)), m.group(4) or "", r["raw"].split(" #")[0].strip())
+    out = []
+    if "torch" in v:
+        tma, tmi, tcu, traw = v["torch"]
+        if "torchaudio" in v and v["torchaudio"][:2] != (tma, tmi):
+            out.append(f"{v['torchaudio'][3]} is built for torch {v['torchaudio'][0]}.{v['torchaudio'][1]}, not "
+                       f"{traw}: use torchaudio=={tma}.{tmi}.x (the same {tma}.{tmi} as torch)")
+        if "torchvision" in v and tma == 2 and v["torchvision"][:2] != (0, tmi + 15):
+            out.append(f"{v['torchvision'][3]} is built for another torch than {traw}: torch {tma}.{tmi} goes with "
+                       f"torchvision 0.{tmi + 15}.x")
+        for n in ("torchvision", "torchaudio"):
+            if n in v and v[n][2] != tcu:
+                out.append(f"{v[n][3]} and {traw} are different builds ({v[n][2] or 'no +suffix'} vs "
+                           f"{tcu or 'no +suffix'}): use the same +cuNNN for all three")
+        if "+cpu" not in tcu:
+            pins = [r["raw"].split(" #")[0].strip() for r in results if re.match(r"^nvidia-[\w-]+-cu1\d\s*==",
+                                                                                  r["raw"].strip())]
+            if pins:
+                out.append("a CUDA build of torch installs its own exact nvidia-* versions; these extra pins usually "
+                           "clash with them (a pip freeze from a PC where they were updated separately): remove "
+                           "them and let torch pull its own - " + ", ".join(pins))
+    return out
 
 
 def available_versions(name, py, opts, cu_index):
@@ -735,6 +801,9 @@ def main(argv=None):
           f"(pip dry run, nothing is installed) ...", flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, a.jobs)) as ex:
         results = list(ex.map(lambda it: check_one(it, a.python, opts), reqs))
+    print("  ... and the whole file together, with dependencies, as the build installs it", flush=True)
+    together, why_not = resolve_together(results, a.python, opts)
+    family = torch_family(results)
     out_dir = os.path.join(HERE, "runs", a.name, "naive")
     d = decide(results, a.python, gpu)
     base = write_files(out_dir, results, opts, a.python, gpu, a.entry, os.path.basename(req_path), d)
@@ -749,6 +818,15 @@ def main(argv=None):
               f"checks 'Requires-Python' against Python {sys.version_info[0]}.{sys.version_info[1]}, not {a.python}:",
               f"  packages that need Python {a.python} may show up as MISSING, or with an older version than the build "
               "installs.", "  Fix: python -m pip install -U pip   then run xray_naive.py again.", ""]
+    if together is False or family:
+        T += ["CANNOT BE INSTALLED TOGETHER - the build stops at 'pip install'. Fix these lines first:"]
+        T += ["  " + x for x in family]
+        if together is False:
+            T += ["  pip, installing the whole file at once for Linux / Python " + a.python + ":"]
+            T += ["    " + x.strip() for x in why_not]
+        T.append("")
+    elif together is None:
+        T += ["NOT CHECKED: the whole file together (" + "; ".join(why_not) + ") - single lines were checked", ""]
     titles = [("MISSING", "NOT AVAILABLE for Linux / this Python - change these pins (the build fails otherwise)"),
               ("COMPILED", "COMPILED during the build - the Dockerfile installs a compiler (+ the -dev libraries)"),
               ("WINDOWS", "WINDOWS-ONLY - left out of requirements.docker.txt"),
@@ -779,7 +857,7 @@ def main(argv=None):
         json.dump({"tool": "xray-naive", "version": VERSION, "python": a.python, "gpu": gpu, "base": base,
                    "requirements": results}, fh, indent=1)
     print("\n".join(T))
-    return 1 if groups.get("MISSING") else 0
+    return 1 if groups.get("MISSING") or together is False or family else 0
 
 
 if __name__ == "__main__":

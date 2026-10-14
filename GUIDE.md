@@ -218,6 +218,7 @@ minute, without installing anything (pip only reads the package index - it needs
 | MISSING | that version does not exist for Linux / this Python (`No matching distribution`) | lists the nearest versions that do: change the pin |
 | WINDOWS | a Windows-only package (`pyreadline3`, `pywin32` ...) - a `pip freeze` from a Windows PC | left out |
 | INDEX | `torch==2.8.0+cu126`: exists only on PyTorch's own index | the index line is added |
+| CANNOT BE INSTALLED TOGETHER | each line exists, but not together: torchaudio / torchvision built for another torch, extra `nvidia-*` pins next to a CUDA torch (it pins its own), two versions that need different dependencies | shows pip's reason (it installs the whole file at once, like the build); fix those lines first |
 
 ```bat
 python xray_naive.py --project "PROJECT_FOLDER" --requirements requirements.txt --entry main.py --name app --gpu
