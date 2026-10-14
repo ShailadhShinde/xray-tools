@@ -218,7 +218,8 @@ minute, without installing anything (pip only reads the package index - it needs
 | MISSING | that version does not exist for Linux / this Python (`No matching distribution`) | lists the nearest versions that do: change the pin |
 | WINDOWS | a Windows-only package (`pyreadline3`, `pywin32` ...) - a `pip freeze` from a Windows PC | left out |
 | INDEX | `torch==2.8.0+cu126`: exists only on PyTorch's own index | the index line is added |
-| CANNOT BE INSTALLED TOGETHER | each line exists, but not together: torchaudio / torchvision built for another torch, extra `nvidia-*` pins next to a CUDA torch (it pins its own), two versions that need different dependencies | shows pip's reason (it installs the whole file at once, like the build); fix those lines first |
+| FIXED AUTOMATICALLY | lines that would stop the build and have one right fix: torchaudio / torchvision set to the build of your torch, extra `nvidia-*` pins next to a CUDA torch left out (torch brings its own), a package listed twice, a pin with no Linux file -> the nearest version that has one, a pin that clashes with what another package needs -> loosened | changes `requirements.docker.txt` and `Dockerfile.naive` only (your file stays as it is) and lists every change at the top of `naive-check.txt` |
+| CANNOT BE INSTALLED TOGETHER | a clash with no single right fix | shows pip's reason (the whole file installed at once, like the build) |
 
 ```bat
 python xray_naive.py --project "PROJECT_FOLDER" --requirements requirements.txt --entry main.py --name app --gpu

@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Linux x86_64 platform tags (pip matches the listed tags exactly; pure-Python "any" wheels always match)
@@ -198,35 +198,114 @@ def resolve_together(results, py, opts):
     return False, keep[:30] or out.splitlines()[-15:]
 
 
-def torch_family(results):
-    """rules that need no network: torchvision / torchaudio must be built for the same torch, all with the same
-    +cuNNN, and a CUDA torch pins its own exact nvidia-* versions (extra nvidia-* pins usually clash)"""
-    v = {}
+# nvidia-* packages a CUDA build of torch installs itself, at exact versions (nvidia-ml-py is not one of them)
+TORCH_CUDA_DEPS = re.compile(r"^nvidia-(cu[\w-]*|nccl[\w-]*|nvjitlink[\w-]*|nvtx[\w-]*|nvshmem[\w-]*)$")
+SKIP = ("WINDOWS", "LOCAL", "MISSING", "DROPPED")
+
+
+def pin_of(raw):
+    m = re.search(r"==\s*([\w.+*]+)", raw or "")
+    return m.group(1) if m else None
+
+
+def set_req(r, raw, why, py, opts, index=None):
+    """replace one requirement line by a fixed one and check it again"""
+    old = r["raw"]
+    m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*(.*)$", raw)
+    new = check_one((r["line"], raw, r["name"], m.group(3).strip() if m else ""), py, opts, index)
+    if index and not new.get("index"):
+        new["index"] = index
+    r.clear()
+    r.update(new)
+    r["fixed"] = f"was {old}: {why}"
+
+
+def autofix(results, py, opts):
+    """the naive Dockerfile must build: fix what has one right answer, and say what was changed"""
+    fixes = []
+
+    def drop(r, why):
+        r.update(status="DROPPED", why=why)
+        fixes.append(f"line {r['line']}: {r['raw']}  LEFT OUT - {why}")
+
+    # a package listed twice: keep the line that installs (the newer one when both do)
+    by = {}
     for r in results:
-        m = re.match(r"^(torch|torchvision|torchaudio)\s*==\s*(\d+)\.(\d+)[\d.]*(\+\w+)?", r["raw"].strip())
-        if m:
-            v[m.group(1)] = (int(m.group(2)), int(m.group(3)), m.group(4) or "", r["raw"].split(" #")[0].strip())
-    out = []
-    if "torch" in v:
-        tma, tmi, tcu, traw = v["torch"]
-        if "torchaudio" in v and v["torchaudio"][:2] != (tma, tmi):
-            out.append(f"{v['torchaudio'][3]} is built for torch {v['torchaudio'][0]}.{v['torchaudio'][1]}, not "
-                       f"{traw}: use torchaudio=={tma}.{tmi}.x (the same {tma}.{tmi} as torch)")
-        if "torchvision" in v and tma == 2 and v["torchvision"][:2] != (0, tmi + 15):
-            out.append(f"{v['torchvision'][3]} is built for another torch than {traw}: torch {tma}.{tmi} goes with "
-                       f"torchvision 0.{tmi + 15}.x")
+        by.setdefault(r["name"], []).append(r)
+    for name, rs in by.items():
+        if len(rs) > 1:
+            good = [r for r in rs if r["status"] not in SKIP] or rs
+            keep = max(good, key=lambda r: vkey(pin_of(r["raw"]) or "0"))
+            for r in rs:
+                if r is not keep:
+                    drop(r, f"{name} is listed twice, line {keep['line']} ({keep['raw']}) is kept")
+    # a pin that has no file for Linux / this Python: the nearest version that has one
+    for r in results:
+        pin = pin_of(r["raw"])
+        if r["status"] == "MISSING" and r.get("alts") and pin and "*" not in pin:
+            above = [v for v in r["alts"] if vkey(v) >= vkey(pin)]
+            v = above[0] if above else r["alts"][-1]
+            old, raw = r["raw"], re.sub(r"==\s*[\w.+*]+", "==" + v, r["raw"].split(" #")[0].strip(), count=1)
+            set_req(r, raw, f"no file for Linux / Python {py}", py, opts)
+            fixes.append(f"line {r['line']}: {old} -> {raw} (no file for Linux / Python {py}; the nearest version "
+                         "that has one)")
+    # torchvision / torchaudio must be built for the same torch (same version family, same +cuNNN)
+    t = {}
+    for r in results:
+        m = re.match(r"^(torch|torchvision|torchaudio)\s*==\s*(\d+)\.(\d+)[\w.]*?(\+\w+)?$",
+                     r["raw"].split(" #")[0].strip())
+        if m and r["status"] not in SKIP:
+            t[m.group(1)] = (r, int(m.group(2)), int(m.group(3)), m.group(4) or "")
+    if "torch" in t:
+        tr, tma, tmi, tcu = t["torch"]
+        want = {"torchaudio": (tma, tmi), "torchvision": (0, tmi + 15) if tma == 2 else None}
         for n in ("torchvision", "torchaudio"):
-            if n in v and v[n][2] != tcu:
-                out.append(f"{v[n][3]} and {traw} are different builds ({v[n][2] or 'no +suffix'} vs "
-                           f"{tcu or 'no +suffix'}): use the same +cuNNN for all three")
-        if "+cpu" not in tcu:
-            pins = [r["raw"].split(" #")[0].strip() for r in results if re.match(r"^nvidia-[\w-]+-cu1\d\s*==",
-                                                                                  r["raw"].strip())]
-            if pins:
-                out.append("a CUDA build of torch installs its own exact nvidia-* versions; these extra pins usually "
-                           "clash with them (a pip freeze from a PC where they were updated separately): remove "
-                           "them and let torch pull its own - " + ", ".join(pins))
-    return out
+            if n not in t or want[n] is None:
+                continue
+            r, ma, mi, cu = t[n]
+            if (ma, mi) == want[n] and cu == tcu:
+                continue
+            pre = f"{want[n][0]}.{want[n][1]}."
+            vs = available_versions(n, py, opts, tr.get("index"))
+            cand = [v for v in vs if v.startswith(pre) and ("+" + v.split("+", 1)[1] if "+" in v else "") == tcu]
+            v = max(cand, key=vkey) if cand else None
+            old, raw = r["raw"], f"{n}=={v}" if v else f"{n}=={pre}*"
+            set_req(r, raw, f"built for the same torch as {tr['raw']}", py, opts, index=tr.get("index"))
+            fixes.append(f"line {r['line']}: {old} -> {raw} (must be built for the same torch as {tr['raw']}" +
+                         ("" if v else "; the exact version could not be looked up, pip picks the newest") + ")")
+    # a CUDA torch installs its own exact nvidia-* CUDA packages: extra pins of them clash with it
+    torch = next((r for r in results if r["name"] == "torch" and r["status"] not in ("WINDOWS", "LOCAL", "DROPPED")),
+                 None)
+    if torch and "+cpu" not in torch["raw"]:
+        for r in results:
+            if r["status"] not in SKIP and TORCH_CUDA_DEPS.match(r["name"]) and pin_of(r["raw"]):
+                drop(r, "torch installs its own exact version of it (a pin from a pip freeze clashes with that)")
+    return fixes
+
+
+def resolve_and_fix(results, py, opts, fixes):
+    """install the whole file together; a pin that clashes with what another package needs is loosened, so pip
+    picks a version that fits (up to 3 rounds)"""
+    for _ in range(3):
+        ok, why = resolve_together(results, py, opts)
+        if ok is not False:
+            return ok, why
+        text = "\n".join(why)
+        culprits = {canon(n) for n in re.findall(r"The user requested ([A-Za-z0-9._-]+)", text)} & \
+                   {canon(n) for n in re.findall(r"depends on ([A-Za-z0-9._-]+)", text)}
+        changed = False
+        for r in results:
+            if r["name"] in culprits and r["name"] not in ("torch", "torchvision", "torchaudio") and \
+                    r["status"] == "OK" and pin_of(r["raw"]):
+                old = r["raw"]
+                raw = re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[^\]]*\])?", old.strip()).group(0)
+                r.update(raw=raw, spec="", fixed=f"was {old}: the pin clashes with what another package needs")
+                fixes.append(f"line {r['line']}: {old} -> {raw} (the pin clashes with what another package needs; "
+                             "pip picks a version that fits)")
+                changed = True
+        if not changed:
+            return ok, why
+    return resolve_together(results, py, opts)
 
 
 def available_versions(name, py, opts, cu_index):
@@ -385,7 +464,7 @@ def cuda_size(k, py, opts, cu_index):
         k["cuda_size"] = sum(n or 0 for n in sizes)
 
 
-def check_one(item, py, opts):
+def check_one(item, py, opts, index=None):
     no, raw, name, spec = item
     res = {"line": no, "raw": raw, "name": name, "spec": spec}
     if spec == "LOCAL":
@@ -396,7 +475,7 @@ def check_one(item, py, opts):
         res.update(status="WINDOWS", why="Windows-only: not needed on Linux, left out")
         return res
     m = re.search(r"\+cu(\d+)", raw)
-    cu_index = f"https://download.pytorch.org/whl/cu{m.group(1)}" if m else None
+    cu_index = f"https://download.pytorch.org/whl/cu{m.group(1)}" if m else index
     res["index"] = cu_index
     req = raw.split(";")[0].strip()
     want = {}
@@ -419,6 +498,7 @@ def check_one(item, py, opts):
             return res
     if ok2 and name in HEAVY:
         vs = available_versions(name, py, opts, cu_index)
+        res["alts"] = nearest(vs, spec) if vs else []
         res.update(status="MISSING", why=f"no prebuilt Linux wheel for Python {py}, only the source - compiling "
                                          f"{name} usually fails or takes very long" +
                    (f"; versions WITH a wheel: {', '.join(nearest(vs, spec))} - change the pin" if vs else ""))
@@ -437,6 +517,7 @@ def check_one(item, py, opts):
             res["why"] += f"; versions WITH a wheel (no compiler needed): {', '.join(nearest(vs, spec))}"
         return res
     vs = available_versions(name, py, opts, cu_index)
+    res["alts"] = nearest(vs, spec) if vs else []
     res.update(status="MISSING", why=f"no file for Linux / Python {py} at all" +
                (f"; versions that exist: {', '.join(nearest(vs, spec))} - change the pin" if vs else
                 " - check the name, or the package is not on this index"))
@@ -534,7 +615,7 @@ def vtuple(v):
 def decide(results, py, gpu):
     """every Dockerfile.naive decision, with its reason: base image, apt libraries, compilers, pip groups,
     LD_LIBRARY_PATH"""
-    live = [r for r in results if r["status"] not in ("WINDOWS", "LOCAL", "MISSING")]
+    live = [r for r in results if r["status"] not in SKIP]
     names = {r["name"] for r in live}
     known = [r for r in live if r.get("k")]
     own = [r for r in known if r["k"].get("cuda") == "own"]
@@ -657,6 +738,10 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d):
     for r in results:
         if r["status"] in ("WINDOWS", "LOCAL"):
             L.append(f"# {r['raw']}    <- {r['status'].lower()}: left out")
+        elif r["status"] == "DROPPED":
+            L.append(f"# {r['raw']}    <- left out: {r['why']}")
+        elif r.get("fixed"):
+            L.append(f"{r['raw']}    # fixed by xray_naive, {r['fixed']}")
         elif r["status"] == "MISSING":
             L.append(f"{r['raw']}    # <- MISSING for Linux/Python {py}: change this pin (naive-check.txt)")
         else:
@@ -735,7 +820,8 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d):
             shown |= {r["name"] for r in rs}
             if rs:
                 D.append(f"#   {title}: " + ", ".join(r["name"] for r in rs))
-        out = [r for r in results if r["status"] in ("WINDOWS", "LOCAL", "MISSING")]
+        out = [r for r in results if r["status"] in SKIP]
+        D += [f"#   FIXED: {r['raw']}  ({r['fixed']})" for r in results if r.get("fixed") and r["status"] not in SKIP]
         for r in out:
             D.append(f"#   LEFT OUT ({r['status']}): {r['raw']}" +
                      ("   <- change the pin, see naive-check.txt" if r["status"] == "MISSING" else ""))
@@ -794,16 +880,15 @@ def main(argv=None):
     seen = {}
     for no, raw, name, spec in reqs:
         if name in seen:
-            notes.append(f"line {no}: {name} is listed twice (also line {seen[name]}) - pip cannot install both: "
-                         "keep one")
+            pass        # handled by autofix: one line is kept, the other left out (listed in the report)
         seen.setdefault(name, no)
     print(f"xray_naive {VERSION}: checking {len(reqs)} requirements for Linux x86_64, Python {a.python} "
           f"(pip dry run, nothing is installed) ...", flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, a.jobs)) as ex:
         results = list(ex.map(lambda it: check_one(it, a.python, opts), reqs))
+    fixes = autofix(results, a.python, opts)
     print("  ... and the whole file together, with dependencies, as the build installs it", flush=True)
-    together, why_not = resolve_together(results, a.python, opts)
-    family = torch_family(results)
+    together, why_not = resolve_and_fix(results, a.python, opts, fixes)
     out_dir = os.path.join(HERE, "runs", a.name, "naive")
     d = decide(results, a.python, gpu)
     base = write_files(out_dir, results, opts, a.python, gpu, a.entry, os.path.basename(req_path), d)
@@ -818,13 +903,14 @@ def main(argv=None):
               f"checks 'Requires-Python' against Python {sys.version_info[0]}.{sys.version_info[1]}, not {a.python}:",
               f"  packages that need Python {a.python} may show up as MISSING, or with an older version than the build "
               "installs.", "  Fix: python -m pip install -U pip   then run xray_naive.py again.", ""]
-    if together is False or family:
-        T += ["CANNOT BE INSTALLED TOGETHER - the build stops at 'pip install'. Fix these lines first:"]
-        T += ["  " + x for x in family]
-        if together is False:
-            T += ["  pip, installing the whole file at once for Linux / Python " + a.python + ":"]
-            T += ["    " + x.strip() for x in why_not]
-        T.append("")
+    if fixes:
+        T += ["FIXED AUTOMATICALLY so the build works (in requirements.docker.txt and Dockerfile.naive; your own "
+              "file is unchanged) - read them once:"]
+        T += ["  " + x for x in fixes] + [""]
+    if together is False:
+        T += ["CANNOT BE INSTALLED TOGETHER, and there is no single right fix - pip's reason (Linux / Python " +
+              a.python + "):"]
+        T += ["    " + x.strip() for x in why_not] + [""]
     elif together is None:
         T += ["NOT CHECKED: the whole file together (" + "; ".join(why_not) + ") - single lines were checked", ""]
     titles = [("MISSING", "NOT AVAILABLE for Linux / this Python - change these pins (the build fails otherwise)"),
@@ -857,7 +943,7 @@ def main(argv=None):
         json.dump({"tool": "xray-naive", "version": VERSION, "python": a.python, "gpu": gpu, "base": base,
                    "requirements": results}, fh, indent=1)
     print("\n".join(T))
-    return 1 if groups.get("MISSING") or together is False or family else 0
+    return 1 if groups.get("MISSING") or together is False else 0
 
 
 if __name__ == "__main__":
