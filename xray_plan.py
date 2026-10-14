@@ -26,7 +26,7 @@ import os
 import re
 import sys
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 APP_USER, APP_UID = "app", 1000
 APP_HOME = f"/home/{APP_USER}"
 ALWAYS_IGNORE = [".git/", "**/__pycache__/", "**/*.pyc", ".idea/", ".vscode/", "Dockerfile*", "docker-compose*.yml",
@@ -410,6 +410,11 @@ class Planner:
             newp = self.user_path(p)
             if newp != p:
                 remap[name or p] = (p, newp)
+            if f.get("mechanism") not in ("write_root", "mkdir"):
+                # the env var names a FILE the app writes (CSV_OUT=/xout/results.csv): the volume is its folder
+                p, newp = os.path.dirname(p), os.path.dirname(newp)
+                if not newp or newp == "/" or any(x["container_path"] == newp for x in vols):
+                    continue
             vols.append({"container_path": newp, "was": p if newp != p else None, "for_env": name,
                          "why": f.get("detail")})
         for v in self.rec.get("volumes") or []:
@@ -654,6 +659,9 @@ def env_key(path):
     return re.sub(r"[^A-Z0-9]+", "_", os.path.basename(str(path).rstrip("/")).upper()).strip("_") + "_DIR"
 
 
+PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")       # a file / folder of one PC (code default)
+
+
 def compose_new(p, out_dir, mac_needed):
     """no compose file in the project: a compose.yml for the planned image + .env.example (one place for every
     value that changes per site: env vars, host folders, the licence MAC)"""
@@ -662,6 +670,20 @@ def compose_new(p, out_dir, mac_needed):
     env = [e for e in p["env"] if e["name"] not in ENV_NOISE]
     vols = [(env_key(v["container_path"]), "./" + os.path.basename(v["container_path"].rstrip("/")),
              v["container_path"]) for v in p["volumes"]]
+    # inputs the run mounted from this PC (xray_runfile: a code default C:\...\model.onnx -> /xin/model_onnx/...):
+    # the same read-only mount here, and the env var gets the path INSIDE the container
+    ins, value = [], {}
+    for e in env:
+        dv, sv = str(e.get("default_in_code") or ""), str(e.get("scenario_value") or "")
+        if PC_PATH.match(dv) and sv.startswith("/xin/"):
+            host = dv.replace("\\", "/")
+            looks_file = "." in host.rsplit("/", 1)[-1]
+            hdir, cdir = (host.rsplit("/", 1)[0], sv.rsplit("/", 1)[0]) if looks_file else (host, sv)
+            if not any(c == cdir for _k, _h, c in ins):
+                ins.append((e["name"] + "_DIR", hdir, cdir))
+            value[e["name"]] = sv
+        elif sv and any(sv == c or sv.startswith(c.rstrip("/") + "/") for _k, _d, c in vols):
+            value[e["name"]] = sv                                   # an output inside a mounted folder
     wd = p["workdir"].rstrip("/")
     dirs = [(env_key(d), "./" + d, wd + "/" + d) for d in p["writable_dirs"] if d not in (".", "") and
             not d.startswith("/")]
@@ -682,8 +704,9 @@ def compose_new(p, out_dir, mac_needed):
     if cr.get("ports"):
         L.append("    ports:")
         L += [f'      - "{x}"' for x in cr["ports"]]
-    if vols or dirs:
+    if vols or dirs or ins:
         L.append("    volumes:")
+        L += [f"      - ${{{k}:-./{c.rstrip('/').rsplit('/', 1)[-1]}}}:{c}:ro" for k, _h, c in ins]
         L += [f"      - ${{{k}:-{d}}}:{c}" for k, d, c in vols + dirs]
     if str(cr.get("gpus", "")).startswith("all"):
         L += ["    deploy:", "      resources:", "        reservations:", "          devices:",
@@ -691,6 +714,9 @@ def compose_new(p, out_dir, mac_needed):
     E = [f"# .env for {svc} - copy to .env next to compose.yml and fill in. Never commit .env (passwords).", ""]
     if mac_needed:
         E += ["# the licence check reads the network card: the MAC the licence was issued for", "MAC_ADDRESS=", ""]
+    if ins:
+        E.append("# input folders on this machine, mounted read-only (from the code defaults; / works on Windows too)")
+        E += [f"{k}={h}" for k, h, c in ins] + [""]
     if vols or dirs:
         E.append("# folders on this machine (left: host, mounted into the container)")
         E += [f"{k}={d}" for k, d, c in vols + dirs] + [""]
@@ -700,6 +726,8 @@ def compose_new(p, out_dir, mac_needed):
             dv = e.get("default_in_code")
             if e.get("secret"):
                 E += ["# secret: fill it in here only - never in a Dockerfile, compose.yml or a chat", f"{e['name']}="]
+            elif e["name"] in value:
+                E += [f"# the path inside the container (the code default was {dv})", f"{e['name']}={value[e['name']]}"]
             elif dv is None:
                 E += ["# no default in the code: must be set", f"{e['name']}="]
             else:

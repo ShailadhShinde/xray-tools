@@ -1,5 +1,7 @@
 # X-Ray: plan a small, correct Docker image for a Python project
 
+**ZIP project, step by step: open [ZIP_WALKTHROUGH.html](ZIP_WALKTHROUGH.html) in a browser.**
+
 **First time? Read [GUIDE.md](GUIDE.md)** - every step, what to look for, what to do when something fails.
 
 **Reference: [GPU_DOCKER_HANDBOOK.html](GPU_DOCKER_HANDBOOK.html)** - GPU base images and what they contain, CUDA libraries,
@@ -13,6 +15,7 @@ Python standard library only (Python 3.8+). Nothing to install.
 | 0 | `xray_naive.py` | your machine (needs internet) | before the first build: checks every requirement for Linux (prebuilt / compiled / missing / Windows-only) and writes a naive Dockerfile that builds |
 | 1 | `xray_static.py` + `xray_needs.py` | your machine | reads the code (runs nothing): packages, files, models, env vars, network, GPU, cameras |
 | 2 | `xray_runfile.py` writes the run files (+ `run.env`: every env var in one file); they run `xray_trace.py run` / `facts` / `merge` | inside the app's container / your machine | runs the app and records what it really did |
+|   | `run-explore.bat`: same naive image, no time limit, video files loop; look inside with `docker exec -it NAME-explore bash`, stop with `docker stop -t 60 NAME-explore` (GUIDE section 12) | | compare your own look with the report |
 | 3 | `xray_pkg.py baseline` / `scan` / `facts` | inside containers / your machine | what is installed in the image and what is really needed |
 | 4 | `xray_plan.py plan` / `verify` | your machine | writes a slim Dockerfile, .dockerignore and compose override (or compose.yml + .env.example); checks the new image behaves the same |
 | 5 | `xray_compare.py` | your machine | several projects: one shared base image |

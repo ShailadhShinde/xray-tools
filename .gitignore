@@ -1,0 +1,5 @@
+# X-Ray outputs stay on your PC: never committed, never touched by git stash
+runs/
+*.view.html
+__pycache__/
+*.pyc

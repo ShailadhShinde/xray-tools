@@ -597,6 +597,10 @@ def _install():
             _k, _v = _line.split("=", 1)
             CAMERA[_k.strip()] = _v.strip()
     GUI_OFF = (os.environ.get("XRAY_GUI") or "").strip().lower() == "off"
+    # XRAY_LOOP_VIDEO=1: a video FILE the app opens starts again from the first frame when it ends (explore runs:
+    # the app keeps working while you look inside the container). Streams and cameras are not touched.
+    LOOP_VIDEO = (os.environ.get("XRAY_LOOP_VIDEO") or "").strip() in ("1", "yes", "on", "true")
+    LOOPS = set()
     try:
         GUI_SAVE = float(os.environ.get("XRAY_GUI_SAVE", "5"))
     except ValueError:
@@ -695,15 +699,21 @@ def _install():
         def vc_pre(self, a, kw):
             a2, kw2, new = cam_args(a, kw)
             SUBS[id(self)] = new
+            src = a2[0] if a2 else kw2.get("filename")
+            if LOOP_VIDEO and isinstance(src, str) and "://" not in src:
+                LOOPS.add(id(self))
             return a2, kw2
 
         def vc_extra(base):
-            if not CAMERA:
+            if not CAMERA and not LOOP_VIDEO:
                 return {}
 
             def open(self, *a, **kw):
                 a2, kw2, new = cam_args(a, kw)
                 SUBS[id(self)] = new
+                src = a2[0] if a2 else kw2.get("filename")
+                if LOOP_VIDEO and isinstance(src, str) and "://" not in src:
+                    LOOPS.add(id(self))
                 return base.open(self, *a2, **kw2)
 
             def read(self, *a, **kw):
@@ -718,12 +728,12 @@ def _install():
                             time.sleep(nxt - now)
                         PACE[id(self)] = max(now, nxt or 0) + 1.0 / fps
                 r = base.read(self, *a, **kw)
-                if sub and "://" not in sub and not r[0]:
+                if not r[0] and ((sub and "://" not in sub) or id(self) in LOOPS):
                     base.set(self, 1, 0)          # CAP_PROP_POS_FRAMES = 0: replay the file from the start
                     r = base.read(self, *a, **kw)
                 return r
             return {"open": open, "read": read}
-        subclass_ctor(m, "VideoCapture", vc, pre=vc_pre if CAMERA else None, extra=vc_extra)
+        subclass_ctor(m, "VideoCapture", vc, pre=vc_pre if (CAMERA or LOOP_VIDEO) else None, extra=vc_extra)
         cls = getattr(m, "VideoCapture", None)
         if cls is not None and getattr(cls, "_xray_wrapped", False) and isinstance(cls, type):
             wrap(cls, "open", lambda a, kw, r, e: ("video_open", {"source": pathish(arg(a, kw, 1, "filename")),

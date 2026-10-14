@@ -1,0 +1,1117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ZIP Container Walkthrough</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a field manual. A sticky step rail on the left, numbered step sheets on the right; on phones the rail becomes a strip of step chips. */
+:root {
+  --bg: #eef2f0;
+  --sheet: #ffffff;
+  --ink: #17201e;
+  --muted: #56645f;
+  --rule: #d3dcd8;
+  --accent: #0a6a61;
+  --accent-soft: #d9eeea;
+  --term: #111918;
+  --term-ink: #d8e5e1;
+  --term-dim: #86a098;
+  --out: #f3f6f4;
+  --out-ink: #26312e;
+  --k-os: #6b7f99;
+  --k-cuda: #2f5d86;
+  --k-apt: #2c7a52;
+  --k-pip: #8a4f9e;
+  --k-code: #a0661c;
+  --k-host: #b0452f;
+  --good: #2c7a4d;
+  --warn: #93600e;
+  --bad: #ad3632;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Segoe UI", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  --step: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c1211; --sheet: #141c1b; --ink: #e1eae7; --muted: #94a49f; --rule: #27322f;
+    --accent: #4cc3b1; --accent-soft: #163330; --term: #080d0c; --term-ink: #d8e5e1; --term-dim: #7f988f;
+    --out: #1a2321; --out-ink: #cbd8d4;
+    --k-os: #8fa3bd; --k-cuda: #6f9fd0; --k-apt: #5fb98a; --k-pip: #c393d6; --k-code: #dca35a; --k-host: #ec8a74;
+    --good: #5cc08a; --warn: #e2aa4c; --bad: #f0807a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0c1211; --sheet: #141c1b; --ink: #e1eae7; --muted: #94a49f; --rule: #27322f;
+  --accent: #4cc3b1; --accent-soft: #163330; --term: #080d0c; --term-ink: #d8e5e1; --term-dim: #7f988f;
+  --out: #1a2321; --out-ink: #cbd8d4;
+  --k-os: #8fa3bd; --k-cuda: #6f9fd0; --k-apt: #5fb98a; --k-pip: #c393d6; --k-code: #dca35a; --k-host: #ec8a74;
+  --good: #5cc08a; --warn: #e2aa4c; --bad: #f0807a;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: var(--step); line-height: 1.6; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+code, kbd { font-family: var(--font-mono); font-size: 0.88em; }
+p code, li code, td code, label code { background: var(--accent-soft); color: var(--ink); padding: 0.05em 0.35em; border-radius: 3px; overflow-wrap: anywhere; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; line-height: 1.15; margin: 0; }
+strong { font-weight: 600; }
+
+.page { padding-inline: 16px; padding-block: 28px 64px; }
+.wrap { max-width: 1200px; margin-inline: auto; }
+
+/* header */
+.masthead { display: grid; gap: 14px; max-width: 72ch; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.masthead h1 { font-size: clamp(2rem, 1.4rem + 2.6vw, 3.1rem); font-weight: 700; letter-spacing: -0.01em; }
+.lede { font-size: 1.12em; margin: 0; }
+.practice-note { margin: 0; color: var(--muted); font-size: 0.92em; }
+.pill { display: inline-block; font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; padding: 0.1em 0.5em; border-radius: 999px; border: 1px solid currentColor; color: var(--accent); vertical-align: 0.1em; }
+
+.folders { margin-top: 22px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 16px; display: grid; gap: 12px; max-width: 900px; }
+.folders h2 { font-size: 1.05rem; font-weight: 600; letter-spacing: 0.02em; }
+.folders .hint { margin: 0; color: var(--muted); font-size: 0.9em; }
+.field { display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 10px; align-items: center; }
+.field label { font-size: 0.92em; }
+.field label span { display: block; color: var(--muted); font-size: 0.85em; }
+.field input { width: 100%; font-family: var(--font-mono); font-size: 0.85rem; padding: 8px 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); min-width: 0; }
+
+/* two-column layout */
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 36px; margin-top: 34px; align-items: start; }
+.rail { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); max-height: calc(100vh - 32px); overflow-y: auto; }
+.rail .progress { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); margin: 0 0 10px; letter-spacing: 0.03em; }
+.rail ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.rail a { display: grid; grid-template-columns: 1.8rem minmax(0, 1fr); gap: 6px; align-items: baseline; padding: 5px 8px; border-radius: 6px; text-decoration: none; color: var(--ink); font-size: 0.9rem; line-height: 1.3; }
+.rail a:hover { background: var(--accent-soft); }
+.rail a .n { font-family: var(--font-display); font-weight: 700; color: var(--accent); text-align: right; }
+.rail a.is-done { color: var(--muted); }
+.rail a.is-done .n::after { content: " \2713"; color: var(--good); font-size: 0.8em; }
+.rail .sep { height: 1px; background: var(--rule); margin: 8px 0; }
+
+main { min-width: 0; display: grid; gap: 28px; }
+
+/* sheets */
+.sheet { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; padding: clamp(16px, 2.5vw, 28px); min-width: 0; display: grid; gap: 18px; }
+.sheet > * { min-width: 0; }
+.sheet-title h2 { font-size: clamp(1.45rem, 1.2rem + 1vw, 1.9rem); font-weight: 700; }
+.sheet-title p { margin: 6px 0 0; color: var(--muted); max-width: 70ch; }
+.prose { max-width: 70ch; }
+.prose p { margin: 0 0 10px; }
+.prose p:last-child { margin-bottom: 0; }
+
+.step-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: center; border-bottom: 1px solid var(--rule); padding-bottom: 14px; }
+.step-no { font-family: var(--font-display); font-weight: 700; font-size: 2.6rem; line-height: 1; color: var(--accent); min-width: 2.2ch; text-align: center; font-variant-numeric: tabular-nums; }
+.step-head h2 { font-size: clamp(1.3rem, 1.1rem + 0.8vw, 1.65rem); font-weight: 700; }
+.step-meta { margin: 2px 0 0; color: var(--muted); font-size: 0.88em; }
+.done-box { display: inline-flex; gap: 8px; align-items: center; font-size: 0.9rem; color: var(--muted); cursor: pointer; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 999px; white-space: nowrap; }
+.done-box input { width: 1.05rem; height: 1.05rem; accent-color: var(--good); margin: 0; }
+.done-box:has(input:checked) { color: var(--good); border-color: var(--good); }
+
+h3.block-title { font-family: var(--font-mono); font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
+
+/* command blocks */
+.cmd { background: var(--term); border-radius: 8px; overflow: hidden; min-width: 0; }
+.cmd-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 7px 10px 7px 14px; border-bottom: 1px solid rgba(127, 160, 152, 0.18); }
+.where { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--term-dim); }
+.where.inside::before { content: "\25B8 "; color: var(--accent); }
+.copy { font-family: var(--font-mono); font-size: 0.75rem; background: transparent; color: var(--term-ink); border: 1px solid rgba(216, 229, 225, 0.35); border-radius: 5px; padding: 3px 10px; cursor: pointer; }
+.copy:hover { border-color: var(--term-ink); }
+.cmd pre { margin: 0; padding: 12px 14px 14px; color: var(--term-ink); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; overflow-x: auto; white-space: pre; tab-size: 4; }
+
+.out { background: var(--out); border: 1px dashed var(--rule); border-radius: 8px; overflow: hidden; min-width: 0; }
+.out-bar { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 7px 14px 0; }
+.out pre { margin: 0; padding: 6px 14px 12px; color: var(--out-ink); font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5; overflow-x: auto; white-space: pre; }
+.out pre b { color: var(--accent); font-weight: 600; }
+
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; }
+.why, .check { min-width: 0; }
+.why ul, .check ul { margin: 0; padding-left: 1.1em; display: grid; gap: 7px; }
+.why li::marker { color: var(--accent); }
+.check li::marker { content: "\2713  "; color: var(--good); }
+.check li.bad::marker { content: "\2715  "; color: var(--bad); }
+.callout { border-left: 3px solid var(--warn); background: var(--out); padding: 10px 14px; border-radius: 0 8px 8px 0; max-width: 78ch; }
+.callout p { margin: 0; }
+.callout strong { color: var(--warn); }
+
+details.more { border: 1px solid var(--rule); border-radius: 8px; padding: 0 14px; min-width: 0; }
+details.more > summary { cursor: pointer; padding: 10px 0; font-weight: 500; color: var(--accent); }
+details.more[open] > summary { border-bottom: 1px solid var(--rule); margin-bottom: 12px; }
+details.more > div { display: grid; gap: 14px; padding-bottom: 14px; min-width: 0; }
+
+/* annotated Dockerfile */
+.dsec { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 18px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.dsec:first-of-type { border-top: 0; padding-top: 0; }
+.dsec h4 { font-family: var(--font-display); font-size: 1.08rem; margin: 0 0 8px; display: flex; gap: 8px; align-items: baseline; }
+.dsec h4 .sec { font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; }
+.dsec .why ul { gap: 6px; font-size: 0.95em; }
+.tag-parts { display: flex; flex-wrap: wrap; gap: 0; font-family: var(--font-mono); font-size: 0.86rem; margin: 4px 0 10px; }
+.tag-parts span { padding: 3px 7px; border: 1px solid var(--rule); background: var(--out); }
+.tag-parts span + span { border-left: 0; }
+.tag-parts span b { color: var(--accent); font-weight: 600; }
+
+/* anatomy bars */
+.bars { display: grid; gap: 18px; }
+.bar-row { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr); gap: 12px; align-items: center; }
+.bar-label { font-size: 0.9rem; line-height: 1.3; }
+.bar-label b { display: block; font-family: var(--font-display); font-size: 1.05rem; }
+.bar-label span { color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.bar-track { display: flex; height: 34px; border-radius: 6px; overflow: hidden; background: var(--out); border: 1px solid var(--rule); }
+.seg { height: 100%; min-width: 2px; position: relative; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 0.72rem; color: var(--sheet); white-space: nowrap; overflow: hidden; }
+.seg + .seg { box-shadow: inset 1px 0 0 var(--sheet); }
+.seg.os { background: var(--k-os); }
+.seg.cuda { background: var(--k-cuda); }
+.seg.apt { background: var(--k-apt); }
+.seg.pip { background: var(--k-pip); }
+.seg.code { background: var(--k-code); }
+.seg.est { background: repeating-linear-gradient(135deg, var(--k-apt) 0 5px, transparent 5px 9px); color: var(--ink); }
+.scale { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr); gap: 12px; }
+.scale-ticks { position: relative; height: 1.6em; font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); font-variant-numeric: tabular-nums; border-top: 1px solid var(--rule); }
+.scale-ticks span { position: absolute; top: 0; padding-top: 3px; transform: translateX(-50%); white-space: nowrap; }
+.scale-ticks span::before { content: ""; position: absolute; top: -1px; left: 50%; width: 1px; height: 4px; background: var(--muted); }
+.scale-ticks span:first-child { transform: none; }
+.scale-ticks span:first-child::before { left: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.86rem; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.legend i.os { background: var(--k-os); } .legend i.cuda { background: var(--k-cuda); } .legend i.apt { background: var(--k-apt); }
+.legend i.pip { background: var(--k-pip); } .legend i.code { background: var(--k-code); } .legend i.host { background: var(--k-host); }
+
+/* tables */
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; min-width: 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--rule); }
+th { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; background: var(--out); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td code { overflow-wrap: anywhere; }
+.src { display: inline-block; font-family: var(--font-mono); font-size: 0.72rem; padding: 1px 7px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+.src.cuda { color: var(--k-cuda); } .src.apt { color: var(--k-apt); } .src.pip { color: var(--k-pip); }
+.src.host { color: var(--k-host); } .src.code { color: var(--k-code); } .src.os { color: var(--k-os); }
+.map-table td { padding: 8px 10px; }
+.map-table td:nth-child(2) { white-space: nowrap; }
+input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; padding: 5px 8px; border: 1px solid var(--rule); border-radius: 5px; background: var(--bg); color: var(--ink); }
+
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: 14px; counter-reset: rule; }
+.rule { border-top: 2px solid var(--accent); padding-top: 10px; }
+.rule h3 { font-size: 1.05rem; margin-bottom: 4px; }
+.rule p { margin: 0; font-size: 0.93em; }
+
+.send-list { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; max-width: 78ch; }
+
+@media (max-width: 960px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .rail { position: static; max-height: none; overflow: visible; }
+  .rail ol { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+  .rail li { flex: 0 0 auto; }
+  .rail a { display: flex; gap: 6px; border: 1px solid var(--rule); background: var(--sheet); white-space: nowrap; }
+  .rail a .n { text-align: left; }
+  .rail .sep { display: none; }
+  .dsec { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .field { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .step-head { grid-template-columns: auto minmax(0, 1fr); }
+  .done-box { grid-column: 1 / -1; justify-self: start; }
+  .bar-row, .scale { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .scale > :first-child { display: none; }
+  .step-no { font-size: 2.1rem; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .rail a, .copy { transition: background-color 0.15s ease, border-color 0.15s ease; }
+}
+</style>
+</head>
+<body>
+
+<div class="page">
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow">X-Ray &middot; ZIP project &middot; session plan for 14 Oct</div>
+  <h1>ZIP Container Walkthrough</h1>
+  <p class="lede">From the tools zip to a small, verified image for <code>live_video.py</code>. Every step has the commands to type, why each part is there, and how to see it with your own eyes inside the container.</p>
+  <p class="practice-note"><span class="pill">practice</span> marks output from a run I did on 13 Oct with a small test program I wrote myself, using the same four packages and the same base image, on a machine without a GPU. It is not your code. Practice output shows what the tools and the image do; what your own code does (its env vars, files, prints, timings) shows up in your own reports. Output that needs the GPU is described, not measured.</p>
+</header>
+
+<section class="folders" aria-labelledby="folders-h">
+  <h2 id="folders-h">Your folders</h2>
+  <p class="hint">Type them once. The page puts them into the commands below and remembers them in this browser.</p>
+  <div class="field"><label for="dirX">xray-tools folder<span>where the tools from the zip are</span></label><input id="dirX" type="text" spellcheck="false" autocomplete="off"></div>
+  <div class="field"><label for="dirP">ZIP-main folder<span>the one with live_video.py</span></label><input id="dirP" type="text" spellcheck="false" autocomplete="off"></div>
+  <div class="field"><label for="dirM">Model folder<span>has your .onnx model (step 5 only)</span></label><input id="dirM" type="text" spellcheck="false" autocomplete="off" placeholder="C:\...\your model folder"></div>
+</section>
+
+<div class="layout">
+<nav class="rail" aria-label="Steps">
+  <p class="progress" id="progress">0 of 12 steps done</p>
+  <ol>
+    <li><a href="#map"><span class="n">&#9673;</span><span>The map</span></a></li>
+    <li class="sep" aria-hidden="true"></li>
+    <li><a href="#step0"><span class="n">0</span><span>Get ready</span></a></li>
+    <li><a href="#step1"><span class="n">1</span><span>Read the code</span></a></li>
+    <li><a href="#step2"><span class="n">2</span><span>Choose base and libraries</span></a></li>
+    <li><a href="#step3"><span class="n">3</span><span>Write the run files</span></a></li>
+    <li><a href="#step4"><span class="n">4</span><span>Build the naive image</span></a></li>
+    <li><a href="#step5"><span class="n">5</span><span>Look inside, before running</span></a></li>
+    <li><a href="#step6"><span class="n">6</span><span>Watch it run: GPU, then CPU</span></a></li>
+    <li><a href="#step7"><span class="n">7</span><span>Explore while it runs</span></a></li>
+    <li><a href="#step8"><span class="n">8</span><span>Packages and the plan</span></a></li>
+    <li><a href="#step9"><span class="n">9</span><span>Build slim, verify</span></a></li>
+    <li><a href="#step10"><span class="n">10</span><span>The base image lever</span></a></li>
+    <li><a href="#step11"><span class="n">11</span><span>Run it for real</span></a></li>
+    <li class="sep" aria-hidden="true"></li>
+    <li><a href="#send"><span class="n">&rarr;</span><span>Send to Claude</span></a></li>
+    <li><a href="#trouble"><span class="n">!</span><span>When something breaks</span></a></li>
+  </ol>
+</nav>
+
+<main>
+
+<!-- ============================================================ MAP -->
+<section class="sheet" id="map">
+  <div class="sheet-title">
+    <h2>The map: what is in the image, and where it comes from</h2>
+    <p>Keep this in mind for every step. Each layer of the image has one job, and every library the program loads comes from exactly one place.</p>
+  </div>
+
+  <div>
+    <h3 class="block-title">Image size by part, to scale <span class="pill">practice</span></h3>
+    <div class="bars" role="img" aria-label="Unpacked image sizes: naive 5.62 GB, slim auto 5.59 GB, slim pip about 4.0 GB">
+      <div class="bar-row">
+        <div class="bar-label"><b>naive</b><span>5.62 GB unpacked</span></div>
+        <div class="bar-track">
+          <div class="seg os" style="width:1.6%" title="Ubuntu 24.04: 0.09 GB"></div>
+          <div class="seg cuda" style="width:78.0%" title="CUDA 12.8 + cuDNN 9.8 (base image): 4.38 GB">CUDA + cuDNN 4.38 GB</div>
+          <div class="seg apt" style="width:5.3%" title="Section 2, apt: Python + libraries for cv2: 0.30 GB"></div>
+          <div class="seg pip" style="width:14.5%" title="Section 3, pip: 0.82 GB">pip 0.82</div>
+          <div class="seg code" style="width:0.6%" title="Section 5, COPY . .: 0.03 GB"></div>
+        </div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label"><b>slim, auto</b><span>5.59 GB unpacked</span></div>
+        <div class="bar-track">
+          <div class="seg os" style="width:1.6%" title="Ubuntu 24.04: 0.09 GB"></div>
+          <div class="seg cuda" style="width:78.0%" title="CUDA 12.8 + cuDNN 9.8 (same base image): 4.38 GB">CUDA + cuDNN 4.38 GB</div>
+          <div class="seg apt" style="width:5.3%" title="apt: 0.30 GB"></div>
+          <div class="seg pip" style="width:14.5%" title="pip: 0.82 GB">pip 0.82</div>
+        </div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label"><b>slim, pip</b><span>&asymp; 4.0 GB unpacked</span></div>
+        <div class="bar-track" style="width:71.5%">
+          <div class="seg os" style="width:3.3%" title="python:3.12-slim (Debian 13 + Python): 0.13 GB"></div>
+          <div class="seg est" style="width:5.0%" title="apt on Debian: about 0.2 GB (not measured here)"></div>
+          <div class="seg cuda" style="width:64.2%" title="CUDA + cuDNN as pip wheels (nvidia-*): 2.58 GB">CUDA + cuDNN 2.58</div>
+          <div class="seg pip" style="width:27.5%" title="onnxruntime-gpu, opencv, numpy and the rest: 1.11 GB">pip 1.11</div>
+        </div>
+      </div>
+      <div class="scale" aria-hidden="true"><div></div><div class="scale-ticks"><span style="left:0%">0</span><span style="left:17.79%">1</span><span style="left:35.59%">2</span><span style="left:53.38%">3</span><span style="left:71.17%">4</span><span style="left:88.97%">5 GB</span></div></div>
+    </div>
+    <div class="legend" style="margin-top:12px">
+      <span><i class="os"></i>Linux (+ Python on python-slim)</span>
+      <span><i class="cuda"></i>CUDA + cuDNN libraries</span>
+      <span><i class="apt"></i>apt: Python, libraries for cv2</span>
+      <span><i class="pip"></i>pip packages</span>
+      <span><i class="code"></i>your code</span>
+    </div>
+    <p class="practice-note" style="margin-top:10px">Unpacked sizes from <code>docker history</code>. The hatched part was not measured (this sandbox cannot reach Debian's servers). <code>docker image ls</code> shows bigger numbers in its DISK USAGE column because it also keeps the compressed download: 9.01 GB for naive, 6.05 GB for slim-pip without the apt part. The download itself (CONTENT SIZE) was 3.4 GB and 2.2 GB.</p>
+  </div>
+
+  <div class="prose">
+    <p>In the practice image the base image is <strong>78%</strong> of the size. With the same base, a slim image (step 9) can only remove what <code>COPY . .</code> brought in, so the big size decision is which base image provides CUDA (step 10). Step 4 shows how big your own code layer is.</p>
+  </div>
+
+  <div>
+    <h3 class="block-title">Who loads what, and where it comes from</h3>
+    <div class="table-wrap">
+      <table class="map-table">
+        <thead><tr><th>When the code uses</th><th>pip package</th><th>Linux library it loads</th><th>Comes from</th><th>Dockerfile</th></tr></thead>
+        <tbody>
+          <tr><td><code>python live_video.py</code></td><td>&mdash;</td><td><code>/usr/bin/python3.12</code>, <code>libpython3.12</code></td><td><span class="src apt">apt</span> python3 (Ubuntu 24.04), run through the venv <code>/opt/venv</code></td><td>section 2</td></tr>
+          <tr><td><code>import numpy</code></td><td>numpy</td><td><code>libscipy_openblas</code> (math)</td><td><span class="src pip">inside the wheel</span> numpy.libs</td><td>section 3a (a dependency of onnxruntime)</td></tr>
+          <tr><td><code>import cv2</code></td><td>opencv-python</td><td><code>libGL.so.1</code>, <code>libX11.so.6</code>, <code>libxcb.so.1</code>, <code>libglib-2.0.so.0</code></td><td><span class="src apt">apt</span> libgl1, libx11-6, libxcb1, libglib2.0-0t64</td><td>section 2</td></tr>
+          <tr><td><code>cv2.VideoCapture</code>, <code>imshow</code></td><td>opencv-python</td><td><code>libavcodec</code>, <code>libavformat</code> (FFmpeg), <code>libQt5*</code></td><td><span class="src pip">inside the wheel</span> opencv_python.libs</td><td>section 3b</td></tr>
+          <tr><td><code>ort.InferenceSession(&hellip;CUDA&hellip;)</code></td><td>onnxruntime-gpu</td><td><code>libonnxruntime_providers_cuda.so</code></td><td><span class="src pip">inside the wheel</span></td><td>section 3a</td></tr>
+          <tr><td></td><td>&rarr; it opens</td><td><code>libcudart</code>, <code>libcublas</code>, <code>libcublasLt</code>, <code>libcufft</code>, <code>libcurand</code>, <code>libnvrtc</code></td><td><span class="src cuda">base image</span> /usr/local/cuda/lib64</td><td>section 1</td></tr>
+          <tr><td></td><td>&rarr; it opens</td><td><code>libcudnn.so.9</code> + <code>libcudnn_engines_*</code>, <code>_ops</code>, <code>_cnn</code></td><td><span class="src cuda">base image</span> /usr/lib/x86_64-linux-gnu</td><td>section 1</td></tr>
+          <tr><td></td><td>&rarr; CUDA opens</td><td><code>libcuda.so.1</code> (talks to the GPU)</td><td><span class="src host">your Windows driver</span> mounted by <code>--gpus all</code></td><td>never in the image</td></tr>
+          <tr><td><code>import pynvml</code></td><td>nvidia-ml-py</td><td><code>libnvidia-ml.so.1</code></td><td><span class="src host">your Windows driver</span> mounted by <code>--gpus all</code></td><td>never in the image</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="rules">
+    <div class="rule"><h3>The driver comes from your PC</h3><p>It is the only GPU part that does. <code>--gpus all</code> mounts <code>libcuda.so</code>, <code>libnvidia-ml.so</code> and <code>nvidia-smi</code> into the container. Everything else must be in the image.</p></div>
+    <div class="rule"><h3>Wheels bring most of their libraries</h3><p>opencv-python carries its own FFmpeg and Qt. Only a few libraries are expected from the system. Those, and only those, go into the apt line.</p></div>
+    <div class="rule"><h3>Libraries are found by name</h3><p>Linux looks in its standard folders plus <code>LD_LIBRARY_PATH</code>. A library outside those folders is "not found", even if it is in the image.</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 0 -->
+<section class="sheet step" id="step0">
+  <header class="step-head">
+    <span class="step-no">0</span>
+    <div><h2>Get ready</h2><p class="step-meta">15 min &middot; CMD</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step0" data-step="step0"> Done</label>
+  </header>
+
+  <div class="prose"><p><strong>New tools.</strong> On GitHub, private repo <code>docker</code>, branch <code>claude/stoic-faraday-pte3hh</code>: open <code>xray-tools.zip</code> and download it. Unzip it and copy everything inside its <code>xray-tools</code> folder over your tools folder (replace the old files). If you keep the tools in your public <code>xray-tools</code> repo, upload them there and <code>git pull</code> as before.</p></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>cd /d "«X»"
+python --version
+python -m pip install -U pip
+findstr /b VERSION xray_naive.py xray_static.py xray_trace.py xray_plan.py xray_runfile.py</pre></div>
+  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.3.1"
+xray_static.py:VERSION = "0.5.10"
+xray_trace.py:VERSION = "0.2.7"
+xray_plan.py:VERSION = "0.1.9"
+xray_runfile.py:VERSION = "0.1.9"</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; Docker Desktop running</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; clean start</span><button class="copy" type="button">Copy</button></div><pre data-tpl>if exist runs\zip rmdir /s /q runs\zip
+docker rmi zip-naive zip-slim zip-slim-auto
+docker image ls</pre></div>
+
+  <div class="notes">
+    <div class="why"><h3 class="block-title">Why</h3><ul>
+      <li><strong>pip update:</strong> when the Python on your PC is older than 3.12, pip 24.1 and older check package versions against your PC's Python instead of the image's 3.12, and step 2 shows wrong versions. The tool warns about it; updating pip takes a few seconds and avoids it.</li>
+      <li><strong>nvidia-smi in a container</strong> proves three things at once: Docker runs, the GPU reaches containers, and your driver is new enough for CUDA 12.8 images.</li>
+      <li>That <code>nvidia-smi</code> is not in the image. <code>--gpus all</code> mounts it in from your Windows driver. You will meet this again in step 5.</li>
+      <li><strong>Clean start:</strong> results from last time must not mix with today's. "No such image" is fine. Keep any <code>nvidia/cuda</code> image you already have: Docker reuses it and does not download 3 GB again.</li>
+    </ul></div>
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li>The nvidia-smi table shows your card. Top right, <code>CUDA Version</code> is 12.8 or higher.</li>
+      <li class="bad"><code>unsatisfied condition: cuda&gt;=12.8</code>: update the NVIDIA driver (570 or newer).</li>
+      <li class="bad"><code>could not select device driver</code>: Docker Desktop cannot see the GPU. Restart Docker Desktop, then update the driver.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 1 -->
+<section class="sheet step" id="step1">
+  <header class="step-head">
+    <span class="step-no">1</span>
+    <div><h2>Read the code</h2><p class="step-meta">5 min &middot; CMD &middot; nothing runs, nothing changes</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step1" data-step="step1"> Done</label>
+  </header>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>cd /d "«X»"
+set "P=«P»"
+dir "%P%\live_video.py" "%P%\requirements.docker.txt"
+python xray_static.py --root "%P%" --entry live_video.py --requirements requirements.docker.txt --out runs\zip\zip.json
+python xray_needs.py runs\zip\zip.json &gt; runs\zip\step1-needs.txt
+notepad runs\zip\step1-needs.txt</pre></div>
+
+  <div class="callout"><p><strong>Requirements file:</strong> the commands use <code>requirements.docker.txt</code>, the file you made last time. If it is not in ZIP-main, put your own requirements file name in <code>--requirements</code> here and in step 2. A new CMD window later needs the <code>cd /d</code> and <code>set "P=..."</code> lines again.</p></div>
+
+  <div class="out"><div class="out-bar">The parts of step1-needs.txt (your code fills them)</div><pre>live_video.py
+├─ ...     one branch per kind: screen / windows, model files, data files read, files written,
+│          environment variables, Python packages, System (GPU)
+TO RUN IT IN A CONTAINER, YOU PROVIDE
+  ...      one line per env var, model, data file, output, screen, GPU
+CODE CHANGES NEEDED
+  ...
+NOT USED BY THIS ENTRY POINT (...): ...</pre></div>
+
+  <div class="notes">
+    <div class="why"><h3 class="block-title">What this step decides</h3><ul>
+      <li><strong>GPU.</strong> If the System branch lists <code>CUDAExecutionProvider</code>, the code asks onnxruntime for the GPU. Step 2 reads that from this file and builds a GPU image.</li>
+      <li><strong>Mounts.</strong> Files the code reads from your PC (C:\, D:\) are not copied into the image; their folders get mounted (step 3).</li>
+      <li><strong>Window.</strong> If the report lists <code>cv2.imshow</code>: a container has no screen. During the runs X-Ray switches windows off and saves a frame every 5 s instead.</li>
+      <li><strong>Packages.</strong> A package listed here but missing from your requirements file: step 6 shows whether the program really loads it.</li>
+      <li><strong>NOT USED</strong>: files the program never touches. They stay out of the slim image.</li>
+    </ul></div>
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li>CODE CHANGES says none. If it lists something (a hardcoded path, a password), sort that out first.</li>
+      <li>Every file you know is important appears in the tree or is read through an env var.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 2 -->
+<section class="sheet step" id="step2">
+  <header class="step-head">
+    <span class="step-no">2</span>
+    <div><h2>Choose the base image and the libraries</h2><p class="step-meta">10&ndash;20 min &middot; CMD + Notepad &middot; the heart of the "why"</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step2" data-step="step2"> Done</label>
+  </header>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>python xray_naive.py --project "%P%" --requirements requirements.docker.txt --entry live_video.py --name zip --static runs\zip\zip.json
+notepad runs\zip\naive\naive-check.txt
+notepad runs\zip\naive\Dockerfile.naive</pre></div>
+
+  <div class="prose"><p>For every line of the requirements, the tool asks pip which file it would download for Linux and Python 3.12. Nothing gets installed. From those answers it writes the Dockerfile. Read naive-check.txt first, then the Dockerfile next to the explanations below.</p></div>
+
+  <div class="out"><div class="out-bar">Practice run, naive-check.txt</div><pre>OK - a prebuilt Linux wheel exists (4):
+  numpy, opencv-python, onnxruntime-gpu==1.22.0, nvidia-ml-py
+
+  package          version     kind                    size   compiler
+  onnxruntime-gpu  1.22.0      HEAVY binary wheel     270 MB  no
+  opencv-python    5.0.0.93    binary wheel (abi3)     68 MB  no
+  numpy            2.5.4       binary wheel            16 MB  no
+  nvidia-ml-py     13.615.71   pure wheel              56 KB  no
+
+GPU - WHERE EACH GPU PACKAGE GETS ITS CUDA LIBRARIES FROM
+  onnxruntime-gpu: needs CUDA from the system - or write it as onnxruntime-gpu[cuda,cudnn]
+                   and pip installs the CUDA libraries too</pre></div>
+
+  <div>
+    <h3 class="block-title">Dockerfile.naive, section by section</h3>
+
+    <div class="dsec">
+      <div>
+        <h4><span class="sec">1</span>Base image</h4>
+        <div class="cmd"><div class="cmd-bar"><span class="where">Dockerfile.naive</span></div><pre>FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive</pre></div>
+        <div class="tag-parts" aria-label="The tag, part by part"><span><b>12.8.1</b> CUDA</span><span><b>cudnn</b> cuDNN 9</span><span><b>runtime</b> libraries only</span><span><b>ubuntu24.04</b> Python 3.12</span></div>
+      </div>
+      <div class="why"><ul>
+        <li>onnxruntime-gpu holds onnxruntime's own GPU code, but not NVIDIA's CUDA libraries. When you ask for the GPU, it opens <code>libcudart</code>, <code>libcublas</code>, <code>libcufft</code>, <code>libcurand</code>, <code>libnvrtc</code> and <code>libcudnn</code> by name. No package in the requirements brings them, so the base image has to.</li>
+        <li><strong>12.8.1</strong>: runs on every current RTX card, RTX 50xx included. Needs driver 570+ (step 0 checked that).</li>
+        <li><strong>cudnn</strong>: cuDNN 9 is included; onnxruntime needs <code>libcudnn.so.9</code>.</li>
+        <li><strong>runtime</strong>: libraries only. <code>-devel</code> adds the compiler nvcc and headers, about 5 GB more, needed only to compile CUDA code. <code>-base</code> has only libcudart, too little.</li>
+        <li><strong>ubuntu24.04</strong>: its Python is 3.12, the version the check ran for.</li>
+        <li><strong>ENV</strong>: prints reach the log at once; no .pyc files; apt never stops to ask a question.</li>
+      </ul></div>
+    </div>
+
+    <div class="dsec">
+      <div>
+        <h4><span class="sec">2</span>System libraries (apt)</h4>
+        <div class="cmd"><div class="cmd-bar"><span class="where">Dockerfile.naive</span></div><pre>RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+        python3 python3-venv libgl1 libglib2.0-0t64 libx11-6 libxcb1 \
+ &amp;&amp; rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH</pre></div>
+      </div>
+      <div class="why"><ul>
+        <li><strong>python3, python3-venv</strong>: the CUDA image has no Python. Ubuntu's own python3 has no pip and refuses pip installs into the system Python. A venv brings its own pip; first on PATH, <code>python</code> and <code>pip</code> mean the venv everywhere.</li>
+        <li><strong>libgl1, libglib2.0-0t64, libx11-6, libxcb1</strong>: cv2 was built against these and Linux loads them at <code>import cv2</code>. Without libgl1: <code>ImportError: libGL.so.1</code> (you will cause this on purpose in step 5). <code>t64</code> is glib's name on Ubuntu 24.04.</li>
+        <li><strong>Cost</strong> <span class="pill">practice</span>: 254 MB for 53 packages. 137 MB is LLVM, pulled by libgl1 &rarr; libglx0 &rarr; libglx-mesa0 &rarr; mesa-libgallium &rarr; libllvm20 (Mesa's software OpenGL).</li>
+        <li><code>--no-install-recommends</code>: only real dependencies. <code>rm -rf .../lists</code>: the package index is not needed after installing.</li>
+      </ul></div>
+    </div>
+
+    <div class="dsec">
+      <div>
+        <h4><span class="sec">3a</span>Big framework first</h4>
+        <div class="cmd"><div class="cmd-bar"><span class="where">Dockerfile.naive</span></div><pre>RUN pip install --no-cache-dir \
+        'onnxruntime-gpu==1.22.0'</pre></div>
+      </div>
+      <div class="why"><ul>
+        <li>One layer for the biggest package: 619 MB with its dependencies (numpy, sympy, protobuf). Docker keeps every layer; when a line below changes, this one is reused instead of downloaded again.</li>
+        <li><code>--no-cache-dir</code>: pip's download cache would otherwise stay in the image.</li>
+      </ul></div>
+    </div>
+
+    <div class="dsec">
+      <div>
+        <h4><span class="sec">3b</span>The other packages</h4>
+        <div class="cmd"><div class="cmd-bar"><span class="where">Dockerfile.naive</span></div><pre>#   nothing to compile: every package has a prebuilt wheel
+RUN pip install --no-cache-dir \
+        'numpy' 'opencv-python' 'nvidia-ml-py'</pre></div>
+      </div>
+      <div class="why"><ul>
+        <li>All of them have prebuilt Linux wheels, so no compiler is installed (gcc would add about 200 MB).</li>
+        <li>nvidia-ml-py is pure Python. It calls <code>libnvidia-ml.so</code>, which comes with the driver.</li>
+      </ul></div>
+    </div>
+
+    <div class="dsec">
+      <div>
+        <h4><span class="sec">4</span>LD_LIBRARY_PATH: nothing to add</h4>
+      </div>
+      <div class="why"><ul>
+        <li>The base image already sets <code>LD_LIBRARY_PATH=/usr/local/cuda/lib64</code> and keeps cuDNN in <code>/usr/lib/x86_64-linux-gnu</code>, a folder Linux always searches. Step 10 is the case where this line is needed.</li>
+      </ul></div>
+    </div>
+
+    <div class="dsec">
+      <div>
+        <h4><span class="sec">5</span>The code</h4>
+        <div class="cmd"><div class="cmd-bar"><span class="where">Dockerfile.naive</span></div><pre>COPY . .
+CMD ["python", "live_video.py"]</pre></div>
+      </div>
+      <div class="why"><ul>
+        <li>Everything in ZIP-main, on purpose: the naive image only has to work. X-Ray then finds out which files are really used, and the slim image copies only those.</li>
+        <li>Dockerfile.naive.dockerignore keeps .git, venvs and caches out even here.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; copy the 3 files into ZIP-main</span><button class="copy" type="button">Copy</button></div><pre data-tpl>copy /y runs\zip\naive\Dockerfile.naive "%P%\"
+copy /y runs\zip\naive\Dockerfile.naive.dockerignore "%P%\"
+copy /y runs\zip\naive\requirements.docker.txt "%P%\"</pre></div>
+  <div class="prose"><p>The tool writes into <code>runs\</code> and never overwrites your project's files, so you copy them. Docker reads <code>Dockerfile.naive.dockerignore</code> automatically because it sits next to <code>Dockerfile.naive</code> with the same name.</p></div>
+</section>
+
+<!-- ============================================================ STEP 3 -->
+<section class="sheet step" id="step3">
+  <header class="step-head">
+    <span class="step-no">3</span>
+    <div><h2>Write the run files</h2><p class="step-meta">2 min &middot; CMD</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step3" data-step="step3"> Done</label>
+  </header>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>python xray_runfile.py --static runs\zip\zip.json --project "%P%" --name zip
+notepad runs\zip\run.env</pre></div>
+
+  <div class="out"><div class="out-bar">What it prints (names and folders come from your code)</div><pre>  image zip-naive; entry live_video.py; GPU yes/no; window yes/no; ports ...
+  mount &lt;a folder on your PC&gt; -&gt; /xin/&lt;name&gt;     one per file the code reads from your PC
+  env   &lt;NAME&gt;=/xin/&lt;name&gt;/&lt;file&gt;              that file, inside the container
+  env   &lt;NAME&gt;=/xout/&lt;file&gt;                      an output file, kept in runs\zip\out
+  env   &lt;NAME&gt;=cpu   (CPU run only)               an env var whose default is cuda or gpu
+  code changes suggested: 0</pre></div>
+
+  <div class="notes">
+    <div class="why"><h3 class="block-title">Why</h3><ul>
+      <li>Files the code reads from your PC stay there. <code>-v</code> mounts their folders into the container, read-only. The image stays small and works with any model or video.</li>
+      <li>Inside the container the paths are different, so the env vars point at the container paths: <code>/xin</code> for inputs, <code>/xout</code> for outputs (kept in <code>runs\zip\out</code>).</li>
+      <li><code>run.env</code> holds every env var once; all run files read it.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 4 -->
+<section class="sheet step" id="step4">
+  <header class="step-head">
+    <span class="step-no">4</span>
+    <div><h2>Build the naive image and read its layers</h2><p class="step-meta">10&ndash;20 min the first time (about 3 GB to download) &middot; CMD</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step4" data-step="step4"> Done</label>
+  </header>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\build-naive.bat
+docker history zip-naive
+docker image ls zip-naive</pre></div>
+
+  <div class="prose"><p>Docker shortens the commands, so the base image's lines read <code>RUN |1 TARGETARCH=amd64 /bin/sh -c apt-get u…</code>. <code>docker history --no-trunc zip-naive</code> shows them in full, with the package names. Below, each line has its meaning on the right.</p></div>
+  <div class="out"><div class="out-bar">Practice run, docker history zip-naive (newest first; the lines that matter)</div><pre>SIZE      CREATED BY
+0B        CMD ["python" "live_video.py"]
+<b>31.5MB</b>    COPY . .                                         section 5   (practice code; yours differs)
+<b>197MB</b>     RUN pip install ... numpy opencv-python ...      section 3b
+<b>619MB</b>     RUN pip install ... onnxruntime-gpu==1.22.0      section 3a
+16.1MB    RUN python3 -m venv /opt/venv                    section 2
+<b>284MB</b>     RUN apt-get update &amp;&amp; apt-get install ...       section 2
+<b>1.05GB</b>    RUN ... apt-get install libcudnn9-cuda-12 ...    base image: cuDNN 9.8
+<b>3.11GB</b>    RUN ... apt-get install libcublas-12-8 ...       base image: CUDA libraries
+204MB     RUN ... apt-get install cuda-cudart-12-8 ...     base image: CUDA runtime core
+87.6MB    ADD file ... (Ubuntu 24.04)                      base image
+
+IMAGE              DISK USAGE   CONTENT SIZE
+zip-naive:latest       9.01GB          3.4GB</pre></div>
+
+  <div class="notes">
+    <div class="why"><h3 class="block-title">Why</h3><ul>
+      <li>Each Dockerfile line that changes files makes one layer. <code>docker history</code> shows what each line cost.</li>
+      <li>The base image is 4.47 GB of the 5.6 GB. ZIP's size is decided by section 1.</li>
+      <li><strong>CONTENT SIZE</strong> is the compressed download. <strong>DISK USAGE</strong> is the download plus the unpacked files. An older Docker shows one SIZE column instead, which is the unpacked size.</li>
+    </ul></div>
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li>The last lines list zip-naive with a size. Write it down: this is your "before".</li>
+      <li class="bad">Nothing listed: the build failed. The reason is at the end of <code>runs\zip\build.log</code>.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 5 -->
+<section class="sheet step" id="step5">
+  <header class="step-head">
+    <span class="step-no">5</span>
+    <div><h2>Look inside, before running</h2><p class="step-meta">20&ndash;30 min &middot; a throwaway container: break things freely</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step5" data-step="step5"> Done</label>
+  </header>
+
+  <div class="prose"><p>Here you prove each Dockerfile line yourself. <code>--rm</code> deletes the container when you type <code>exit</code>, so nothing you do here changes the image. <code>--entrypoint bash</code> gives you a shell instead of starting the app.</p></div>
+
+  <h3 class="block-title">A. Without the GPU</h3>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm -it --entrypoint bash zip-naive</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside the container &middot; which Python? (section 2)</span><button class="copy" type="button">Copy</button></div><pre>which python; python --version; echo $PATH</pre></div>
+  <div class="out"><div class="out-bar">Practice run</div><pre>/opt/venv/bin/python
+Python 3.12.3
+/opt/venv/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; where does onnxruntime find CUDA? (sections 1 and 4)</span><button class="copy" type="button">Copy</button></div><pre>SP=/opt/venv/lib/python3.12/site-packages
+ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep -E "cu|nvrtc|not found"
+echo $LD_LIBRARY_PATH</pre></div>
+  <div class="out"><div class="out-bar">Practice run</div><pre>libcublasLt.so.12 =&gt; /usr/local/cuda/lib64/libcublasLt.so.12
+libcublas.so.12 =&gt; /usr/local/cuda/lib64/libcublas.so.12
+libcurand.so.10 =&gt; /usr/local/cuda/lib64/libcurand.so.10
+libcufft.so.11 =&gt; /usr/local/cuda/lib64/libcufft.so.11
+libcudart.so.12 =&gt; /usr/local/cuda/lib64/libcudart.so.12
+libcudnn.so.9 =&gt; /lib/x86_64-linux-gnu/libcudnn.so.9
+libnvrtc.so.12 =&gt; /usr/local/cuda/lib64/libnvrtc.so.12
+/usr/local/cuda/lib64</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; which package brought each one, and its size</span><button class="copy" type="button">Copy</button></div><pre>for l in libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libcufft.so.11 libcurand.so.10 libnvrtc.so.12 libcudnn.so.9; do r=$(readlink -f $(ldconfig -p | grep -m1 "$l " | sed "s/.*=&gt; //")); printf "%-18s %5s MB  %s\n" $l $(du -m $r | cut -f1) $(dpkg -S $r | cut -d: -f1); done</pre></div>
+  <div class="out"><div class="out-bar">Practice run</div><pre>libcudart.so.12        1 MB  cuda-cudart-12-8
+libcublas.so.12      111 MB  libcublas-12-8
+libcublasLt.so.12    717 MB  libcublas-12-8
+libcufft.so.11       266 MB  libcufft-12-8
+libcurand.so.10      131 MB  libcurand-12-8
+libnvrtc.so.12       100 MB  cuda-nvrtc-12-8
+libcudnn.so.9          1 MB  libcudnn9-cuda-12</pre></div>
+  <div class="prose"><p><code>libcudnn.so.9</code> is only 1 MB: it is a loader. The real work is in <code>libcudnn_engines_precompiled.so.9</code> (555 MB), <code>_adv</code>, <code>_ops</code> and others next to it, loaded when a model needs them.</p></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; what the base image has that onnxruntime never loads</span><button class="copy" type="button">Copy</button></div><pre>dpkg-query -W -f='${Installed-Size}\t${Package}\n' | awk '$2 ~ /^(cuda-|libcu|libnpp|libnvjpeg|libnccl|libnvjitlink|libcudnn)/ {printf "%6.0f MB  %s\n", $1/1024, $2}' | sort -rn | head -12</pre></div>
+  <div class="out"><div class="out-bar">Practice run (bold = onnxruntime loads it)</div><pre><b>   999 MB  libcudnn9-cuda-12</b>
+<b>   829 MB  libcublas-12-8</b>
+   384 MB  libcusolver-12-8
+   369 MB  libcusparse-12-8
+   366 MB  libnccl2          (several GPUs talking to each other)
+   305 MB  libnpp-12-8       (NVIDIA's image processing)
+<b>   267 MB  libcufft-12-8</b>
+<b>   212 MB  cuda-nvrtc-12-8</b>
+   193 MB  cuda-compat-12-8  (only for data-center GPUs with old drivers)
+<b>   130 MB  libcurand-12-8</b>
+    90 MB  libnvjitlink-12-8
+     8 MB  libnvjpeg-12-8</pre></div>
+  <div class="prose"><p>About <strong>1.4 GB</strong> of CUDA libraries that onnxruntime never asks for. They are there because <code>cudnn-runtime</code> means "all of CUDA's runtime libraries". This is the reason step 10 exists. In step 7 you check the claim on the running program.</p></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; what cv2 needs from Linux (section 2)</span><button class="copy" type="button">Copy</button></div><pre>ldd $SP/cv2/cv2*.so | grep -E "GL|X11|xcb|glib"
+dpkg -S /usr/lib/x86_64-linux-gnu/libGL.so.1.7.0
+apt-cache rdepends --installed libllvm20 mesa-libgallium libglx-mesa0</pre></div>
+  <div class="out"><div class="out-bar">Practice run (shortened)</div><pre>libxcb.so.1 =&gt; /lib/x86_64-linux-gnu/libxcb.so.1                       &lt;- apt
+libxcb-shm-0be6dfbf.so.0.0.0 =&gt; .../cv2/../opencv_python.libs/...     &lt;- inside the wheel
+libGL.so.1 =&gt; /lib/x86_64-linux-gnu/libGL.so.1                          &lt;- apt
+libglib-2.0.so.0 =&gt; /lib/x86_64-linux-gnu/libglib-2.0.so.0              &lt;- apt
+libX11.so.6 =&gt; /lib/x86_64-linux-gnu/libX11.so.6                        &lt;- apt
+libgl1:amd64: /usr/lib/x86_64-linux-gnu/libGL.so.1.7.0
+libllvm20        Reverse Depends: mesa-libgallium
+mesa-libgallium  Reverse Depends: libgbm1, libglx-mesa0
+libglx-mesa0     Reverse Depends: libglx0</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; break it on purpose, then repair</span><button class="copy" type="button">Copy</button></div><pre>mkdir -p /tmp/hidden &amp;&amp; mv /usr/lib/x86_64-linux-gnu/libGL.so.1* /tmp/hidden/
+python -c "import cv2"
+mv /tmp/hidden/* /usr/lib/x86_64-linux-gnu/ &amp;&amp; python -c "import cv2; print('cv2 ok', cv2.__version__)"
+exit</pre></div>
+  <div class="out"><div class="out-bar">Practice run</div><pre>ImportError: libGL.so.1: cannot open shared object file: No such file or directory
+cv2 ok 5.0.0</pre></div>
+  <div class="prose"><p>That ImportError is what a too-small image looks like. Now you know which apt line prevents it.</p></div>
+
+  <h3 class="block-title">B. With the GPU: the driver, and the silent CPU fallback</h3>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm -it --gpus all -v "«M»:/m:ro" --entrypoint bash zip-naive</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; where the driver comes from</span><button class="copy" type="button">Copy</button></div><pre>nvidia-smi
+ldconfig -p | grep -E "libcuda.so.1|libnvidia-ml.so.1"
+r=$(readlink -f $(ldconfig -p | grep -m1 "libcuda.so.1 " | sed "s/.*=&gt; //")); echo $r; dpkg -S $r || echo "-&gt; not from any package in the image: the Windows driver, mounted by --gpus all"
+MODEL=$(ls /m/*.onnx | head -1); echo "model: $MODEL"
+python -c "import onnxruntime as o; s=o.InferenceSession('$MODEL', providers=['CUDAExecutionProvider','CPUExecutionProvider']); print('active:', s.get_providers())"</pre></div>
+  <div class="out"><div class="out-bar">Expected on your PC (needs the GPU, not measured here)</div><pre>(the nvidia-smi table: your card)
+libcuda.so.1 ... =&gt; /usr/lib/wsl/lib/libcuda.so.1        &lt;- a folder under /usr/lib/wsl: the Windows driver
+dpkg-query: no path found matching pattern ...
+-&gt; not from any package in the image: the Windows driver, mounted by --gpus all
+active: ['CUDAExecutionProvider', 'CPUExecutionProvider']</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; hide cuDNN and ask again</span><button class="copy" type="button">Copy</button></div><pre>mkdir -p /tmp/hidden &amp;&amp; mv /usr/lib/x86_64-linux-gnu/libcudnn.so.9* /tmp/hidden/
+python -c "import onnxruntime as o; s=o.InferenceSession('$MODEL', providers=['CUDAExecutionProvider','CPUExecutionProvider']); print('active:', s.get_providers())"
+exit</pre></div>
+  <div class="out"><div class="out-bar">Practice run (the same happens with a GPU)</div><pre>[E:onnxruntime:...] Failed to load library libonnxruntime_providers_cuda.so with error:
+    libcudnn.so.9: cannot open shared object file: No such file or directory
+[W:onnxruntime:...] Failed to create CUDAExecutionProvider. Require cuDNN 9.* and CUDA 12.*.
+active: ['CPUExecutionProvider']</pre></div>
+  <div class="prose"><p>The program keeps running, only slower, on the CPU. That is why X-Ray's report compares the providers you asked for with the ones that are <strong>active</strong>.</p></div>
+</section>
+
+<!-- ============================================================ STEP 6 -->
+<section class="sheet step" id="step6">
+  <header class="step-head">
+    <span class="step-no">6</span>
+    <div><h2>Watch it run: GPU, then CPU</h2><p class="step-meta">10 min &middot; each run up to 3 min, the window stays quiet until it ends</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step6" data-step="step6"> Done</label>
+  </header>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\run-step2.bat
+runs\zip\run-step2-cpu.bat</pre></div>
+
+  <div class="out"><div class="out-bar">Practice run, end of step2-cpu.log</div><pre>WARNING: The NVIDIA Driver was not detected.  GPU functionality will not be available.
+[xray-trace] cv2 windows off; a shown frame is saved every 5s to /xray-out/gui/
+[xray-trace] running: python live_video.py
+(here: whatever your program prints)
+[xray-trace] app exited with code 0 after 1.6s - collecting system info...
+[xray-trace] done: 1 Python processes traced, 40 events -&gt; /xray-out</pre></div>
+
+  <div class="notes">
+    <div class="check"><h3 class="block-title">Check in step2.log (GPU run)</h3><ul>
+      <li>step2-needs.txt, WHAT THE RUN USED: <code>onnxruntime ran on CUDAExecutionProvider</code>.</li>
+      <li>What your program normally prints is there, between X-Ray's lines.</li>
+      <li><code>app exited with code 0</code>. Stopped after 180 s instead? A <code>KeyboardInterrupt</code> just before is normal: that is the stop.</li>
+      <li>The NVIDIA banner at the top comes from the base image's start script. In the CPU run it says the driver was not detected: expected.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">Why a CPU run</h3><ul>
+      <li>It shows what the GPU buys you, in your own numbers.</li>
+      <li>The CPU run sets env vars whose default is <code>cuda</code> to <code>cpu</code> on purpose. onnxruntime-gpu 1.22 crashes (exit code -11 or 139) when it is asked for CUDA and there is no GPU, even with the CPU listed as a fallback. The practice run hit exactly that.</li>
+    </ul></div>
+  </div>
+
+  <div>
+    <h3 class="block-title">Your numbers (saved in this browser)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Where to read it</th><th>GPU run</th><th>CPU run</th></tr></thead>
+        <tbody>
+          <tr><td>speed (your program's own line, if it prints one)</td><td><input class="num" id="n-ms-gpu" type="text" aria-label="speed GPU"></td><td><input class="num" id="n-ms-cpu" type="text" aria-label="speed CPU"></td></tr>
+          <tr><td>RAM peak (WHAT THE RUN USED)</td><td><input class="num" id="n-ram-gpu" type="text" aria-label="RAM GPU"></td><td><input class="num" id="n-ram-cpu" type="text" aria-label="RAM CPU"></td></tr>
+          <tr><td>cores busy (WHAT THE RUN USED)</td><td><input class="num" id="n-cores-gpu" type="text" aria-label="cores GPU"></td><td><input class="num" id="n-cores-cpu" type="text" aria-label="cores CPU"></td></tr>
+          <tr><td>GPU memory (WHAT THE RUN USED, GPU line)</td><td><input class="num" id="n-gmem-gpu" type="text" aria-label="GPU memory"></td><td>&mdash;</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 7 -->
+<section class="sheet step" id="step7">
+  <header class="step-head">
+    <span class="step-no">7</span>
+    <div><h2>Explore: look inside while it runs</h2><p class="step-meta">20&ndash;30 min &middot; two CMD windows</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step7" data-step="step7"> Done</label>
+  </header>
+
+  <div class="prose"><p>The naive image runs with X-Ray watching and no time limit; the video starts again when it ends. The container is called <code>zip-explore</code>, so you never need to look up an ID.</p></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 1 &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\run-explore.bat</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 2</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker top zip-explore
+docker stats zip-explore --no-stream
+docker exec -it zip-explore bash</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; the processes and what they have open</span><button class="copy" type="button">Copy</button></div><pre>ps -ef
+PID=$(pgrep -f "^python live_video.py"); echo "app PID: $PID"
+ls -l /proc/$PID/fd | grep -v -E "pipe|socket|null|anon_inode"</pre></div>
+  <div class="out"><div class="out-bar">Practice run</div><pre>UID   PID  PPID  CMD
+root    1     0  python /xray/xray_trace.py run --out /xray-out --root /app --gui off -- python live_video.py
+root   25     1  python live_video.py
+app PID: 25
+... -&gt; /xray-out/events-25.jsonl
+... -&gt; /xin/&lt;name&gt;/&lt;the practice video&gt;</pre></div>
+  <div class="prose"><p>In the practice run the video was open and the model was not: onnxruntime reads the model once at the start and closes it. A look by hand sees one moment; X-Ray saw the whole run, so its report still lists the model.</p></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; every library the program loaded, and its package</span><button class="copy" type="button">Copy</button></div><pre>for f in $(awk '{print $6}' /proc/$PID/maps | grep "\.so" | grep -v site-packages | sort -u); do p=$(dpkg -S "$f" 2&gt;/dev/null | cut -d: -f1); printf "%-66s %s\n" "$f" "${p:-NOT FROM A PACKAGE}"; done</pre></div>
+  <div class="out"><div class="out-bar">Practice run, CPU mode (shortened) + what the GPU run adds</div><pre>/usr/lib/x86_64-linux-gnu/libGL.so.1.7.0              libgl1
+/usr/lib/x86_64-linux-gnu/libX11.so.6.4.0             libx11-6
+/usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.8000.0     libglib2.0-0t64
+/usr/lib/x86_64-linux-gnu/libxcb.so.1.1.0             libxcb1
+... (libc, libstdc++ and friends: in every image)
+on the GPU, also:
+/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublasLt.so.12.8.4.1   libcublas-12-8
+/usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9.8.0          libcudnn9-cuda-12
+/usr/lib/wsl/...libcuda.so...                                            NOT FROM A PACKAGE</pre></div>
+  <div class="prose"><p>Look for cusolver, cusparse, nccl or npp in your list. If none of them appear, the 1.4 GB from step 5 is really unused.</p></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; libraries that came inside the wheels, GPU memory, RAM, env</span><button class="copy" type="button">Copy</button></div><pre>awk '{print $6}' /proc/$PID/maps | grep "\.so" | grep site-packages | sed "s|.*site-packages/||" | sort -u
+nvidia-smi
+grep -E "Threads|VmRSS|VmHWM" /proc/$PID/status
+tr '\0' '\n' &lt; /proc/$PID/environ | sort
+exit</pre></div>
+  <div class="out"><div class="out-bar">Practice run (shortened)</div><pre>cv2/cv2.abi3.so
+numpy.libs/libscipy_openblas64_-f48b354e.so
+onnxruntime/capi/onnxruntime_pybind11_state.cpython-312-x86_64-linux-gnu.so
+opencv_python.libs/libavcodec-c4204469.so.62.28.101
+opencv_python.libs/libQt5Core-9088e21b.so.5.15.19
+VmHWM:   114340 kB      (RAM peak so far)
+Threads: 21
+LD_LIBRARY_PATH=/usr/local/cuda/lib64        (from the base image)
+... and every env var from run.env, with its /xin or /xout path</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 2 &middot; stop</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker stop -t 60 zip-explore</pre></div>
+  <div class="prose"><p>The program gets Ctrl+C, X-Ray saves its recording, and window 1 opens <code>runs\zip\explore\needs.txt</code>. Anything your program writes only at its end (a results file) is not written in this mode: the video keeps looping, so the end never comes. Steps 6 and 9 cover that.</p></div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>You saw by hand</th><th>Where X-Ray has the same thing (explore\needs.txt)</th></tr></thead>
+      <tbody>
+        <tr><td><code>/proc/PID/fd</code>: the video file</td><td>YOU PROVIDE: video line</td></tr>
+        <tr><td><code>/proc/PID/maps</code>: libraries + packages</td><td>step 8: the apt list of the plan, each with "loaded during the scenario"</td></tr>
+        <tr><td><code>environ</code>: the env vars</td><td>YOU PROVIDE: env lines</td></tr>
+        <tr><td><code>nvidia-smi</code>, <code>VmHWM</code>, <code>docker stats</code></td><td>WHAT THE RUN USED: GPU, RAM peak, cores</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 8 -->
+<section class="sheet step" id="step8">
+  <header class="step-head">
+    <span class="step-no">8</span>
+    <div><h2>Packages and the plan</h2><p class="step-meta">5 min &middot; CMD + Notepad</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step8" data-step="step8"> Done</label>
+  </header>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\run-step3-4.bat
+notepad runs\zip\plan\Dockerfile</pre></div>
+
+  <div class="out"><div class="out-bar">Practice run, step3.txt</div><pre>requirements: keep 4, remove [], swap [], add []
+Python packages installed: 0.81 GB; largest: onnxruntime-gpu 457 MB, opencv-python 196 MB, sympy 70 MB, numpy 68 MB
+Debian packages not in python:3.x-slim: 4538 MB</pre></div>
+  <div class="out"><div class="out-bar">Practice run, step4.txt</div><pre>base nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 (the run used the GPU; same nvidia/cuda image family
+     as Dockerfile.naive (it worked on your GPU); Python 3.12 from Ubuntu in a venv)
+apt: libgl1, libglib2.0-0t64, libx11-6, libxcb1
+pip: numpy==2.5.4 opencv-python==5.0.0.93 onnxruntime-gpu==1.22.0 nvidia-ml-py==13.615.71
+copy: live_video.py; volumes: /xout; writable: .
+NOTE: apt: libcudnn9-cuda-12 left out - the nvidia/cuda base image has it   (and 5 more like it)</pre></div>
+
+  <div class="notes">
+    <div class="why"><h3 class="block-title">Reading step3.txt</h3><ul>
+      <li><strong>keep 4</strong>: every requirement is really used. sympy is there because onnxruntime depends on it.</li>
+      <li><strong>4538 MB of Debian packages</strong> that python:3.12-slim does not have: the CUDA base plus section 2. A plan that keeps the same base cannot shrink them.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">plan\Dockerfile against Dockerfile.naive</h3><ul>
+      <li><strong>Pinned versions</strong> (<code>==</code>): exactly what ran today. A rebuild next month installs the same.</li>
+      <li><strong>apt</strong>: each package has its reason, e.g. "libGL.so.1.7.0 loaded during the scenario, linked by opencv-python".</li>
+      <li><strong>User <code>app</code></strong> instead of root: a bug or an attack inside the container gets fewer rights. <code>/xout</code> belongs to app, so it can write its output there.</li>
+      <li><strong>Only the files the run used</strong> are copied (practice: live_video.py). <code>plan\Dockerfile.dockerignore</code> lists what stays out and why.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 9 -->
+<section class="sheet step" id="step9">
+  <header class="step-head">
+    <span class="step-no">9</span>
+    <div><h2>Build slim, verify</h2><p class="step-meta">5&ndash;10 min &middot; CMD</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step9" data-step="step9"> Done</label>
+  </header>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\build-slim.bat
+runs\zip\run-slim.bat
+docker image ls</pre></div>
+  <div class="out"><div class="out-bar">Practice run, verify.txt (CPU runs compared)</div><pre># X-Ray verify: planned image vs naive image, same scenario
+  facts compared: naive 18, planned 18
+  seen with the naive image but NOT with the planned one (0):
+  problems (0):
+VERDICT: PASS - the planned image did everything the scenario needs</pre></div>
+
+  <div class="notes">
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li><code>VERDICT: PASS</code> at the end of verify.txt.</li>
+      <li>The end of <code>step2-slim.log</code> looks like <code>step2.log</code>: same providers line, similar timings.</li>
+      <li class="bad"><code>CHECK</code> with problems: send verify.txt. The fix goes into the plan, not your code.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">Why the size barely changed</h3><ul>
+      <li>Practice: zip-slim 8.95 GB against zip-naive 9.01 GB (DISK USAGE). The plan kept the same base image, which is 78% of the size. Only the unused files in ZIP-main went away.</li>
+      <li>If your ZIP-main holds big files (old checkpoints, videos), your difference is bigger. Either way, the next big step is the base image.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 10 -->
+<section class="sheet step" id="step10">
+  <header class="step-head">
+    <span class="step-no">10</span>
+    <div><h2>The base image lever: CUDA from pip</h2><p class="step-meta">20 min &middot; CMD + Notepad</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step10" data-step="step10"> Done</label>
+  </header>
+
+  <div class="prose"><p>Same program, different source for CUDA: <code>python:3.12-slim</code> plus <code>onnxruntime-gpu[cuda,cudnn]</code>, which makes pip install only the CUDA parts onnxruntime needs. Keep the first slim result so you can go back.</p></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder &middot; keep the auto result</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker tag zip-slim zip-slim-auto
+xcopy /e /i /q runs\zip\plan runs\zip\plan-auto
+notepad runs\zip\run-step3-4.bat</pre></div>
+  <div class="prose"><p>In Notepad change <code>set "GPUBASE=auto"</code> to <code>set "GPUBASE=pip"</code> and save. Then:</p></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\run-step3-4.bat
+runs\zip\build-slim.bat
+runs\zip\run-slim.bat
+docker image ls</pre></div>
+
+  <div class="out"><div class="out-bar">Practice run, the new parts of plan\Dockerfile</div><pre>FROM python:3.12-slim
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libx11-6 libxcb1 ...
+RUN pip install --no-cache-dir numpy==2.5.4 opencv-python==5.0.0.93 onnxruntime-gpu[cuda,cudnn]==1.22.0 nvidia-ml-py==13.615.71
+# onnxruntime finds the CUDA / cuDNN libraries of the pip wheels here
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:...cublas/lib:...cuda_runtime/lib:...
+
+image                 DISK USAGE   CONTENT SIZE
+zip-naive                 9.01GB          3.4GB
+zip-slim (pip)            6.05GB         2.21GB     (practice build, without the Debian apt layer)</pre></div>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; look inside the pip image as root</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm -it --user root --entrypoint bash zip-slim</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; why the LD_LIBRARY_PATH line exists</span><button class="copy" type="button">Copy</button></div><pre>SP=/usr/local/lib/python3.12/site-packages
+ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep -E "cu|nvrtc"
+LD_LIBRARY_PATH= ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep "not found"
+du -sh $SP/nvidia/* | sort -h
+pip list 2&gt;/dev/null | grep -E "nvidia|onnx"
+exit</pre></div>
+  <div class="out"><div class="out-bar">Practice run (shortened)</div><pre>libcublas.so.12 =&gt; .../site-packages/nvidia/cublas/lib/libcublas.so.12
+libcudnn.so.9 =&gt; .../site-packages/nvidia/cudnn/lib/libcudnn.so.9
+libcudart.so.12 =&gt; .../site-packages/nvidia/cuda_runtime/lib/libcudart.so.12
+          (without LD_LIBRARY_PATH:)
+libcublas.so.12 =&gt; not found
+libcudnn.so.9 =&gt; not found
+libcudart.so.12 =&gt; not found                     (all 7 not found)
+ 92M  nvidia/nvjitlink    162M  nvidia/curand    217M  nvidia/cuda_nvrtc
+281M  nvidia/cufft        817M  nvidia/cublas    1.2G  nvidia/cudnn
+nvidia-cudnn-cu12 9.27.0.42    nvidia-cublas-cu12 12.9.2.10    onnxruntime-gpu 1.22.0</pre></div>
+
+  <div class="notes">
+    <div class="why"><h3 class="block-title">Why it is smaller, and the catch</h3><ul>
+      <li>The CUDA part shrinks from 4.38 GB to 2.58 GB: cuSOLVER, cuSPARSE, NCCL, NPP and cuda-compat are simply not installed.</li>
+      <li>The libraries now sit in <code>site-packages/nvidia/*/lib</code>, folders Linux does not search. <code>LD_LIBRARY_PATH</code> adds them. Without it, onnxruntime falls back to the CPU, just like your cuDNN experiment in step 5.</li>
+      <li>pip takes the newest CUDA 12 / cuDNN 9 (12.9 and 9.27 in practice), not the base image's 12.8 and 9.8. That is allowed within CUDA 12, and your verify run is the proof.</li>
+    </ul></div>
+    <div class="check"><h3 class="block-title">Decide</h3><ul>
+      <li>Keep pip only when verify.txt says PASS <strong>and</strong> step2-slim.log shows <code>CUDAExecutionProvider</code> first.</li>
+      <li class="bad">Otherwise go back: <code>docker tag zip-slim-auto zip-slim</code>; the plan is in <code>runs\zip\plan-auto</code>.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 11 -->
+<section class="sheet step" id="step11">
+  <header class="step-head">
+    <span class="step-no">11</span>
+    <div><h2>Run it for real, with compose</h2><p class="step-meta">10 min &middot; CMD + Notepad &middot; no X-Ray involved</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step11" data-step="step11"> Done</label>
+  </header>
+
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>cd /d "«X»\runs\zip\plan"
+copy .env.example .env
+notepad .env</pre></div>
+  <div class="out"><div class="out-bar">The parts of .env.example (names and folders come from your code)</div><pre># input folders on this machine, mounted read-only (from the code defaults; / works on Windows too)
+&lt;NAME&gt;_DIR=C:/...            one per folder the run files mounted
+# folders on this machine (left: host, mounted into the container)
+XOUT_DIR=./xout
+# env vars the code reads
+&lt;NAME&gt;=/xin/... or /xout/... the paths inside the container
+&lt;NAME&gt;=&lt;code default&gt;        every other setting, as in the code</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; in runs\zip\plan</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker compose build
+docker compose run --rm zip-main
+dir xout
+cd /d "«X»"</pre></div>
+
+  <div class="notes">
+    <div class="why"><h3 class="block-title">Why</h3><ul>
+      <li><code>.env</code> holds everything that changes per PC: folders, settings, later passwords. compose.yml stays the same everywhere. Never put .env on GitHub.</li>
+      <li><strong>Windows</strong>: if your code opens them (step 1, the Screen branch), switch them off the way your code allows before this run. Without X-Ray nothing catches <code>cv2.imshow</code>, and a container has no screen.</li>
+      <li><strong><code>run --rm</code>, not <code>up -d</code></strong>: compose.yml has <code>restart: unless-stopped</code>. That suits a camera stream that should run forever. A program that works through one video file and then ends would be started again by <code>up -d</code> every time it finishes.</li>
+      <li>The service is called <code>zip-main</code> after the folder name ZIP-main.</li>
+    </ul></div>
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li>Your program prints what it printed in step 6, and its output file is in <code>xout\</code>.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ SEND -->
+<section class="sheet" id="send">
+  <div class="sheet-title"><h2>Send to Claude</h2><p>Paste these in the chat at the end (or when something looks wrong). They hold paths and env var names, no secrets.</p></div>
+  <ol class="send-list">
+    <li>The sizes from <code>docker image ls</code>: zip-naive, zip-slim-auto, zip-slim (pip).</li>
+    <li><code>runs\zip\step2-needs.txt</code> and <code>step2-cpu-needs.txt</code>, plus the last 15 lines of <code>step2.log</code> and <code>step2-cpu.log</code>.</li>
+    <li>Your list from step 7 (the libraries the GPU run loaded), and <code>runs\zip\explore\needs.txt</code>.</li>
+    <li><code>step3.txt</code>, <code>step4.txt</code>, and <code>verify.txt</code> from both slim runs.</li>
+    <li>Anything that surprised you in step 5. Those questions are the best part of the day.</li>
+  </ol>
+</section>
+
+<!-- ============================================================ TROUBLE -->
+<section class="sheet" id="trouble">
+  <div class="sheet-title"><h2>When something breaks</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>You see</th><th>What it means, what to do</th></tr></thead>
+      <tbody>
+        <tr><td><code>FileNotFoundError ... runs\zip\zip.json</code></td><td>An old xray_static.py: step 0, the VERSION check. 0.5.10 creates the folder itself.</td></tr>
+        <tr><td><code>WARNING: your pip (24.x ...) checks 'Requires-Python'</code></td><td><code>python -m pip install -U pip</code>, then step 2 again.</td></tr>
+        <tr><td><code>429 Too Many Requests</code> while pulling</td><td>Docker Hub's limit for anonymous downloads. Sign in to Docker Desktop, or wait a few minutes and run the same file again.</td></tr>
+        <tr><td><code>could not select device driver "" with capabilities: [[gpu]]</code></td><td>Docker cannot see the GPU. Restart Docker Desktop; update the NVIDIA driver.</td></tr>
+        <tr><td><code>unsatisfied condition: cuda&gt;=12.8</code></td><td>The driver is older than CUDA 12.8 needs. Update to 570 or newer.</td></tr>
+        <tr><td>The run ends at once, <code>exit code -11</code> or <code>139</code></td><td>onnxruntime was asked for CUDA without a working GPU. The GPU run needs step 0's nvidia-smi check to pass.</td></tr>
+        <tr><td>GPU run, providers show only <code>CPUExecutionProvider</code></td><td>Read the onnxruntime lines just above in the log: they name the missing library (step 5B shows how that looks). Send them.</td></tr>
+        <tr><td><code>ImportError: libGL.so.1</code></td><td>The apt line is missing libgl1 (step 5 showed it on purpose).</td></tr>
+        <tr><td><code>E: Unable to locate package libglib2.0-0t64</code></td><td>That name exists on Ubuntu 24.04 only; on Ubuntu 22.04 it is <code>libglib2.0-0</code>.</td></tr>
+        <tr><td><code>no space left on device</code></td><td><code>docker system df</code>, then <code>docker builder prune</code> and remove old images with <code>docker rmi</code>. These images are large.</td></tr>
+        <tr><td>A Traceback that mentions an <code>xray_*.py</code> file</td><td>An X-Ray bug: send the traceback.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</main>
+</div>
+</div>
+</div>
+
+<script>
+(function () {
+  var store = {
+    get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* storage blocked: the page still works */ } }
+  };
+  var fields = { X: "dirX", P: "dirP", M: "dirM" };
+  var defaults = {
+    X: "C:\\Users\\user.bc\\PycharmProjects\\xray-tools",
+    P: "C:\\Users\\user.bc\\PycharmProjects\\ZIP\\ZIP-main",
+    M: ""
+  };
+  var tpls = Array.prototype.map.call(document.querySelectorAll("pre[data-tpl]"), function (pre) {
+    return { pre: pre, text: pre.textContent };
+  });
+  function val(k) {
+    var v = document.getElementById(fields[k]).value.trim();
+    if (v) return v;
+    return k === "M" ? "MODEL_FOLDER" : defaults[k];
+  }
+  function render() {
+    var x = val("X"), p = val("P"), m = val("M");
+    tpls.forEach(function (t) {
+      t.pre.textContent = t.text.split("\u00abX\u00bb").join(x).split("\u00abP\u00bb").join(p).split("\u00abM\u00bb").join(m);
+    });
+  }
+  Object.keys(fields).forEach(function (k) {
+    var el = document.getElementById(fields[k]);
+    var saved = store.get("zipwalk.dir." + k);
+    el.value = saved !== null ? saved : defaults[k];
+    el.addEventListener("input", function () { store.set("zipwalk.dir." + k, el.value); render(); });
+  });
+  render();
+
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("button.copy") : null;
+    if (!b) return;
+    var pre = b.closest(".cmd").querySelector("pre");
+    var text = pre.textContent;
+    function show(msg) { b.textContent = msg; window.setTimeout(function () { b.textContent = "Copy"; }, 1800); }
+    function fallback() {
+      var r = document.createRange(); r.selectNodeContents(pre);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      show("Ctrl+C now");
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { show("Copied"); }, fallback);
+      } else { fallback(); }
+    } catch (err) { fallback(); }
+  });
+
+  var boxes = Array.prototype.slice.call(document.querySelectorAll("input.done"));
+  function progress() {
+    var n = boxes.filter(function (b) { return b.checked; }).length;
+    document.getElementById("progress").textContent = n + " of " + boxes.length + " steps done";
+    boxes.forEach(function (b) {
+      var link = document.querySelector('.rail a[href="#' + b.dataset.step + '"]');
+      if (link) link.classList.toggle("is-done", b.checked);
+    });
+  }
+  boxes.forEach(function (b) {
+    b.checked = store.get("zipwalk.done." + b.dataset.step) === "1";
+    b.addEventListener("change", function () { store.set("zipwalk.done." + b.dataset.step, b.checked ? "1" : "0"); progress(); });
+  });
+  progress();
+
+  Array.prototype.forEach.call(document.querySelectorAll("input.num"), function (el) {
+    var saved = store.get("zipwalk.num." + el.id);
+    if (saved !== null) el.value = saved;
+    el.addEventListener("input", function () { store.set("zipwalk.num." + el.id, el.value); });
+  });
+})();
+</script>
+</body>
+</html>

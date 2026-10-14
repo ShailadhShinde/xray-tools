@@ -10,6 +10,9 @@ Reads the Step 1 map (xray_static.py output) and writes, into runs/NAME/:
   run-step3-4.bat      Step 3 (package scan of the naive image) + Step 4 (plan: plan/Dockerfile + .dockerignore)
   build-slim.bat       docker build of plan/Dockerfile -> image NAME-slim, then both image sizes
   run-slim.bat         the Step 2 run again on NAME-slim, then verify (verify.txt: PASS = same behaviour)
+  run-explore.bat      runs the app with NO time limit (video files loop), container named NAME-explore: look
+                       inside with  docker exec -it NAME-explore bash ; stop with  docker stop -t 60 NAME-explore ;
+                       X-Ray's report of the same run is then in runs/NAME/explore/ to compare with what you saw
   run-load.bat A       a 5-minute load test (no line counting, GPU logged every 2 s, the app's own log folders
                        kept) into runs/NAME/load-A/; run it again with B, C ... after changing cameras / solutions
 Every line is commented. Open them in Notepad, change what you want, then run them. Docker is never started by
@@ -41,7 +44,7 @@ except ImportError:                   # pragma: no cover - xray_needs.py missing
     def const_of(path, consts, outer=False):
         return None
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -429,12 +432,15 @@ def write_build_slim(p, sh, out_dir):
     return nl.join(L) + nl
 
 
-def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
+def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
     name = p["name"]
     X, R, PY = ("%X%", "%RUN%", "%PY%") if sh.bat else ("$X", "$RUN", "$PY")
     sep = "\\" if sh.bat else "/"
     trace_names = []
-    L = head(sh, xdir, out_dir, "a 5-minute LOAD TEST (usage: run-load A, then B, C ... for the next setups)" if load else
+    folder = load or explore            # results in their own folder (load-A, explore)
+    L = head(sh, xdir, out_dir, "EXPLORE: the app runs until you stop it (video files loop), so you can look inside "
+             "the container by hand" if explore else
+             "a 5-minute LOAD TEST (usage: run-load A, then B, C ... for the next setups)" if load else
              "the traced run on the " + ("planned image " + name + "-slim + verify" if slim else
                                          "naive image" + (" without the GPU" if cpu else "")))
     if p["notes"]:
@@ -453,11 +459,21 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
                   'docker image inspect "$IMG" >/dev/null 2>&1 || IMG=' + p["image"],
                   'echo "Load test $L on image $IMG - 5 minutes. Results: runs/' + name + '/load-$L/"', ""]
         image = "%IMG%" if sh.bat else "$IMG"
+    if explore:
+        LB = "explore"
+        cn = name + "-explore"
+        L += ["docker rm -f " + cn + (" >nul 2>&1" if sh.bat else " >/dev/null 2>&1")]
+        for t in ["The app starts now and keeps running (a video file starts again when it ends).",
+                  "In a SECOND window:   docker exec -it " + cn + " bash      (look inside, see GUIDE.md section 10/11)",
+                  "                      docker stats   /   docker top " + cn,
+                  "To stop:              docker stop -t 60 " + cn + "      (then this window writes the X-Ray report)"]:
+            L.append("echo " + t if sh.bat else "echo '" + t + "'")
+        L.append("")
     entries = p["entries"] or ["main.py"]
     envs = list(p["env"]) + (p["env_cpu"] if cpu else [])
     for e in entries:
         stem = safe(os.path.splitext(os.path.basename(e))[0]) if len(entries) > 1 else ""
-        if load:
+        if folder:
             tdir = LB + sep + "trace" + ("-" + stem if stem else "")
             log = LB + sep + "run" + ("-" + stem if stem else "") + ".log"
             outd, filesd = LB + sep + "out", LB + sep + "files"
@@ -469,8 +485,8 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
             outd, filesd = "out" + suffix, "files" + suffix
         trace_names.append(tdir)
         fdirs = [R + sep + filesd + sep + sub for sub, cont, why in p["file_mounts"]]
-        adirs = [R + sep + LB + sep + "applog" + sep + d for d in p["app_dirs"]] if load else []
-        fresh = ([LB] if load and e == entries[0] else []) if load else \
+        adirs = [R + sep + LB + sep + "applog" + sep + d for d in p["app_dirs"]] if folder else []
+        fresh = ([LB] if e == entries[0] else []) if folder else \
             [tdir] + ([outd] if p["out_mount"] else []) + ([filesd] if fdirs else [])
         if sh.bat:
             L += ['if exist "%RUN%\\' + d + '" rmdir /s /q "%RUN%\\' + d + '"' for d in fresh]
@@ -496,7 +512,9 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
         if p["env_optional"]:
             L += [sh.rem + "other env vars the code reads (add  -e NAME=value  to the command to change one):"]
             L += [sh.rem + "  " + n + "  (code default: " + str(d) + ")  " + site for n, d, site in p["env_optional"]]
-        a = ["docker run --rm" + (" --gpus all" if p["gpu"] and not cpu else "") + (" --shm-size 2g" if p["shm"] else "")
+        a = ["docker run --rm" + (" --name " + name + "-explore" + ("-" + stem if stem else "") +
+                                  " --cap-add SYS_PTRACE --security-opt seccomp=unconfined" if explore else "")
+             + (" --gpus all" if p["gpu"] and not cpu else "") + (" --shm-size 2g" if p["shm"] else "")
              + (" --mac-address " + p["mac"] if p["mac"] else "")
              + "".join(" -p " + str(pt) + ":" + str(pt) for pt in p["ports"])]
         a.append('  -v "' + X + ':/xray:ro" -v "' + R + sep + tdir + ':/xray-out"')
@@ -506,7 +524,7 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
             a.append('  -v "' + R + sep + outd + ':/xout"')
         for sub, cont, why in p["file_mounts"]:
             a.append('  -v "' + R + sep + filesd + sep + sub + ":" + cont + '"')
-        for d in (p["app_dirs"] if load else []):
+        for d in (p["app_dirs"] if folder else []):
             a.append('  -v "' + R + sep + LB + sep + "applog" + sep + d + ":" + p["workdir"].rstrip("/") + "/" + d + '"')
         if p["env"] or p["env_optional"]:
             # every env var in ONE file (runs/NAME/run.env): add or change values there, not in each run file
@@ -515,11 +533,13 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
             a.append("  -e " + n + "=" + v)
         if load:
             a.append("  -e XRAY_COVERAGE=0")       # no line counting: it would slow the app and skew the numbers
+        if explore:
+            a.append("  -e XRAY_LOOP_VIDEO=1")     # a video file starts again at its end: the app keeps running
         a.append("  " + image)
-        stop = 300 if load else p["stop_after"]
+        stop = 300 if load else 0 if explore else p["stop_after"]
         flags = (" --gui off" if p["gui"] else "") + (" --stop-after " + str(stop) if stop else "")
         a.append("  python /xray/xray_trace.py run --out /xray-out --root " + p["workdir"] + flags + " -- python " + e)
-        msg = ("Load test" if load else "Step 2" + (" (CPU)" if cpu else " (planned image)" if slim else "")) + (": " + e
+        msg = ("Explore run" if explore else "Load test" if load else "Step 2" + (" (CPU)" if cpu else " (planned image)" if slim else "")) + (": " + e
                + " - the window stays quiet until it ends. Log: " + log)
         L += ["echo " + msg if sh.bat else "echo '" + msg + "'"]
         # one command over several lines: each line but the last ends with the continuation mark; the log
@@ -527,13 +547,14 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False):
         L += [x + sh.cont for x in a[:-1]] + [a[-1] + ' > "' + R + sep + log + '" 2>&1', ""]
     traces = " ".join('--trace "' + R + sep + t + '"' for t in trace_names)
     pyv = '"' + PY + '"'
-    if load:
-        if p["gpu"]:
+    if folder:
+        if p["gpu"] and load:
             L += ["taskkill /im nvidia-smi.exe /f >nul 2>&1" if sh.bat else "kill $GPULOG 2>/dev/null"]
         L += [pyv + ' "' + X + sep + 'xray_trace.py" facts ' + traces + ' --out "' + R + sep + LB + sep + 'runtime.json"',
               pyv + ' "' + X + sep + 'xray_needs.py" "' + R + sep + LB + sep + 'runtime.json" > "' + R + sep + LB + sep
               + 'needs.txt"']
-        return finish(sh, L, LB + sep + "needs.txt", "Done. In the load folder: needs.txt - WHAT THE RUN USED "
+        return finish(sh, L, LB + sep + "needs.txt", "Done. In the " + ("explore" if explore else "load") +
+                      " folder: needs.txt - WHAT THE RUN USED "
                       "is at the end -, gpu.csv, run.log, applog = the logs the app wrote.")
     rt = name + "-runtime" + suffix + ".json"
     L += [pyv + ' "' + X + sep + 'xray_trace.py" facts ' + traces + ' --out "' + R + sep + rt + '"']
@@ -607,6 +628,7 @@ def main(argv=None):
     files["build-slim" + ext] = write_build_slim(p, sh, out_dir)
     files["run-slim" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, slim=True)
     files["run-load" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, load=True)
+    files["run-explore" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, explore=True)
     if p["env"] or p["env_optional"]:
         E = ["# Env vars for the runs of " + a.name + " (written by xray_runfile.py " + VERSION + "). Every run file",
              "# reads this file (--env-file): change a value here once. One NAME=value per line, no quotes,",

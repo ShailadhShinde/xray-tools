@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-VERSION = "0.5.9"
+VERSION = "0.5.10"
 PLACE = "<var>"
 REQ = {"no": 0, "conditional": 1, "yes": 2}
 
@@ -4800,6 +4800,7 @@ def main(argv=None):
 
     mapper = Mapper(args.root, args.entry, args.cwd, args.requirements, args.path, args.exclude, args.use_installed)
     out = mapper.run()
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)     # runs/NAME/ on a fresh copy
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1, default=lambda o: sorted(o) if isinstance(o, (set, frozenset)) else str(o))
     s = out["summary"]

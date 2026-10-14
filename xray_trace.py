@@ -34,7 +34,7 @@ import threading
 import time
 from collections import defaultdict
 
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK_DIR = os.path.join(HERE, "xray_hook")
 
@@ -66,6 +66,7 @@ def jload(p):
 
 
 def jdump(obj, p):
+    os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
         json.dump(obj, fh, indent=1, ensure_ascii=False, default=str)
 

@@ -223,15 +223,43 @@ minute, without installing anything (pip only reads the package index - it needs
 python xray_naive.py --project "PROJECT_FOLDER" --requirements requirements.txt --entry main.py --name app --gpu
 ```
 (`--cpu` for a CPU image; `--python 3.10` if the machine that runs the code today has Python 3.10.)
+If `naive-check.txt` starts with `WARNING: your pip (...) checks 'Requires-Python' ...`: run `python -m pip install -U pip`
+and the check again. pip 24.1 and older, on a PC whose Python is older than the image's, show wrong versions (or
+MISSING for packages that need the newer Python).
+
+`naive-check.txt` also has two tables:
+- **WHAT KIND OF PACKAGE EACH ONE IS** - for every line, the file pip would really download for Linux:
+  `pure wheel` (Python only, `py3-none-any`), `binary wheel` (compiled `.so` inside, prebuilt), `HEAVY binary wheel`
+  (over 100 MB), `sdist (source)` - for a source package the tool downloads it and looks inside: C / C++ / Cython /
+  Rust files = **compiler YES**, Python only = no compiler. With the download size of each, and for torch the size
+  of the `nvidia-*` CUDA packages it pulls in (they are separate pip packages, about 2.7 GB).
+- **GPU - WHERE EACH GPU PACKAGE GETS ITS CUDA LIBRARIES FROM** - torch brings its own (nvidia-* pip packages);
+  onnxruntime-gpu needs them from the system (base image), or from the `[cuda,cudnn]` extra (1.21 and newer only).
+  From that it says which base fits: if torch is there, `python:3.12-slim` is enough and an nvidia/cuda base would
+  be a second copy of the same libraries.
 It writes `runs\app\naive\`: `naive-check.txt` (read it), `Dockerfile.naive`, `Dockerfile.naive.dockerignore`,
 `requirements.docker.txt`. Copy the three Docker files into the project folder - the tool never overwrites the
 project's own files. Then `xray_runfile.py` writes `build-naive.bat` as usual.
 
-The recipe it follows (also good to know when you write a Dockerfile by hand):
-- CPU: `FROM python:3.X` - the full image already has gcc and the common `-dev` libraries.
-- GPU: `FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` + Ubuntu's Python in a venv, + `build-essential python3-dev`
-  only when something is compiled. (`onnxruntime-gpu` older than 1.19 needs CUDA 11.8 + cuDNN 8 instead.)
-- opencv-python needs `libgl1` and glib.
+`Dockerfile.naive` is written in 5 sections, each decided from the tables above, with the reason as a comment
+above every line (also good to know when you write a Dockerfile by hand):
+
+| Section | Decided from | Rule |
+|---|---|---|
+| 1. base image | the GPU table | CPU: `python:3.X-slim`. GPU + torch: `python:3.X-slim` too (torch brings CUDA as pip packages; an nvidia/cuda base would be a second copy). GPU with only onnxruntime-gpu: `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` (+ Python in a venv); onnxruntime-gpu < 1.19: CUDA 11.8 + cuDNN 8 base. A source package with CUDA code (`.cu`) needs nvcc: the `-devel` image. |
+| 2. system libraries (apt) | the package names | the libraries a package loads when it RUNS: opencv-python -> `libgl1` glib `libx11-6` `libxcb1`, lightgbm -> `libgomp1`, psycopg2 -> `libpq5` ... |
+| 3a. big frameworks | kind = HEAVY / torch, onnxruntime ... | their own `pip install` first: Docker reuses that layer while the rest changes |
+| 3b. the other packages | kind | if any is an sdist with C / C++ / Cython code: `gcc libc6-dev` (+ `g++`, + the `-dev` library) installed and purged **in the same RUN**, so the compiler is not in the image |
+| 4. LD_LIBRARY_PATH | GPU table | only when onnxruntime-gpu (loads CUDA by name) sits on a slim base next to torch's nvidia-* packages: points at `site-packages/nvidia/*/lib` - folders INSIDE the image. With an nvidia/cuda base the file says why nothing is added: the base sets `LD_LIBRARY_PATH=/usr/local/cuda/lib64` and keeps cuDNN in a standard folder |
+| 5. code | - | `COPY . .` - everything; X-Ray finds out what is used |
+
+LD_LIBRARY_PATH, seen with your own eyes (in a container of such an image):
+```bash
+P=$(python -c "import onnxruntime,os;print(os.path.dirname(onnxruntime.__file__))")/capi/libonnxruntime_providers_cuda.so
+ldd $P | grep -E "nvidia|not found"                  # found: .../site-packages/nvidia/cudnn/lib/libcudnn.so.9 ...
+LD_LIBRARY_PATH= ldd $P | grep "not found"           # without it: libcudart, libcublas, libcudnn ... not found
+```
+The only GPU part that comes from the host is the driver (`libcuda.so`): `--gpus all` mounts it in.
 
 ## 4. Step 2 - Watch it run (needs Docker and an image that runs the app)
 
@@ -306,6 +334,9 @@ In `step2-needs.log` every item now says **seen running**, **its line ran** or *
 - GPU lines show what really happened: `torch.cuda.is_available() returned ...`, ONNX providers **requested vs
   active** (asked for the GPU but ran on the CPU = silent slowdown).
 - threads: `oversubscribed` = more busy threads than CPUs (each process uses all CPUs).
+- the CPU run of a GPU app (`run-step2-cpu`) sets env vars whose default is `cuda` / `gpu` to `cpu` on purpose:
+  onnxruntime-gpu crashes (exit code -11 or 139) when it is asked for CUDA in a container without a GPU, even with
+  the CPU listed as a fallback.
 Send `step2-needs.log` + the end of `step2.log` to Claude.
 
 ---
@@ -362,6 +393,14 @@ python3 xray_plan.py plan --project PROJECT_FOLDER --dockerfile PROJECT_FOLDER/D
 
 You get `plans/app/Dockerfile` (every line has a comment why), `Dockerfile.dockerignore`, `compose.xray.yml`,
 `plan.json`. Read the Dockerfile before building.
+
+No compose file in the project: you get `compose.yml` + `.env.example` instead. `.env.example` mounts the same input
+folders as the run files (read-only, taken from the code defaults, e.g. `MODEL_ONNX_DIR=C:/.../models`) and points the
+env vars at the paths inside the container. If the code opens windows (`cv2.imshow`), a container has no screen: switch
+them off the way your code allows before a run without X-Ray. `compose.yml` says `restart: unless-stopped`: right for
+a service that should run forever (cameras, an API).
+A program that works through one file and ends is started with `docker compose run --rm SERVICE`; with
+`docker compose up -d` Docker would start it again every time it finishes.
 
 ### 6.2 Build it and compare sizes
 ```bash
@@ -446,15 +485,17 @@ docker run --rm --gpus all --entrypoint "" IMAGE python -c "import onnxruntime a
 **Compare two images:**
 ```bat
 docker images
-docker history IMAGE                  # which Dockerfile line added how many MB
+docker history IMAGE                  & REM which Dockerfile line added how many MB (--no-trunc: full commands)
+REM docker image ls on newer Docker: CONTENT SIZE = the compressed download, DISK USAGE = download + unpacked files;
+REM older Docker shows one SIZE column = the unpacked size
 docker run --rm --entrypoint "" app-naive ls /app
 docker run --rm --entrypoint "" app-slim ls /app
 ```
 **Inside a RUNNING container** (start the app normally, then in a second CMD):
 ```bat
-docker ps                             # the CONTAINER ID
-docker stats                          # live CPU / RAM per container (Ctrl+C to stop)
-docker logs -f CONTAINER_ID           # the app's output
+docker ps                             & REM the CONTAINER ID
+docker stats                          & REM live CPU / RAM per container (Ctrl+C to stop)
+docker logs -f CONTAINER_ID           & REM the app's output
 docker exec -it CONTAINER_ID bash
 ```
 inside:
@@ -546,3 +587,71 @@ them - run longer, or start from the code), env vars read with a computed name, 
 | can this PC reach a host:port? | `docker run --rm busybox nc -zv -w 3 192.168.1.75 5432` ("open" = yes) |
 | ping a camera | `ping 10.10.10.17` |
 | folder size | Explorer: right-click the folder -> Properties |
+
+
+## 12. Explore mode - the app keeps running, you look inside, then compare with X-Ray
+
+`run-explore.bat` (made by `xray_runfile.py`) starts the NAIVE image with X-Ray watching, but with **no time
+limit**, and a video FILE starts again from the beginning when it ends (`XRAY_LOOP_VIDEO=1`; camera streams are
+not touched). The container has a fixed name, `NAME-explore`, so you never need to look up its ID.
+
+**Window 1:**
+```bat
+runs\NAME\run-explore.bat
+```
+**Window 2** (as long as you like):
+```bat
+docker top NAME-explore
+docker stats NAME-explore
+docker exec -it NAME-explore bash
+```
+then everything from sections 10 and 11 works inside (the image runs as root, so `apt-get install -y strace lsof
+procps iproute2` works if the PC has internet). `strace` can also attach to the RUNNING process:
+`strace -f -p PID -e trace=openat,connect -o /tmp/t.txt` (Ctrl+C to stop it; the app keeps running).
+
+**Stop** (in any window): `docker stop -t 60 NAME-explore` - the app gets Ctrl+C, X-Ray saves its recording and
+window 1 writes `runs\NAME\explore\needs.txt`.
+
+**Compare** - what you saw by hand, and where X-Ray has the same thing:
+
+| By hand | In `explore\needs.txt` / `explore\runtime.json` |
+|---|---|
+| `ls -l /proc/PID/fd` - video / model files open | YOU PROVIDE: video / data / model lines |
+| `ss -tnp` - camera :554, database :5432 | YOU PROVIDE: network lines (one per host) |
+| `env \| sort`, `grep -rn getenv` | YOU PROVIDE: env lines |
+| `awk '{print $6}' /proc/PID/maps \| grep .so` | Step 3 (`xray_pkg.py`) turns these into apt packages |
+| `docker stats`, `VmHWM` in `/proc/PID/status` | WHAT THE RUN USED: RAM peak, cores |
+| `nvidia-smi` | WHAT THE RUN USED: GPU line |
+| `find / -newer /tmp/start` | files written (logs / output folders) |
+
+Differences are normal in one direction: a look by hand sees one moment, X-Ray sees the whole run (a file read
+once at start is gone from `/proc/PID/fd` a second later, but X-Ray saw it open).
+
+Files a program writes only at its end (a CSV after the last frame) never appear in explore mode: the video loops,
+so the end never comes. The Step 2 run covers them.
+
+
+## 13. Prove each Dockerfile line yourself
+
+Every line of a Dockerfile has a reason you can see inside the image. Use a throwaway container (`--rm` deletes it
+on `exit`, so you can break things freely):
+```bat
+docker run --rm -it --entrypoint bash IMAGE
+```
+```bash
+which python; python --version; echo $PATH          # which Python, and is the venv first on PATH
+SP=$(python -c "import site;print(site.getsitepackages()[0])")
+# a GPU package and the CUDA libraries it opens by name ("not found" = it would fall back to the CPU)
+ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep -E "cu|nvrtc|not found"   # torch: $SP/torch/lib/libtorch_cuda.so
+echo $LD_LIBRARY_PATH                               # extra folders Linux searches for libraries
+dpkg -S /usr/lib/x86_64-linux-gnu/libGL.so.1.7.0    # which apt package brought a file (no answer: a pip wheel, or the driver)
+apt-cache rdepends --installed libllvm20            # who pulled a big package in
+dpkg-query -W -f='${Installed-Size}\t${Package}\n' | sort -rn | head -15    # the biggest apt packages (KB)
+# break one on purpose and read the error a too-small image would give
+mkdir -p /tmp/hidden && mv /usr/lib/x86_64-linux-gnu/libGL.so.1* /tmp/hidden/ && python -c "import cv2"
+```
+With the GPU (`docker run --rm -it --gpus all ...`): `ldconfig -p | grep libcuda` shows the driver library, and
+`dpkg -S` on it finds no package. It is not in the image: `--gpus all` mounts it in from the host (on Windows from
+a folder under `/usr/lib/wsl`). Hide `libcudnn.so.9` the same way and ask onnxruntime for CUDA: it prints
+`Failed to load library ... libcudnn.so.9` and runs on the CPU. That is the silent slowdown X-Ray's
+"requested vs active" line catches.
