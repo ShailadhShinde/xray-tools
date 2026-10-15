@@ -12,10 +12,13 @@ Python standard library only (Python 3.8+). Nothing to install.
 
 | Step | Tool | Runs where | What it does |
 |---|---|---|---|
-| 0 | `xray_naive.py` | your machine (needs internet) | before the first build: checks every requirement for Linux (prebuilt / compiled / missing / Windows-only) and writes a naive Dockerfile that builds |
+| 0 | `xray_naive.py` | your machine (needs internet) | before the first build: checks every requirement for Linux (prebuilt / compiled / missing / Windows-only), checks the whole file together the way the build installs it (lines pip will not install together go into a second `--no-deps` step, exactly as pinned - nothing left out), and writes a naive Dockerfile that builds. With `--static`: every env var with its value in your code and its path in the container, the code changes needed for Windows paths, files from your PC copied into the image or mounted (`--copy` / `--mount`) |
 | 1 | `xray_static.py` + `xray_needs.py` | your machine | reads the code (runs nothing): packages, files, models, env vars, network, GPU, cameras |
 | 2 | `xray_runfile.py` writes the run files (+ `run.env`: every env var in one file); they run `xray_trace.py run` / `facts` / `merge` | inside the app's container / your machine | runs the app and records what it really did |
-|   | `run-explore.bat`: same naive image, no time limit, video files loop; look inside with `docker exec -it NAME-explore bash`, stop with `docker stop -t 60 NAME-explore` (GUIDE section 12) | | compare your own look with the report |
+|   | `run-naive.bat`: the naive image on its own, no X-Ray - does it start and do its work? | | |
+|   | top of every run file: `RUN_SECONDS` (how long, then Ctrl+C), `LOOP=1` (a video file starts again), `VIDEOS` (a folder of videos played one after the other) - GUIDE section 4 | | |
+|   | `run-explore.bat`: same naive image, no time limit, video files loop; look inside, stop with `docker stop -t 60 NAME-explore` (GUIDE section 12) | | compare your own look with the report |
+| look | `xray_look.py` | inside any container | what runs, the files open now, the libraries loaded and the apt / pip package or driver each comes from, network, RAM, GPU; `--watch 5` = what changes; `--image` = missing system libraries, CUDA libraries, does every package import, GPU test (GUIDE section 10) |
 | 3 | `xray_pkg.py baseline` / `scan` / `facts` | inside containers / your machine | what is installed in the image and what is really needed |
 | 4 | `xray_plan.py plan` / `verify` | your machine | writes a slim Dockerfile, .dockerignore and compose override (or compose.yml + .env.example); checks the new image behaves the same |
 | 5 | `xray_compare.py` | your machine | several projects: one shared base image |

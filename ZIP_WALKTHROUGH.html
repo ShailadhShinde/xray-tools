@@ -234,9 +234,9 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
 <div class="wrap">
 
 <header class="masthead">
-  <div class="eyebrow">X-Ray &middot; ZIP project &middot; session plan for 14 Oct</div>
+  <div class="eyebrow">X-Ray &middot; ZIP project &middot; session plan</div>
   <h1>ZIP Container Walkthrough</h1>
-  <p class="lede">From the tools zip to a small, verified image for <code>live_video.py</code>. Every step has the commands to type, why each part is there, and how to see it with your own eyes inside the container.</p>
+  <p class="lede">From the tools zip to a small, verified image for <code>live_video.py</code>. Every step has the commands to type, why each part is there, and how to see it with your own eyes inside the container. The look-inside commands (steps 5 and 7) need no file or package names, so they work the same for the worker or any other project.</p>
   <p class="practice-note"><span class="pill">practice</span> marks output from a run I did on 13 Oct with a small test program I wrote myself, using the same four packages and the same base image, on a machine without a GPU. It is not your code. Practice output shows what the tools and the image do; what your own code does (its env vars, files, prints, timings) shows up in your own reports. Output that needs the GPU is described, not measured.</p>
 </header>
 
@@ -368,12 +368,13 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>cd /d "«X»"
 python --version
 python -m pip install -U pip
-findstr /b VERSION xray_naive.py xray_static.py xray_trace.py xray_plan.py xray_runfile.py</pre></div>
-  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.3.3"
+findstr /b VERSION xray_naive.py xray_static.py xray_trace.py xray_plan.py xray_runfile.py xray_look.py</pre></div>
+  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.1"
 xray_static.py:VERSION = "0.5.10"
 xray_trace.py:VERSION = "0.2.7"
 xray_plan.py:VERSION = "0.1.9"
-xray_runfile.py:VERSION = "0.1.9"</pre></div>
+xray_runfile.py:VERSION = "0.2.0"
+xray_look.py:VERSION = "0.1.1"</pre></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; Docker Desktop running</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi</pre></div>
 
@@ -425,7 +426,7 @@ NOT USED BY THIS ENTRY POINT (...): ...</pre></div>
   <div class="notes">
     <div class="why"><h3 class="block-title">What this step decides</h3><ul>
       <li><strong>GPU.</strong> If the System branch lists <code>CUDAExecutionProvider</code>, the code asks onnxruntime for the GPU. Step 2 reads that from this file and builds a GPU image.</li>
-      <li><strong>Mounts.</strong> Files the code reads from your PC (C:\, D:\) are not copied into the image; their folders get mounted (step 3).</li>
+      <li><strong>Files from your PC.</strong> Files the code reads from C:\ or D:\ (your model, your video) do not exist in a container. Step 2 decides for each one: copied into the image, or kept outside and mounted, and sets its env var to the path inside the container.</li>
       <li><strong>Window.</strong> If the report lists <code>cv2.imshow</code>: a container has no screen. During the runs X-Ray switches windows off and saves a frame every 5 s instead.</li>
       <li><strong>Packages.</strong> A package listed here but missing from your requirements file: step 6 shows whether the program really loads it.</li>
       <li><strong>NOT USED</strong>: files the program never touches. They stay out of the slim image.</li>
@@ -448,6 +449,15 @@ NOT USED BY THIS ENTRY POINT (...): ...</pre></div>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>python xray_naive.py --project "%P%" --requirements requirements.docker.txt --entry live_video.py --name zip --static runs\zip\zip.json
 notepad runs\zip\naive\naive-check.txt
 notepad runs\zip\naive\Dockerfile.naive</pre></div>
+
+  <div class="callout"><p><strong>Your model and video are on your PC, not in ZIP-main.</strong> The end of naive-check.txt, FILES OUTSIDE THE PROJECT, has three parts:</p>
+    <ul>
+      <li><strong>Every env var your code reads</strong>: its value in your code (<code>C:\Users\...\Desktop\...\best_blend.onnx</code>) and what it becomes in the container (<code>/xin/model_onnx/best_blend.onnx</code>, set by an <code>ENV</code> line), outputs (<code>/xout/...</code>), and the ones used as they are.</li>
+      <li><strong>CODE CHANGES NEEDED</strong>: a Windows path written in the code without <code>os.getenv</code> cannot be changed by any Docker setting. WHERE (file:line), NOW, CHANGE TO; the old value stays the default, so your PC runs as before.</li>
+      <li><strong>Copy or keep outside</strong>: a file up to 500 MB that exists on your PC is COPIED into the image (it runs anywhere on its own); bigger ones are KEPT OUTSIDE and mounted with <code>-v</code>. Your choice wins: run the same command again with <code>--copy MODEL_ONNX</code> or <code>--mount MODEL_ONNX</code> (the env var name; or <code>all</code>). Then the exact build and run commands, and how to pass env vars (<code>-e NAME=value</code>, or <code>--env-file</code>).</li>
+    </ul></div>
+
+  <div class="callout"><p><strong>Lines pip will not install together</strong> (the error the worker's build had). A <code>pip freeze</code> comes from a PC where packages were installed at different times, e.g. torch first, newer <code>nvidia-*</code> later; pip only warned there. A Docker build installs the whole file in ONE <code>pip install</code>, and pip refuses the same combination. naive-check.txt then lists those lines as <code>INSTALLED IN A SECOND STEP, exactly this version - pip says: ...</code>, and Dockerfile.naive installs them in section 3c, after everything else, with <code>--no-deps</code>: the same way your PC got them. Nothing is left out, no version is changed; what they need that is not in your file is added right after (<code>ADDED</code>). The build log then shows pip's warning and <code>pip check</code> lines, the same your PC had; the build goes on. Whether the program works with those versions: <code>run-naive</code> (step 4), <code>xray_look.py --image</code> (step 5) and the runs.</p></div>
 
   <div class="prose"><p>For every line of the requirements, the tool asks pip which file it would download for Linux and Python 3.12. Nothing gets installed. From those answers it writes the Dockerfile. Read naive-check.txt first, then the Dockerfile next to the explanations below.</p></div>
 
@@ -529,6 +539,25 @@ RUN pip install --no-cache-dir \
 
     <div class="dsec">
       <div>
+        <h4><span class="sec">3c</span>Second step (only when needed)</h4>
+        <div class="cmd"><div class="cmd-bar"><span class="where">Dockerfile.naive &middot; tested with matplotlib==3.6.1 + seaborn==0.13.2</span></div><pre>RUN pip install --no-cache-dir --no-deps \
+        'seaborn==0.13.2' \
+ &amp;&amp; pip freeze &gt; /tmp/xray-installed.txt \
+ &amp;&amp; (pip install --no-cache-dir -c /tmp/xray-installed.txt \
+        'pandas&gt;=1.2' \
+     || echo "...") \
+ &amp;&amp; (pip check || true)</pre></div>
+      </div>
+      <div class="why"><ul>
+        <li>ZIP's file has no such lines, so its Dockerfile has no 3c. The example is a test file in which seaborn 0.13.2 rejects matplotlib 3.6.1.</li>
+        <li><code>--no-deps</code>: installed exactly as pinned, without pip changing the versions installed above.</li>
+        <li><code>-c</code> (the versions installed so far): what seaborn needs that is not in the file (pandas) is added without moving any of them.</li>
+        <li><code>pip check || true</code>: prints the mismatch in the build log; the build goes on. In the test the image built and the program ran with every version as pinned.</li>
+      </ul></div>
+    </div>
+
+    <div class="dsec">
+      <div>
         <h4><span class="sec">4</span>LD_LIBRARY_PATH: nothing to add</h4>
       </div>
       <div class="why"><ul>
@@ -538,13 +567,14 @@ RUN pip install --no-cache-dir \
 
     <div class="dsec">
       <div>
-        <h4><span class="sec">5</span>The code</h4>
+        <h4><span class="sec">5</span>The code (then 6: files from your PC)</h4>
         <div class="cmd"><div class="cmd-bar"><span class="where">Dockerfile.naive</span></div><pre>COPY . .
 CMD ["python", "live_video.py"]</pre></div>
       </div>
       <div class="why"><ul>
         <li>Everything in ZIP-main, on purpose: the naive image only has to work. X-Ray then finds out which files are really used, and the slim image copies only those.</li>
         <li>Dockerfile.naive.dockerignore keeps .git, venvs and caches out even here.</li>
+        <li><strong>Section 6</strong>: the files the code reads from your PC. COPIED (up to 500 MB, or <code>--copy</code>): a <code>COPY --from=...</code> line takes the file from its folder on your PC at build time; build-naive.bat passes that folder with <code>--build-context</code>. KEPT OUTSIDE (bigger, or <code>--mount</code>): an <code>ENV</code> line with the path inside the container, and the run files mount the folder with <code>-v</code>.</li>
       </ul></div>
     </div>
   </div>
@@ -566,7 +596,9 @@ copy /y runs\zip\naive\requirements.docker.txt "%P%\"</pre></div>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>python xray_runfile.py --static runs\zip\zip.json --project "%P%" --name zip
 notepad runs\zip\run.env</pre></div>
 
-  <div class="out"><div class="out-bar">What it prints (names and folders come from your code)</div><pre>  image zip-naive; entry live_video.py; GPU yes/no; window yes/no; ports ...
+  <div class="out"><div class="out-bar">What it prints (names and folders come from your code)</div><pre>  build-naive.bat  run-naive.bat  run-step2.bat  run-step2-cpu.bat  run-step3-4.bat  build-slim.bat
+  run-slim.bat  run-load.bat  run-explore.bat  run.env  code-changes.txt
+  image zip-naive; entry live_video.py; GPU yes/no; window yes/no; ports ...
   mount &lt;a folder on your PC&gt; -&gt; /xin/&lt;name&gt;     one per file the code reads from your PC
   env   &lt;NAME&gt;=/xin/&lt;name&gt;/&lt;file&gt;              that file, inside the container
   env   &lt;NAME&gt;=/xout/&lt;file&gt;                      an output file, kept in runs\zip\out
@@ -575,10 +607,35 @@ notepad runs\zip\run.env</pre></div>
 
   <div class="notes">
     <div class="why"><h3 class="block-title">Why</h3><ul>
-      <li>Files the code reads from your PC stay there. <code>-v</code> mounts their folders into the container, read-only. The image stays small and works with any model or video.</li>
+      <li>Files the code reads from your PC that are not copied into the image (step 2): <code>-v</code> mounts their folders into the container, read-only. A file that is in the image needs no mount; the env var points at it either way.</li>
       <li>Inside the container the paths are different, so the env vars point at the container paths: <code>/xin</code> for inputs, <code>/xout</code> for outputs (kept in <code>runs\zip\out</code>).</li>
       <li><code>run.env</code> holds every env var once; all run files read it.</li>
     </ul></div>
+  </div>
+
+  <div>
+    <h3 class="block-title">How long it runs, loop, several videos: the top of every run file</h3>
+    <div class="cmd"><div class="cmd-bar"><span class="where">the top of run-slim.bat, as xray_runfile writes it &middot; change the set lines in Notepad, save</span></div><pre>REM ---- settings: change them here, then run this file ----
+REM RUN_SECONDS: how long the program runs, then it is stopped (0 = until it ends by itself or you stop it)
+set "RUN_SECONDS=180"
+REM LOOP: 1 = a video FILE starts again from the beginning when it ends (the program keeps working)
+set "LOOP=0"
+REM VIDEOS: a folder with videos (.mp4 .avi .mov ...): the program plays them one after the other instead
+REM         of its own video (with LOOP=1 the list starts again). Empty = the program's own video.
+REM         (both only matter for programs that read video FILES; cameras / streams are not touched)
+set "VIDEOS="</pre></div>
+    <p class="practice-note">A folder name with spaces is fine: <code>set "VIDEOS=D:\test videos"</code> (the quotes go around the whole <code>VIDEOS=...</code>, as in the line above).</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>You want</th><th>Set</th></tr></thead>
+        <tbody>
+          <tr><td>the slim image for 10 minutes on a 2-minute video</td><td>run-slim.bat: <code>RUN_SECONDS=600</code>, <code>LOOP=1</code></td></tr>
+          <tr><td>three different videos, one after the other, once</td><td>put them in one folder; <code>VIDEOS=that folder</code>, <code>LOOP=0</code>, <code>RUN_SECONDS=0</code></td></tr>
+          <tr><td>the same three for an hour</td><td><code>VIDEOS=that folder</code>, <code>LOOP=1</code>, <code>RUN_SECONDS=3600</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="practice-note">Practice: a folder with a 300-frame and a 100-frame video, <code>LOOP=0</code>: the program read 400 frames and ended by itself. <code>LOOP=1</code>, <code>RUN_SECONDS=15</code>: it kept reading and was stopped after 15.1 s. Only video FILES opened with <code>cv2.VideoCapture</code> change; cameras and <code>rtsp://</code> streams never. A program that writes its results only at its end writes nothing when <code>RUN_SECONDS</code> stops it first. Defaults: run-step2 / run-slim 180 s, run-load 300 s, run-explore 0 (until you stop it), run-naive 120 s (no X-Ray there, so no LOOP / VIDEOS).</p>
   </div>
 </section>
 
@@ -619,8 +676,13 @@ zip-naive:latest       9.01GB          3.4GB</pre></div>
     <div class="check"><h3 class="block-title">Check</h3><ul>
       <li>The last lines list zip-naive with a size. Write it down: this is your "before".</li>
       <li class="bad">Nothing listed: the build failed. The reason is at the end of <code>runs\zip\build.log</code>.</li>
+      <li><code>ERROR: pip's dependency resolver does not currently take into account ...</code> in build.log, with a build that finished: the second-step warning from step 2. Expected.</li>
     </ul></div>
   </div>
+
+  <h3 class="block-title">Does the image run on its own? (no X-Ray)</h3>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\run-naive.bat</pre></div>
+  <div class="prose"><p>The image as it is, with its mounts and <code>run.env</code>, in container <code>zip-run</code>, for <code>RUN_SECONDS</code> (120 by default; then Ctrl+C, and if it does not stop within 30 s Docker ends it). You see your program's own output directly. Your code opens a window (<code>cv2.imshow</code>) and a container has no screen: switch it off the way your code allows (your SHOW setting in <code>run.env</code>), or the program may stop there. X-Ray's runs do that for you.</p></div>
 </section>
 
 <!-- ============================================================ STEP 5 -->
@@ -631,9 +693,34 @@ zip-naive:latest       9.01GB          3.4GB</pre></div>
     <label class="done-box"><input type="checkbox" class="done" id="done-step5" data-step="step5"> Done</label>
   </header>
 
-  <div class="prose"><p>Here you prove each Dockerfile line yourself. <code>--rm</code> deletes the container when you type <code>exit</code>, so nothing you do here changes the image. <code>--entrypoint bash</code> gives you a shell instead of starting the app.</p></div>
+  <div class="prose"><p>Here you prove each Dockerfile line yourself. <code>--rm</code> deletes the container when you type <code>exit</code>, so nothing you do here changes the image. <code>--entrypoint bash</code> gives you a shell instead of starting the app. Lines marked <strong>inside</strong> are typed in that shell (prompt <code>root@...:/app#</code>); typed in CMD they fail with "'SP' is not recognized ...".</p></div>
 
-  <h3 class="block-title">A. Without the GPU</h3>
+  <h3 class="block-title">A. Everything at once: xray_look.py --image</h3>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder &middot; any image</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm --gpus all -v "«X»:/x:ro" --entrypoint "" zip-naive python /x/xray_look.py --image</pre></div>
+  <div class="out"><div class="out-bar">Practice run, without a GPU (shortened)</div><pre>  Python: /opt/venv/bin/python  3.12.3  (prefix /opt/venv)
+  LD_LIBRARY_PATH (extra folders searched for libraries): /usr/local/cuda/lib64
+    /usr/local/cuda/lib64  ok
+  PIP PACKAGES: 12, 709 MB in all; the biggest:
+    onnxruntime_gpu   432 MB     opencv_python   187 MB     numpy   54 MB ...
+  SYSTEM LIBRARIES YOUR PIP PACKAGES NEED (ldd on 68 compiled files):
+    apt package libcublas-12-8      used by onnxruntime_gpu
+    apt package libgl1              used by opencv_python   ...
+    MISSING (an import that needs one of these fails with 'cannot open shared object file'):
+      libSM.so.6           needed by opencv_python (libqxcb.so)
+        (only for windows on a screen: cv2.imshow with a display)
+      libnvinfer.so.10     needed by onnxruntime_gpu (libonnxruntime_providers_tensorrt.so)
+        (a plugin / optional part: matters only if the program uses it)
+  CUDA LIBRARIES IN THE IMAGE:
+    libcublasLt.so.12   717 MB  apt libcublas-12-8   /usr/local/cuda-12.8/targets/x86_64-linux/lib/...
+    libcudnn.so.9       122 KB  apt libcudnn9-cuda-12   /usr/lib/x86_64-linux-gnu/libcudnn.so.9.8.0  ...
+  DOES EVERY PACKAGE IMPORT? (12 modules of 10 pip packages, each imported the way your code does - 4 s)
+    FAILED: none
+    OK (12): coloredlogs, cv2, flatbuffers, humanfriendly, mpmath, numpy, onnxruntime, packaging, pynvml, sympy ...
+  GPU TEST (each framework that is installed, in its own process):
+    onnxruntime 1.22.0 - providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']</pre></div>
+  <div class="prose"><p>The import test is the quickest answer to "does everything in this image work": a version that does not fit (<code>built for NumPy 1.x, but NumPy 2.x is installed</code>), a missing dependency (<code>'six' is missing</code>), a library compiled for another torch (<code>undefined symbol</code>) show up here with their reason, before any run. With <code>--gpus all</code> the GPU test also says <code>torch ... GPU: True</code> and your card. The next part does the same by hand, one line at a time.</p></div>
+
+  <h3 class="block-title">B. By hand, without the GPU</h3>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm -it --entrypoint bash zip-naive</pre></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where inside">inside the container &middot; which Python? (section 2)</span><button class="copy" type="button">Copy</button></div><pre>which python; python --version; echo $PATH</pre></div>
@@ -641,10 +728,12 @@ zip-naive:latest       9.01GB          3.4GB</pre></div>
 Python 3.12.3
 /opt/venv/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin</pre></div>
 
-  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; where does onnxruntime find CUDA? (sections 1 and 4)</span><button class="copy" type="button">Copy</button></div><pre>SP=/opt/venv/lib/python3.12/site-packages
-ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep -E "cu|nvrtc|not found"
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; where does each GPU part find CUDA? (sections 1 and 4)</span><button class="copy" type="button">Copy</button></div><pre>SP=$(python -c "import site;print(site.getsitepackages()[0])"); echo $SP
+for f in $(find $SP -name '*cuda*.so*' -type f); do echo "== $f"; ldd $f | grep -E 'libcu|libnv|not found'; done
 echo $LD_LIBRARY_PATH</pre></div>
-  <div class="out"><div class="out-bar">Practice run</div><pre>libcublasLt.so.12 =&gt; /usr/local/cuda/lib64/libcublasLt.so.12
+  <div class="out"><div class="out-bar">Practice run</div><pre>/opt/venv/lib/python3.12/site-packages
+== /opt/venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime_providers_cuda.so
+libcublasLt.so.12 =&gt; /usr/local/cuda/lib64/libcublasLt.so.12
 libcublas.so.12 =&gt; /usr/local/cuda/lib64/libcublas.so.12
 libcurand.so.10 =&gt; /usr/local/cuda/lib64/libcurand.so.10
 libcufft.so.11 =&gt; /usr/local/cuda/lib64/libcufft.so.11
@@ -653,14 +742,15 @@ libcudnn.so.9 =&gt; /lib/x86_64-linux-gnu/libcudnn.so.9
 libnvrtc.so.12 =&gt; /usr/local/cuda/lib64/libnvrtc.so.12
 /usr/local/cuda/lib64</pre></div>
 
-  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; which package brought each one, and its size</span><button class="copy" type="button">Copy</button></div><pre>for l in libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libcufft.so.11 libcurand.so.10 libnvrtc.so.12 libcudnn.so.9; do r=$(readlink -f $(ldconfig -p | grep -m1 "$l " | sed "s/.*=&gt; //")); printf "%-18s %5s MB  %s\n" $l $(du -m $r | cut -f1) $(dpkg -S $r | cut -d: -f1); done</pre></div>
-  <div class="out"><div class="out-bar">Practice run</div><pre>libcudart.so.12        1 MB  cuda-cudart-12-8
-libcublas.so.12      111 MB  libcublas-12-8
-libcublasLt.so.12    717 MB  libcublas-12-8
-libcufft.so.11       266 MB  libcufft-12-8
-libcurand.so.10      131 MB  libcurand-12-8
-libnvrtc.so.12       100 MB  cuda-nvrtc-12-8
-libcudnn.so.9          1 MB  libcudnn9-cuda-12</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; which package brought each one, and its size</span><button class="copy" type="button">Copy</button></div><pre>for f in $(find $SP -name '*cuda*.so*' -type f); do ldd $f; done | grep -oE '=&gt; /[^ ]+' | cut -c4- | grep -iE 'libcu|libnv' | sort -u | while read r; do r=$(readlink -f $r); p=$(dpkg -S $r 2&gt;/dev/null | cut -d: -f1); printf "%-26s %6s MB  %s\n" $(basename $r) $(du -m $r | cut -f1) "${p:-pip wheel: ${r%/lib/*}}"; done</pre></div>
+  <div class="out"><div class="out-bar">Practice run</div><pre>libcudnn.so.9.8.0             1 MB  libcudnn9-cuda-12
+libcublas.so.12.8.4.1       111 MB  libcublas-12-8
+libcublasLt.so.12.8.4.1     717 MB  libcublas-12-8
+libcudart.so.12.8.90          1 MB  cuda-cudart-12-8
+libcufft.so.11.3.3.83       266 MB  libcufft-12-8
+libcurand.so.10.3.9.90      131 MB  libcurand-12-8
+libnvrtc.so.12.8.93         100 MB  cuda-nvrtc-12-8</pre></div>
+  <div class="prose"><p>An image that gets CUDA from pip (step 10) shows <code>pip wheel: .../site-packages/nvidia/cublas</code> in the last column instead of an apt package.</p></div>
   <div class="prose"><p><code>libcudnn.so.9</code> is only 1 MB: it is a loader. The real work is in <code>libcudnn_engines_precompiled.so.9</code> (555 MB), <code>_adv</code>, <code>_ops</code> and others next to it, loaded when a model needs them.</p></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; what the base image has that onnxruntime never loads</span><button class="copy" type="button">Copy</button></div><pre>dpkg-query -W -f='${Installed-Size}\t${Package}\n' | awk '$2 ~ /^(cuda-|libcu|libnpp|libnvjpeg|libnccl|libnvjitlink|libcudnn)/ {printf "%6.0f MB  %s\n", $1/1024, $2}' | sort -rn | head -12</pre></div>
@@ -678,8 +768,14 @@ libcudnn.so.9          1 MB  libcudnn9-cuda-12</pre></div>
      8 MB  libnvjpeg-12-8</pre></div>
   <div class="prose"><p>About <strong>1.4 GB</strong> of CUDA libraries that onnxruntime never asks for. They are there because <code>cudnn-runtime</code> means "all of CUDA's runtime libraries". This is the reason step 10 exists. In step 7 you check the claim on the running program.</p></div>
 
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; every system library a pip package needs that is NOT in the image (empty = none)</span><button class="copy" type="button">Copy</button></div><pre>find $SP -name '*.so*' -type f -exec ldd {} + 2&gt;/dev/null | awk '/:$/{f=substr($0,1,length($0)-1)} /not found/{print $1, f}' | sort -u | while read lib f; do [ -z "$(find $SP -name "$lib" -print -quit)" ] &amp;&amp; echo "MISSING $lib   needed by $f"; done
+pip check</pre></div>
+  <div class="out"><div class="out-bar">Practice run (shortened)</div><pre>MISSING libSM.so.6   needed by .../cv2/qt/plugins/platforms/libqxcb.so          (windows on a screen only)
+MISSING libnvinfer.so.10   needed by .../onnxruntime/capi/libonnxruntime_providers_tensorrt.so   (TensorRT, not used)
+No broken requirements found.</pre></div>
+
   <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; what cv2 needs from Linux (section 2)</span><button class="copy" type="button">Copy</button></div><pre>ldd $SP/cv2/cv2*.so | grep -E "GL|X11|xcb|glib"
-dpkg -S /usr/lib/x86_64-linux-gnu/libGL.so.1.7.0
+dpkg -S $(readlink -f /usr/lib/x86_64-linux-gnu/libGL.so.1)
 apt-cache rdepends --installed libllvm20 mesa-libgallium libglx-mesa0</pre></div>
   <div class="out"><div class="out-bar">Practice run (shortened)</div><pre>libxcb.so.1 =&gt; /lib/x86_64-linux-gnu/libxcb.so.1                       &lt;- apt
 libxcb-shm-0be6dfbf.so.0.0.0 =&gt; .../cv2/../opencv_python.libs/...     &lt;- inside the wheel
@@ -699,7 +795,7 @@ exit</pre></div>
 cv2 ok 5.0.0</pre></div>
   <div class="prose"><p>That ImportError is what a too-small image looks like. Now you know which apt line prevents it.</p></div>
 
-  <h3 class="block-title">B. With the GPU: the driver, and the silent CPU fallback</h3>
+  <h3 class="block-title">C. With the GPU: the driver, and the silent CPU fallback</h3>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm -it --gpus all -v "«M»:/m:ro" --entrypoint bash zip-naive</pre></div>
   <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; where the driver comes from</span><button class="copy" type="button">Copy</button></div><pre>nvidia-smi
 ldconfig -p | grep -E "libcuda.so.1|libnvidia-ml.so.1"
@@ -726,7 +822,7 @@ active: ['CPUExecutionProvider']</pre></div>
 <section class="sheet step" id="step6">
   <header class="step-head">
     <span class="step-no">6</span>
-    <div><h2>Watch it run: GPU, then CPU</h2><p class="step-meta">10 min &middot; each run up to 3 min, the window stays quiet until it ends</p></div>
+    <div><h2>Watch it run: GPU, then CPU</h2><p class="step-meta">10 min &middot; each run up to RUN_SECONDS (180 s), the window stays quiet until it ends</p></div>
     <label class="done-box"><input type="checkbox" class="done" id="done-step6" data-step="step6"> Done</label>
   </header>
 
@@ -744,7 +840,7 @@ runs\zip\run-step2-cpu.bat</pre></div>
     <div class="check"><h3 class="block-title">Check in step2.log (GPU run)</h3><ul>
       <li>step2-needs.txt, WHAT THE RUN USED: <code>onnxruntime ran on CUDAExecutionProvider</code>.</li>
       <li>What your program normally prints is there, between X-Ray's lines.</li>
-      <li><code>app exited with code 0</code>. Stopped after 180 s instead? A <code>KeyboardInterrupt</code> just before is normal: that is the stop.</li>
+      <li><code>app exited with code 0</code>. Stopped after <code>RUN_SECONDS</code> instead? A <code>KeyboardInterrupt</code> just before is normal: that is the stop. A video shorter than you want: <code>LOOP=1</code> and a longer <code>RUN_SECONDS</code> at the top of the run file (step 3).</li>
       <li>The NVIDIA banner at the top comes from the base image's start script. In the CPU run it says the driver was not detected: expected.</li>
     </ul></div>
     <div class="why"><h3 class="block-title">Why a CPU run</h3><ul>
@@ -777,25 +873,52 @@ runs\zip\run-step2-cpu.bat</pre></div>
     <label class="done-box"><input type="checkbox" class="done" id="done-step7" data-step="step7"> Done</label>
   </header>
 
-  <div class="prose"><p>The naive image runs with X-Ray watching and no time limit; the video starts again when it ends. The container is called <code>zip-explore</code>, so you never need to look up an ID.</p></div>
+  <div class="prose"><p>The naive image runs with X-Ray watching, <code>RUN_SECONDS=0</code> (no time limit) and <code>LOOP=1</code> (the video starts again when it ends); change them, or set <code>VIDEOS</code>, at the top of run-explore.bat. The container is called <code>zip-explore</code>, so you never need to look up an ID. Everything below works for any program: no file, package or process names are typed.</p></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 1 &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\run-explore.bat</pre></div>
+  <h3 class="block-title">A. With X-Ray: one command</h3>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 2</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker exec -it zip-explore python /xray/xray_look.py
+docker exec -it zip-explore python /xray/xray_look.py --watch 5</pre></div>
+  <div class="out"><div class="out-bar">Practice run, CPU mode (shortened)</div><pre>  PID   PPID  CPU%   RAM now  RAM peak  threads  command
+  1     0        0     19 MB     19 MB        1  python /xray/xray_trace.py run ... -- python live_video.py
+  25    1      388    104 MB    105 MB       21  python live_video.py
+
+=== PID 25: python live_video.py
+  FILES OPEN NOW (2):
+    /xin/video_in/DJI_20240717100407_0470_D.MP4   [mounted from your PC, 5 MB]
+    /xray-out/events-25.jsonl   [mounted from your PC, WRITING, 7 KB]
+  NETWORK (0):
+  LIBRARIES LOADED (64), by where they come from:
+    pip package onnxruntime_gpu: libonnxruntime_providers_shared.so, onnxruntime_pybind11_state...so
+    pip package opencv_python: cv2.abi3.so, libQt5Core-....so, ... 22 more (--all)
+    apt package libgl1: libGL.so.1.7.0
+    apt package libglib2.0-0t64: libglib-2.0.so.0.8000.0, libgthread-2.0.so.0.8000.0
+    ...
+  GPU: no CUDA library loaded - the program runs on the CPU (or has not reached its GPU code yet)
+
+--watch 5, then every 5 s only what changed:
+  + opened  /xin/video_in/DJI_20240717100407_0470_D.MP4   [mounted from your PC, 5 MB]
+  + loaded  libavcodec-c4204469.so.62.28.101  (pip opencv_python)  ...</pre></div>
+  <div class="prose"><p>On the GPU, the LIBRARIES part also lists the CUDA libraries marked <code>[CUDA]</code> with their apt package, and <code>libcuda.so</code> as <code>GPU driver from your PC</code>; the GPU line then says the program runs on the GPU.</p></div>
+
+  <h3 class="block-title">B. By hand: the same with standard commands</h3>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 2</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker top zip-explore
 docker stats zip-explore --no-stream
+docker diff zip-explore
 docker exec -it zip-explore bash</pre></div>
+  <div class="prose"><p><code>docker diff</code> lists every file the program added (A) or changed (C) inside the container since it started, outside the mounts. The lines below use <code>/proc</code>, which every Linux container has; <code>ps</code>, <code>pgrep</code>, <code>lsof</code> are often not installed in slim images.</p></div>
 
-  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; the processes and what they have open</span><button class="copy" type="button">Copy</button></div><pre>ps -ef
-PID=$(pgrep -f "^python live_video.py"); echo "app PID: $PID"
-ls -l /proc/$PID/fd | grep -v -E "pipe|socket|null|anon_inode"</pre></div>
-  <div class="out"><div class="out-bar">Practice run</div><pre>UID   PID  PPID  CMD
-root    1     0  python /xray/xray_trace.py run --out /xray-out --root /app --gui off -- python live_video.py
-root   25     1  python live_video.py
-app PID: 25
-... -&gt; /xray-out/events-25.jsonl
-... -&gt; /xin/&lt;name&gt;/&lt;the practice video&gt;</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; the processes, the program's PID, what it has open</span><button class="copy" type="button">Copy</button></div><pre>for p in /proc/[0-9]*; do echo "${p#/proc/}  $(tr '\0' ' ' &lt; $p/cmdline 2&gt;/dev/null)"; done
+PID=$(for p in /proc/[0-9]*; do c=$(tr '\0' ' ' &lt; $p/cmdline 2&gt;/dev/null); case "$c" in *xray_*) ;; *python*) echo ${p#/proc/};; esac; done | sort -n | head -1); echo "PID=$PID: $(tr '\0' ' ' &lt; /proc/$PID/cmdline)"
+ls -l /proc/$PID/fd | grep -v -e 'pipe:' -e 'anon_inode:' -e ' /dev/'</pre></div>
+  <div class="out"><div class="out-bar">Practice run</div><pre>1  python /xray/xray_trace.py run --out /xray-out --root /app --gui off -- python live_video.py
+25  python live_video.py
+PID=25: python live_video.py
+l-wx------ 1 root root 64 ... 3 -&gt; /xray-out/events-25.jsonl
+lr-x------ 1 root root 64 ... 4 -&gt; /xin/video_in/DJI_20240717100407_0470_D.MP4</pre></div>
   <div class="prose"><p>In the practice run the video was open and the model was not: onnxruntime reads the model once at the start and closes it. A look by hand sees one moment; X-Ray saw the whole run, so its report still lists the model.</p></div>
 
-  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; every library the program loaded, and its package</span><button class="copy" type="button">Copy</button></div><pre>for f in $(awk '{print $6}' /proc/$PID/maps | grep "\.so" | grep -v site-packages | sort -u); do p=$(dpkg -S "$f" 2&gt;/dev/null | cut -d: -f1); printf "%-66s %s\n" "$f" "${p:-NOT FROM A PACKAGE}"; done</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; every library the program loaded, and its package</span><button class="copy" type="button">Copy</button></div><pre>for f in $(grep -o '/[^ ]*\.so[^ ]*' /proc/$PID/maps | grep -v -e site-packages -e dist-packages | sort -u); do p=$(dpkg -S "$f" 2&gt;/dev/null | cut -d: -f1); printf "%-66s %s\n" "$f" "${p:-NOT FROM A PACKAGE}"; done</pre></div>
   <div class="out"><div class="out-bar">Practice run, CPU mode (shortened) + what the GPU run adds</div><pre>/usr/lib/x86_64-linux-gnu/libGL.so.1.7.0              libgl1
 /usr/lib/x86_64-linux-gnu/libX11.so.6.4.0             libx11-6
 /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.8000.0     libglib2.0-0t64
@@ -807,10 +930,11 @@ on the GPU, also:
 /usr/lib/wsl/...libcuda.so...                                            NOT FROM A PACKAGE</pre></div>
   <div class="prose"><p>Look for cusolver, cusparse, nccl or npp in your list. If none of them appear, the 1.4 GB from step 5 is really unused.</p></div>
 
-  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; libraries that came inside the wheels, GPU memory, RAM, env</span><button class="copy" type="button">Copy</button></div><pre>awk '{print $6}' /proc/$PID/maps | grep "\.so" | grep site-packages | sed "s|.*site-packages/||" | sort -u
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; libraries that came inside the wheels, GPU memory, RAM, env</span><button class="copy" type="button">Copy</button></div><pre>grep -o '/[^ ]*-packages/[^ ]*\.so[^ ]*' /proc/$PID/maps | sed "s|.*-packages/||" | sort -u
+grep -o '/[^ ]*\.so[^ ]*' /proc/$PID/maps | sort -u | grep -iE 'cuda|cudnn|cublas|cufft|curand|nvrtc|libnv' || echo "no CUDA library loaded"
 nvidia-smi
 grep -E "Threads|VmRSS|VmHWM" /proc/$PID/status
-tr '\0' '\n' &lt; /proc/$PID/environ | sort
+tr '\0' '\n' &lt; /proc/$PID/environ | sort | cut -c1-150
 exit</pre></div>
   <div class="out"><div class="out-bar">Practice run (shortened)</div><pre>cv2/cv2.abi3.so
 numpy.libs/libscipy_openblas64_-f48b354e.so
@@ -822,6 +946,12 @@ Threads: 21
 LD_LIBRARY_PATH=/usr/local/cuda/lib64        (from the base image)
 ... and every env var from run.env, with its /xin or /xout path</pre></div>
 
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; which Python code runs right now (file, function, line)</span><button class="copy" type="button">Copy</button></div><pre>pip install py-spy &amp;&amp; py-spy dump --pid $PID</pre></div>
+  <div class="out"><div class="out-bar">Practice run</div><pre>Thread 24 (idle): "MainThread"
+    waitKey (sitecustomize.py:667)        &lt;- X-Ray's stand-in for the window (--gui off)
+    main (live_video.py:74)
+    &lt;module&gt; (live_video.py:91)</pre></div>
+
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 2 &middot; stop</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker stop -t 60 zip-explore</pre></div>
   <div class="prose"><p>The program gets Ctrl+C, X-Ray saves its recording, and window 1 opens <code>runs\zip\explore\needs.txt</code>. Anything your program writes only at its end (a results file) is not written in this mode: the video keeps looping, so the end never comes. Steps 6 and 9 cover that.</p></div>
 
@@ -829,7 +959,8 @@ LD_LIBRARY_PATH=/usr/local/cuda/lib64        (from the base image)
     <table>
       <thead><tr><th>You saw by hand</th><th>Where X-Ray has the same thing (explore\needs.txt)</th></tr></thead>
       <tbody>
-        <tr><td><code>/proc/PID/fd</code>: the video file</td><td>YOU PROVIDE: video line</td></tr>
+        <tr><td><code>/proc/PID/fd</code>, xray_look FILES OPEN NOW: the video file</td><td>YOU PROVIDE: video line</td></tr>
+        <tr><td><code>docker diff</code>: files written in the container</td><td>files written (logs / output folders)</td></tr>
         <tr><td><code>/proc/PID/maps</code>: libraries + packages</td><td>step 8: the apt list of the plan, each with "loaded during the scenario"</td></tr>
         <tr><td><code>environ</code>: the env vars</td><td>YOU PROVIDE: env lines</td></tr>
         <tr><td><code>nvidia-smi</code>, <code>VmHWM</code>, <code>docker stats</code></td><td>WHAT THE RUN USED: GPU, RAM peak, cores</td></tr>
@@ -933,7 +1064,7 @@ zip-naive                 9.01GB          3.4GB
 zip-slim (pip)            6.05GB         2.21GB     (practice build, without the Debian apt layer)</pre></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; look inside the pip image as root</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm -it --user root --entrypoint bash zip-slim</pre></div>
-  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; why the LD_LIBRARY_PATH line exists</span><button class="copy" type="button">Copy</button></div><pre>SP=/usr/local/lib/python3.12/site-packages
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; why the LD_LIBRARY_PATH line exists</span><button class="copy" type="button">Copy</button></div><pre>SP=$(python -c "import site;print(site.getsitepackages()[0])"); echo $SP
 ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep -E "cu|nvrtc"
 LD_LIBRARY_PATH= ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep "not found"
 du -sh $SP/nvidia/* | sort -h
@@ -1007,6 +1138,7 @@ cd /d "«X»"</pre></div>
     <li><code>runs\zip\step2-needs.txt</code> and <code>step2-cpu-needs.txt</code>, plus the last 15 lines of <code>step2.log</code> and <code>step2-cpu.log</code>.</li>
     <li>Your list from step 7 (the libraries the GPU run loaded), and <code>runs\zip\explore\needs.txt</code>.</li>
     <li><code>step3.txt</code>, <code>step4.txt</code>, and <code>verify.txt</code> from both slim runs.</li>
+    <li>The output of <code>xray_look.py --image</code> (step 5A) for each image you built.</li>
     <li>Anything that surprised you in step 5. Those questions are the best part of the day.</li>
   </ol>
 </section>
@@ -1028,6 +1160,12 @@ cd /d "«X»"</pre></div>
         <tr><td><code>ImportError: libGL.so.1</code></td><td>The apt line is missing libgl1 (step 5 showed it on purpose).</td></tr>
         <tr><td><code>E: Unable to locate package libglib2.0-0t64</code></td><td>That name exists on Ubuntu 24.04 only; on Ubuntu 22.04 it is <code>libglib2.0-0</code>.</td></tr>
         <tr><td><code>no space left on device</code></td><td><code>docker system df</code>, then <code>docker builder prune</code> and remove old images with <code>docker rmi</code>. These images are large.</td></tr>
+        <tr><td><code>'SP' is not recognized as an internal or external command</code> (or <code>ldd</code>, <code>grep</code>, <code>$PID</code>)</td><td>A line for INSIDE the container typed in CMD. First <code>docker exec -it zip-explore bash</code> (or <code>docker run --rm -it --entrypoint bash zip-naive</code>), then type it at the <code>root@...#</code> prompt.</td></tr>
+        <tr><td>inside: <code>python: command not found</code></td><td>That image has <code>python3</code> only: type <code>python3</code>.</td></tr>
+        <tr><td>inside: <code>ls: cannot access '/proc//fd'</code></td><td><code>PID</code> is empty: run the <code>PID=...</code> line first, or type the number (<code>PID=25</code>).</td></tr>
+        <tr><td><code>ResolutionImpossible</code> / <code>Cannot install ... conflicting dependencies</code> in a naive build</td><td>The Dockerfile.naive is from before this version, or the requirements changed after the check: step 2 again, copy the new Dockerfile.naive. The second step (3c) handles these lines.</td></tr>
+        <tr><td>The image builds, the program says <code>No module named ...</code>, <code>undefined symbol</code>, <code>numpy.core.multiarray failed to import</code></td><td><code>xray_look.py --image</code> (step 5A): every package is imported and each failure gets its reason.</td></tr>
+        <tr><td>A run with <code>RUN_SECONDS</code> wrote no results file</td><td>The program writes it only at its end, and the time limit stopped it first: <code>RUN_SECONDS=0</code>, <code>LOOP=0</code>.</td></tr>
         <tr><td>A Traceback that mentions an <code>xray_*.py</code> file</td><td>An X-Ray bug: send the traceback.</td></tr>
       </tbody>
     </table>

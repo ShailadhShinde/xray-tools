@@ -19,14 +19,26 @@ image) - which decides python-slim vs an nvidia/cuda base.
 Then it writes into runs/NAME/naive/:
   naive-check.txt              the table above, with the reason for every line, + the KIND and GPU tables
   naive-check.json             the same as data
-  requirements.docker.txt      the requirements with the safe fixes (Windows-only out, PyTorch index in)
-  Dockerfile.naive             5 sections (base, apt libraries, frameworks, other packages + a compiler only
-                               where needed, LD_LIBRARY_PATH), each line with its reason - decided from the tables
+  requirements.docker.txt      the requirements as the build installs them (Windows-only out, PyTorch index in,
+                               each handled line with a comment)
+  Dockerfile.naive             sections (base, apt libraries, frameworks, other packages + a compiler only where
+                               needed, LD_LIBRARY_PATH, code), each line with its reason - decided from the tables
   Dockerfile.naive.dockerignore
+
+The whole file is also checked TOGETHER, the way the build installs it (one pip install). A pip freeze comes from a PC
+where packages were installed in several steps, so it can hold lines pip refuses to install together (torch +cu126 and
+newer nvidia-* pins, a torchaudio of another torch). Those lines are installed in section 3c, AFTER the others, exactly
+as pinned, with --no-deps - the way that PC got them; nothing is left out, no pin is changed. What they need that is not
+in the file is added right after, without changing any version installed before (-c).
+
+With --static (the Step 1 map), section 6 handles the files the code reads from your PC (a model on the Desktop):
+copied into the image (up to 500 MB, or --copy ENV_NAME) or mounted at run time (--mount ENV_NAME), with the env var
+set to the path inside the container. naive-check.txt then lists every env var (value in your code -> value in the
+container), the code changes needed (a Windows path written without an env var), and the build and run commands.
 Copy the three Docker files into the project folder (the tool never overwrites the project's own files).
 
   python xray_naive.py --project "C:\\...\\Solution" --requirements requirement.txt --entry main.py --name worker
-       [--python 3.12] [--gpu | --cpu] [--static runs\\worker\\worker.json]
+       [--python 3.12] [--gpu | --cpu] [--static runs\\worker\\worker.json] [--copy ENV_NAME | --mount ENV_NAME]
 
 Needs internet access to the package index (pip reads it). Standard library only.
 """
@@ -39,7 +51,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.3.3"
+VERSION = "0.4.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Linux x86_64 platform tags (pip matches the listed tags exactly; pure-Python "any" wheels always match)
@@ -142,7 +154,7 @@ def pip_dry(req, py, only_binary, opts, cu_index, want=None):
             cmd += ["--report", rep]
         cmd += req if isinstance(req, list) else [req]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         except subprocess.TimeoutExpired:
             return None, "pip timed out"
         out = (r.stdout + r.stderr).strip()
@@ -163,12 +175,13 @@ def pip_dry(req, py, only_binary, opts, cu_index, want=None):
         return False, out
 
 
-def resolve_together(results, py, opts):
+def resolve_together(results, py, opts, got=None):
     """install the whole file at once (dry run, WITH dependencies), like the build does: two lines that cannot be
     installed together (torch pins its own nvidia-* versions, torchaudio must match torch ...) only show up here.
-    -> (ok True / False / None = not checked, pip's explanation lines)"""
-    reqs = [r["raw"].split(" #")[0].strip() for r in results if r["status"] == "OK"]
-    if len(reqs) < 2:
+    -> (ok True / False / None = not checked, pip's explanation lines); got["names"] = every package it installs"""
+    reqs = [r["raw"].split(" #")[0].strip() for r in results          # every line the build installs first
+            if r["status"] in ("OK", "UNCHECKED") and not r.get("later")]
+    if len(reqs) < 2 and got is None:
         return True, []
     idx = sorted({r["index"] for r in results if r.get("index")})
     with tempfile.TemporaryDirectory() as tmp:
@@ -183,10 +196,19 @@ def resolve_together(results, py, opts):
         for u in idx:
             if ("--extra-index-url", u) not in opts:
                 cmd += ["--extra-index-url", u]
+        rep = os.path.join(tmp, "report.json")
+        if got is not None and REPORT["ok"]:
+            cmd += ["--report", rep]
         try:
             r = subprocess.run(cmd + reqs, capture_output=True, text=True, timeout=900)
         except subprocess.TimeoutExpired:
             return None, ["pip timed out"]
+        if r.returncode == 0 and got is not None:
+            try:
+                with open(rep, encoding="utf-8") as fh:
+                    got["names"] = {canon(i["metadata"]["name"]) for i in json.load(fh)["install"]}
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
     if r.returncode == 0:
         return True, []
     out = (r.stdout + r.stderr).strip()
@@ -198,8 +220,6 @@ def resolve_together(results, py, opts):
     return False, keep[:30] or out.splitlines()[-15:]
 
 
-# nvidia-* packages a CUDA build of torch installs itself, at exact versions (nvidia-ml-py is not one of them)
-TORCH_CUDA_DEPS = re.compile(r"^nvidia-(cu[\w-]*|nccl[\w-]*|nvjitlink[\w-]*|nvtx[\w-]*|nvshmem[\w-]*)$")
 SKIP = ("WINDOWS", "LOCAL", "MISSING", "DROPPED")
 
 
@@ -221,14 +241,9 @@ def set_req(r, raw, why, py, opts, index=None):
 
 
 def autofix(results, py, opts):
-    """the naive Dockerfile must build: fix what has one right answer, and say what was changed"""
+    """lines that cannot be built as they are, and have only one way to work: fixed, and listed in the report"""
     fixes = []
-
-    def drop(r, why):
-        r.update(status="DROPPED", why=why)
-        fixes.append(f"line {r['line']}: {r['raw']}  LEFT OUT - {why}")
-
-    # a package listed twice: keep the line that installs (the newer one when both do)
+    # a package listed twice: pip cannot install two versions - keep the line that installs (the newer one if both)
     by = {}
     for r in results:
         by.setdefault(r["name"], []).append(r)
@@ -238,74 +253,111 @@ def autofix(results, py, opts):
             keep = max(good, key=lambda r: vkey(pin_of(r["raw"]) or "0"))
             for r in rs:
                 if r is not keep:
-                    drop(r, f"{name} is listed twice, line {keep['line']} ({keep['raw']}) is kept")
-    # a pin that has no file for Linux / this Python: the nearest version that has one
+                    r.update(status="DROPPED", why=f"{name} is listed twice, line {keep['line']} ({keep['raw']}) is kept")
+                    fixes.append(f"line {r['line']}: {r['raw']}  LEFT OUT - {r['why']}")
     for r in results:
         pin = pin_of(r["raw"])
+        # a pin that has no file for Linux / this Python at all: the nearest version that has one
         if r["status"] == "MISSING" and r.get("alts") and pin and "*" not in pin:
             above = [v for v in r["alts"] if vkey(v) >= vkey(pin)]
             v = above[0] if above else r["alts"][-1]
             old, raw = r["raw"], re.sub(r"==\s*[\w.+*]+", "==" + v, r["raw"].split(" #")[0].strip(), count=1)
             set_req(r, raw, f"no file for Linux / Python {py}", py, opts)
-            fixes.append(f"line {r['line']}: {old} -> {raw} (no file for Linux / Python {py}; the nearest version "
-                         "that has one)")
-    # torchvision / torchaudio must be built for the same torch (same version family, same +cuNNN)
-    t = {}
-    for r in results:
-        m = re.match(r"^(torch|torchvision|torchaudio)\s*==\s*(\d+)\.(\d+)[\w.]*?(\+\w+)?$",
-                     r["raw"].split(" #")[0].strip())
-        if m and r["status"] not in SKIP:
-            t[m.group(1)] = (r, int(m.group(2)), int(m.group(3)), m.group(4) or "")
-    if "torch" in t:
-        tr, tma, tmi, tcu = t["torch"]
-        want = {"torchaudio": (tma, tmi), "torchvision": (0, tmi + 15) if tma == 2 else None}
-        for n in ("torchvision", "torchaudio"):
-            if n not in t or want[n] is None:
-                continue
-            r, ma, mi, cu = t[n]
-            if (ma, mi) == want[n] and cu == tcu:
-                continue
-            pre = f"{want[n][0]}.{want[n][1]}."
-            vs = available_versions(n, py, opts, tr.get("index"))
-            cand = [v for v in vs if v.startswith(pre) and ("+" + v.split("+", 1)[1] if "+" in v else "") == tcu]
-            v = max(cand, key=vkey) if cand else None
-            old, raw = r["raw"], f"{n}=={v}" if v else f"{n}=={pre}*"
-            set_req(r, raw, f"built for the same torch as {tr['raw']}", py, opts, index=tr.get("index"))
-            fixes.append(f"line {r['line']}: {old} -> {raw} (must be built for the same torch as {tr['raw']}" +
-                         ("" if v else "; the exact version could not be looked up, pip picks the newest") + ")")
-    # a CUDA torch installs its own exact nvidia-* CUDA packages: extra pins of them clash with it
-    torch = next((r for r in results if r["name"] == "torch" and r["status"] not in ("WINDOWS", "LOCAL", "DROPPED")),
-                 None)
-    if torch and "+cpu" not in torch["raw"]:
-        for r in results:
-            if r["status"] not in SKIP and TORCH_CUDA_DEPS.match(r["name"]) and pin_of(r["raw"]):
-                drop(r, "torch installs its own exact version of it (a pin from a pip freeze clashes with that)")
+            fixes.append(f"line {r['line']}: {old} -> {raw} (that version has no file for Linux / Python {py}; "
+                         "the nearest version that has one)")
+        # a path on the PC the file was made on (pip freeze of a conda / local install): install it by name
+        elif r["status"] == "LOCAL":
+            old, name = r["raw"], r["raw"].split("@")[0].strip()
+            set_req(r, name, "a path on the PC the file comes from", py, opts)
+            fixes.append(f"line {r['line']}: {old} -> {name} (a path on the PC the file was made on; installed by "
+                         "name, newest version)")
     return fixes
 
 
-def resolve_and_fix(results, py, opts, fixes):
-    """install the whole file together; a pin that clashes with what another package needs is loosened, so pip
-    picks a version that fits (up to 3 rounds)"""
-    for _ in range(3):
-        ok, why = resolve_together(results, py, opts)
+def resolve_and_split(results, py, opts, fixes, got=None):
+    """install the whole file together, like the build does. When pip refuses because one line pins a version that
+    another line (or its dependency) does not accept - typical for a pip freeze from a PC where packages were
+    installed in several steps, e.g. torch first and newer nvidia-* versions later - the line with FEWER dependencies
+    moves to a second pip step with --no-deps: installed exactly as the file pins it, after the others, the same way
+    that PC got it. Nothing is left out and no pin is changed."""
+    for _ in range(15):
+        ok, why = resolve_together(results, py, opts, got)
         if ok is not False:
             return ok, why
         text = "\n".join(why)
-        culprits = {canon(n) for n in re.findall(r"The user requested ([A-Za-z0-9._-]+)", text)} & \
-                   {canon(n) for n in re.findall(r"depends on ([A-Za-z0-9._-]+)", text)}
-        changed = False
-        for r in results:
-            if r["name"] in culprits and r["name"] not in ("torch", "torchvision", "torchaudio") and \
-                    r["status"] == "OK" and pin_of(r["raw"]):
-                old = r["raw"]
-                raw = re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[^\]]*\])?", old.strip()).group(0)
-                r.update(raw=raw, spec="", fixed=f"was {old}: the pin clashes with what another package needs")
-                fixes.append(f"line {r['line']}: {old} -> {raw} (the pin clashes with what another package needs; "
-                             "pip picks a version that fits)")
-                changed = True
-        if not changed:
+        req = {canon(n) for n in re.findall(r"The user requested ([A-Za-z0-9._-]+)", text)}
+        live = {r["name"]: r for r in results if r["status"] in ("OK", "UNCHECKED") and not r.get("later")}
+        moved = False
+        for line in why:
+            m = re.match(r"\s*([A-Za-z0-9._-]+) ([\w.+!-]+) depends on ([A-Za-z0-9._-]+)(.*)$", line.strip())
+            if not m:
+                continue
+            dep, x = canon(m.group(1)), canon(m.group(3))
+            if x not in req or x not in live:
+                continue
+            r = live[x]
+            if dep in live and live[dep].get("ndeps") is not None and r.get("ndeps") is not None and \
+                    live[dep]["ndeps"] < r["ndeps"]:
+                r = live[dep]            # e.g. torchvision (3 dependencies) instead of torch (15)
+            if r.get("later"):
+                continue
+            r["later"] = line.strip()
+            fixes.append(f"line {r['line']}: {r['raw']}  INSTALLED IN A SECOND STEP, exactly this version - pip says: "
+                         f"{line.strip()}")
+            moved = True
+        if not moved:
             return ok, why
-    return resolve_together(results, py, opts)
+    return resolve_together(results, py, opts, got)
+
+
+def dep_applies(dep, py, extras=()):
+    """does one Requires-Dist line apply on Linux x86_64 / Python py (with these extras asked for)?"""
+    if ";" not in dep:
+        return True
+    marker = dep.split(";", 1)[1].strip()
+    try:
+        from pip._vendor.packaging.markers import Marker     # pip's own copy of 'packaging': pip is needed anyway
+        m = Marker(marker)
+    except Exception:
+        return "extra" not in marker
+    env = {"python_version": py, "python_full_version": py + ".0", "implementation_version": py + ".0",
+           "sys_platform": "linux", "platform_system": "Linux", "platform_machine": "x86_64", "os_name": "posix",
+           "implementation_name": "cpython", "platform_python_implementation": "CPython"}
+    try:
+        return any(m.evaluate(dict(env, extra=e)) for e in [""] + list(extras))
+    except Exception:
+        return "extra" not in marker
+
+
+def later_needs(results, py, step1):
+    """what the second-step lines need that nothing else installs (--no-deps skips it): {name: entry}.
+    step1 = every package the first pip steps install (pip's report), or an empty set when unknown"""
+    infile = {r["name"] for r in results}
+    need = {}
+    for r in results:
+        if not r.get("later"):
+            continue
+        m = re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*\[([^\]]*)\]", r["raw"])
+        extras = [canon(x) for x in m.group(1).split(",")] if m else []
+        for dep in r.get("requires") or []:
+            if not dep_applies(dep, py, extras):
+                continue
+            mm = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*\(?([^);]*)\)?", dep.split(";")[0].strip())
+            if not mm:
+                continue
+            n = canon(mm.group(1))
+            if n in infile or n in step1:
+                continue
+            e = need.setdefault(n, {"name": mm.group(1), "extras": "", "specs": [], "who": []})
+            e["extras"] = e["extras"] or (mm.group(2) or "")
+            for sp in mm.group(3).replace(" ", "").split(","):
+                if sp and sp not in e["specs"]:
+                    e["specs"].append(sp)
+            if r["name"] not in e["who"]:
+                e["who"].append(r["name"])
+    for e in need.values():
+        e["req"] = e["name"] + e["extras"] + ",".join(e["specs"])
+    return need
 
 
 def available_versions(name, py, opts, cu_index):
@@ -482,6 +534,9 @@ def check_one(item, py, opts, index=None):
     ok, out = pip_dry(req, py, True, opts, cu_index, want)
     if ok:
         res.update(status="OK", why="prebuilt Linux wheel")
+        md = (want.get("pick") or {}).get("metadata") or {}
+        res["ndeps"] = len([x for x in md.get("requires_dist") or [] if "extra ==" not in x])
+        res["requires"] = list(md.get("requires_dist") or [])
         if want.get("pick"):
             res["k"] = classify(want["pick"], name, raw)
             cuda_size(res["k"], py, opts, cu_index)
@@ -723,12 +778,62 @@ def decide(results, py, gpu):
                        "the nvidia-* pip packages (from " + ", ".join(r["name"] for r in own) + ") put the libraries "
                        "there. Nothing comes from the host except the driver (libcuda.so), which --gpus all mounts in.")
     # pip groups
-    d["frameworks"] = [r for r in live if r["name"] in FRAMEWORKS or (r.get("k") or {}).get("kind", "").startswith("HEAVY")]
-    d["rest"] = [r for r in live if r not in d["frameworks"]]
+    first = [r for r in live if not r.get("later")]
+    d["frameworks"] = [r for r in first if r["name"] in FRAMEWORKS or
+                       (r.get("k") or {}).get("kind", "").startswith("HEAVY")]
+    d["rest"] = [r for r in first if r not in d["frameworks"]]
+    d["later"] = [r for r in live if r.get("later")]
     return d
 
 
-def write_files(out_dir, results, opts, py, gpu, entry, reqname, d):
+COPY_MAX_MB = 500      # a file from the PC up to this size is copied into the image by default; bigger: mounted
+
+
+def outside_files(static_path, project, name, copy, mount=()):
+    """files the code reads from the PC, outside the project (from the Step 1 map, with xray_runfile's rules): where
+    each one is inside the container, and whether it is COPIED into the image or KEPT OUTSIDE (mounted with -v)"""
+    try:
+        sys.path.insert(0, HERE)
+        import xray_runfile as rf
+        with open(static_path, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (ImportError, OSError, ValueError):
+        return None
+    p = rf.plan(st, project, name, None, None, 180)
+    items = []
+    for host, cont, _mode, _why in p["mounts"]:
+        envs = [(n, v) for n, v, _w in p["env"] if v == cont or v.startswith(cont + "/")]
+        hn = host.replace("\\", "/").rstrip("/")
+        used = set()
+        for f in st.get("facts", []):        # every file the code reads in that folder (model.onnx, model.onnx.block ...)
+            sub = str(f.get("subject", "")).replace("\\", "/")
+            if f.get("category") in ("model_file", "data_file_read", "config_file") and \
+                    f.get("required_at_runtime") != "no" and sub.lower().startswith(hn.lower() + "/") and "<" not in sub:
+                rel = sub[len(hn) + 1:]
+                if "/" not in rel:
+                    used.add(rel)
+        used |= {v[len(cont):].lstrip("/") for _n, v in envs if v != cont}
+        here = sorted(x for x in used if os.path.isfile(os.path.join(host, x)))   # only files that exist on this PC
+        size = sum(os.path.getsize(os.path.join(host, x)) for x in here)
+        names = {n for n, _v in envs}
+        if "all" in mount or names & set(mount):
+            cp, why = False, "you chose --mount"
+        elif "all" in copy or names & set(copy):
+            cp, why = True, "you chose --copy"
+        elif not here:
+            cp, why = False, "not found on this PC, so it cannot be copied"
+        elif size <= COPY_MAX_MB * 1048576:
+            cp, why = True, f"small ({mb(size)}): copied, so the image runs on its own"
+        else:
+            cp, why = False, f"big ({mb(size)}): kept outside so the image stays small"
+        items.append({"host": host, "cont": cont, "ctx": cont.rsplit("/", 1)[-1], "env": envs, "copy": cp,
+                      "why": why, "files": here, "missing": sorted(used - set(here))})
+    return {"items": items, "outs": [(n, v) for n, v, _w in p["env"] if v.startswith("/xout/")],
+            "env": p["env"], "cpu": p["env_cpu"], "other": p["env_optional"], "gui": p["gui"], "gpu": p["gpu"],
+            "changes": rf.code_changes(st, project)}
+
+
+def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
     os.makedirs(out_dir, exist_ok=True)
     idx = sorted({r["index"] for r in results if r.get("index")})
     # requirements.docker.txt: the same lines, Windows-only and local paths out, PyTorch index in
@@ -740,12 +845,17 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d):
             L.append(f"# {r['raw']}    <- {r['status'].lower()}: left out")
         elif r["status"] == "DROPPED":
             L.append(f"# {r['raw']}    <- left out: {r['why']}")
+        elif r.get("later"):
+            L.append(f"{r['raw']}    # second pip step, --no-deps (Dockerfile.naive 3c): {r['later']}")
         elif r.get("fixed"):
             L.append(f"{r['raw']}    # fixed by xray_naive, {r['fixed']}")
         elif r["status"] == "MISSING":
             L.append(f"{r['raw']}    # <- MISSING for Linux/Python {py}: change this pin (naive-check.txt)")
         else:
             L.append(r["raw"])
+    for e in d.get("later_needs") or []:
+        L.append(f"# + {e['req']}    <- not in your file: needed by {', '.join(e['who'])} (second step), added in "
+                 "Dockerfile.naive 3c")
     with open(os.path.join(out_dir, "requirements.docker.txt"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(L) + "\n")
 
@@ -834,6 +944,32 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d):
                 D += pre + pip_run(rest, pre=" && ", post=post)
             else:
                 D += pip_run(rest)
+    if d["later"]:
+        D += bar("3c. LINES PIP WILL NOT INSTALL TOGETHER WITH THE OTHERS - installed second, exactly as pinned")
+        D += ["# Each of these pins a version another package does not accept (pip's reason on the right). Your file",
+              "# comes from a PC where packages were installed in several steps, so it has these exact versions working",
+              "# together. Installing them AFTER the others with --no-deps gives the same: nothing left out, no pin changed.",
+              "# pip check below prints the mismatch in the build log - information only, the build goes on."]
+        D += [f"#   {r['raw']:<{w}} {r['later']}" for r in d["later"]]
+        post = []
+        if d.get("later_needs"):
+            ns = d["later_needs"]
+            D += ["# --no-deps also skips what these packages need. Already installed above: everything else they need.",
+                  "# Not in your file and not installed above - added right after, with their own dependencies; -c (the",
+                  "# versions installed so far) keeps every version above exactly as it is:"]
+            D += [f"#   {e['req']:<{w}} needed by {', '.join(e['who'])}" for e in ns]
+            add = pip_run([{"raw": e["req"], "index": None} for e in ns], pre="")
+            add[0] = add[0].replace("pip install --no-cache-dir", "pip install --no-cache-dir -c /tmp/xray-installed.txt", 1)
+            for u in sorted({r["index"] for r in d["later"] if r.get("index")}):
+                if ("--extra-index-url", u) not in opts and f"--extra-index-url {u}" not in add[0]:
+                    add[0] = add[0].replace(" \\", f" --extra-index-url {u} \\", 1)
+            add[-1] += " \\"
+            post = [" && pip freeze > /tmp/xray-installed.txt \\", " && (" + add[0]] + add[1:] + \
+                ['     || echo "xray_naive: they could not be added without changing a version installed above - see pip"'
+                 ") \\"]
+        second = pip_run(d["later"], post=post + [" && (pip check || true)"])
+        second[0] = second[0].replace("pip install --no-cache-dir", "pip install --no-cache-dir --no-deps", 1)
+        D += second
     if d["ld"]:
         D += bar("4. LD_LIBRARY_PATH - where to find the CUDA libraries")
         D += ["# " + x.strip() for x in re.findall(r".{1,110}(?:\s|$)", d["ld_why"])]
@@ -844,13 +980,101 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d):
               "# and has cuDNN in /usr/lib/x86_64-linux-gnu, a folder Linux always searches. The driver (libcuda.so)",
               "# comes from the host: --gpus all mounts it in."]
     D += bar("5. THE CODE (all of it - X-Ray finds out what is really used)")
-    D += ["COPY . .", f'CMD ["python", "{entry}"]']
+    D += ["COPY . ."]
+    if o and (o["items"] or o["outs"]):
+        D += bar("6. FILES OUTSIDE THE PROJECT - the code reads them from your PC (found in the Step 1 map)")
+        D += ["# A container cannot see C:\\ or D:\\. Each file is either COPIED into the image (the image grows by its size",
+              "# and runs anywhere on its own) or KEPT OUTSIDE and mounted with -v when the container starts (the image stays",
+              "# small, the file can change without a rebuild). Choose: xray_naive.py ... --copy ENV_NAME (or --copy all).",
+              "# Either way the env var below points at the same path inside the container."]
+        was = {n: w for n, _v, w in o["env"]}
+        for it in o["items"]:
+            names = ", ".join(n for n, _v in it["env"]) or "(no env var)"
+            D.append(f"#   {names}: your code's default {code_default(was.get(it['env'][0][0], '')) if it['env'] else ''}"
+                     " is a path on your PC - in the container it is the path below")
+            D.append(f"#     {it['host']}  ->  {it['cont']}   " +
+                     (f"COPIED into the image ({it['why']})" if it["copy"] else
+                      f"KEPT OUTSIDE ({it['why']}): docker run -v \"{it['host']}:{it['cont']}:ro\""))
+            if it["copy"]:
+                D.append(f"# xray-build-context: {it['ctx']}={it['host']}")
+                D.append(f"COPY --from={it['ctx']} " + json.dumps((it["files"] or ["."]) + [it["cont"] + "/"]))
+            D += [f"ENV {n}={json.dumps(v)}" for n, v in it["env"]]
+        if o["outs"]:
+            D.append("# files the program writes: /xout (mount a folder there to keep them: -v \"%CD%\\out:/xout\")")
+            D += [f"ENV {n}={json.dumps(v)}" for n, v in o["outs"]] + ["RUN mkdir -p /xout"]
+        if o["other"]:
+            D.append("# other settings the code reads keep its defaults (change one at run time: -e NAME=value): " +
+                     ", ".join(f"{n}={d}" for n, d, _s in o["other"]))
+    if o and o["changes"]:
+        D += bar("CODE CHANGES NEEDED - a Windows / PC path written in the code: no Docker setting can fix it")
+        for i, c in enumerate(o["changes"], 1):
+            D += [f"#   {i}. {c['where']}", f"#      now:       {c['now'] or ''}",
+                  f"#      change to: {c['new'] or '(by hand: ' + c['note'] + ')'}"]
+        D.append("#   then run xray_static.py + xray_naive.py again: the new env var gets its container path here")
+    D += [f'CMD ["python", "{entry}"]']
     with open(os.path.join(out_dir, "Dockerfile.naive"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(D) + "\n")
     with open(os.path.join(out_dir, "Dockerfile.naive.dockerignore"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join([".git/", ".venv/", "venv/", "env/", ".idea/", ".vscode/", "**/__pycache__/",
                             "**/*.pyc", "logs/", "runs/", "*.log"]) + "\n")
     return d["base"]
+
+
+def code_default(why):
+    """xray_runfile's note 'was C:\\x.onnx' / 'output file; was out.csv - kept in ...' -> the code's default value"""
+    m = re.search(r"was (.*?)(?: - kept in .*|: ask for .*)?$", why or "")
+    return m.group(1) if m else (why or "")
+
+
+def run_help(o, a, gpu):
+    """naive-check.txt: the files outside the project (copied or mounted), and the exact build and run commands"""
+    img, T = f"{a.name}-naive", ["", "FILES OUTSIDE THE PROJECT, AND HOW TO BUILD + RUN THIS IMAGE"]
+    if o is None:
+        return T + ["  (run with --static runs\\NAME\\NAME.json: then the files your code reads from your PC are handled "
+                    "here - copied into the image or mounted - with their env vars)"]
+    T += ["  A container is Linux: C:\\... and D:\\... do not exist in it. Every env var your code reads:"]
+    for n, v, w in o["env"]:
+        T += [f"    {n:<16} your code: {code_default(w)}", f"    {'':<16} -> in the container: {v}" +
+              ("  (an output: mount a folder at /xout to keep it)" if v.startswith("/xout/") else
+               "  (Dockerfile.naive sets it)")]
+    for n, v, w in o["cpu"]:
+        T.append(f"    {n:<16} your code: {code_default(w)}  -> used as it is (X-Ray's CPU run sets {v})")
+    for n, d, _site in o["other"]:
+        T.append(f"    {n:<16} your code: {d or '(no default)'}  -> used as it is")
+    T.append("    to change one when you run the image: docker run ... -e NAME=value ...   (or --env-file FILE with "
+             "NAME=value lines)")
+    if o["changes"]:
+        T += ["  CODE CHANGES NEEDED - a Windows / PC path written in the code without an env var (no Docker setting "
+              "can fix it):"]
+        for i, c in enumerate(o["changes"], 1):
+            T += [f"    {i}. WHERE:     {c['where']}", f"       NOW:       {c['now'] or ''}",
+                  f"       CHANGE TO: {c['new'] or '(by hand: ' + c['note'] + ')'}"]
+        T.append("    The old value stays the default, so it still runs the same on your PC. Then run xray_static.py "
+                 "and xray_naive.py again.")
+    else:
+        T.append("  CODE CHANGES NEEDED: none - every path from your PC is read through an env var")
+    T.append("  Files your code reads from your PC:")
+    for it in o["items"]:
+        names = ", ".join(n for n, _v in it["env"]) or "(no env var)"
+        T += [f"    {names}: {it['host']}  ->  {it['cont']}  " + ("COPIED into the image: " + ", ".join(
+            it["files"] or ["the whole folder"]) if it["copy"] else "KEPT OUTSIDE, mounted at run time") +
+              f"  ({it['why']})"]
+        if it["missing"]:
+            T.append(f"      not on this PC, so not copied: {', '.join(it['missing'])}")
+    if o["items"]:
+        T.append(f"    To switch: run xray_naive.py again with --copy ENV_NAME / --mount ENV_NAME (or all). Without "
+                 f"them: files up to {COPY_MAX_MB} MB are copied, bigger ones stay outside.")
+    ctx = "".join(f' --build-context "{it["ctx"]}={it["host"]}"' for it in o["items"] if it["copy"])
+    mounts = "".join(f' -v "{it["host"]}:{it["cont"]}:ro"' for it in o["items"] if not it["copy"])
+    T += ["  build (in the project folder; build-naive.bat from xray_runfile.py does the same):",
+          f"    docker build -f Dockerfile.naive{ctx} -t {img} .",
+          "  run it on its own (X-Ray's run files add the tracing on top of the same mounts):",
+          f"    docker run --rm{' --gpus all' if gpu else ''}{mounts}" + (' -v "%CD%\\out:/xout"' if o["outs"] else "")
+          + f" {img}"]
+    if o["gui"]:
+        T.append("  the code opens windows (cv2.imshow): a container has no screen - X-Ray's runs switch them off; "
+                 "on its own, switch them off the way your code allows")
+    return T
 
 
 def main(argv=None):
@@ -868,6 +1092,11 @@ def main(argv=None):
     g.add_argument("--cpu", action="store_true", help="CPU image (python:X base)")
     ap.add_argument("--static", help="the Step 1 map: GPU yes/no is taken from it when --gpu/--cpu is not given")
     ap.add_argument("--jobs", type=int, default=8, help="parallel pip checks (default 8)")
+    ap.add_argument("--copy", action="append", default=[], metavar="ENV_NAME",
+                    help="a file the code reads from your PC (needs --static): COPY it into the image (repeatable; "
+                         "all = every one). Default: copied when up to 500 MB, else mounted at run time")
+    ap.add_argument("--mount", action="append", default=[], metavar="ENV_NAME",
+                    help="keep this file outside the image: mounted at run time (repeatable; all = every one)")
     a = ap.parse_args(argv)
     req_path = a.requirements if os.path.isfile(a.requirements) else os.path.join(a.project, a.requirements)
     if not os.path.isfile(req_path):
@@ -888,10 +1117,18 @@ def main(argv=None):
         results = list(ex.map(lambda it: check_one(it, a.python, opts), reqs))
     fixes = autofix(results, a.python, opts)
     print("  ... and the whole file together, with dependencies, as the build installs it", flush=True)
-    together, why_not = resolve_and_fix(results, a.python, opts, fixes)
+    got = {}
+    together, why_not = resolve_and_split(results, a.python, opts, fixes, got)
+    needs = later_needs(results, a.python, got.get("names") or set())
+    if needs:
+        fixes.append("ADDED after the second step (--no-deps skips what those lines need; these are not in your file and "
+                     "nothing else installs them): " + "; ".join(f"{e['req']} (needed by {', '.join(e['who'])})"
+                                                                for e in needs.values()))
     out_dir = os.path.join(HERE, "runs", a.name, "naive")
     d = decide(results, a.python, gpu)
-    base = write_files(out_dir, results, opts, a.python, gpu, a.entry, os.path.basename(req_path), d)
+    d["later_needs"] = list(needs.values())
+    o = outside_files(a.static, a.project, a.name, a.copy, a.mount) if a.static else None
+    base = write_files(out_dir, results, opts, a.python, gpu, a.entry, os.path.basename(req_path), d, o)
     groups = {}
     for r in results:
         groups.setdefault(r["status"], []).append(r)
@@ -904,9 +1141,16 @@ def main(argv=None):
               f"  packages that need Python {a.python} may show up as MISSING, or with an older version than the build "
               "installs.", "  Fix: python -m pip install -U pip   then run xray_naive.py again.", ""]
     if fixes:
-        T += ["FIXED AUTOMATICALLY so the build works (in requirements.docker.txt and Dockerfile.naive; your own "
-              "file is unchanged) - read them once:"]
-        T += ["  " + x for x in fixes] + [""]
+        T += ["HANDLED SO THE BUILD WORKS (requirements.docker.txt and Dockerfile.naive; your own file is unchanged) - "
+              "read them once:"]
+        T += ["  " + x for x in fixes]
+        if any(r.get("later") for r in results):
+            T += ["  Why a second step: a Docker build installs the whole file with ONE pip install, and in one install",
+                  "  pip will not put a package next to a version another package rejects. Your file comes from a PC",
+                  "  where packages were installed in several steps (pip only warns there), so that PC has exactly these",
+                  "  versions. Dockerfile.naive does the same: first everything else, then these lines with --no-deps.",
+                  "  Whether the program works with them (the GPU too): the X-Ray Step 2 run, or xray_look.py --image."]
+        T.append("")
     if together is False:
         T += ["CANNOT BE INSTALLED TOGETHER, and there is no single right fix - pip's reason (Linux / Python " +
               a.python + "):"]
@@ -935,6 +1179,7 @@ def main(argv=None):
     if idx:
         T.append("EXTRA INDEX added to requirements.docker.txt: " + ", ".join(idx) + " (+cuNNN pins exist only there)")
     T += notes
+    T += run_help(o, a, gpu)
     T += ["", f"Files written to {out_dir}:", "  Dockerfile.naive, Dockerfile.naive.dockerignore, requirements.docker.txt",
           "Copy them into the project folder, then build (build-naive.bat from xray_runfile.py)."]
     with open(os.path.join(out_dir, "naive-check.txt"), "w", encoding="utf-8") as fh:

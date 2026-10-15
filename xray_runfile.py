@@ -4,6 +4,7 @@ xray_runfile.py - write the Step 2 run files for you (no Docker command typing).
 
 Reads the Step 1 map (xray_static.py output) and writes, into runs/NAME/:
   build-naive.bat      docker build of the project's Dockerfile.naive (if it exists)
+  run-naive.bat        the naive image ON ITS OWN, no X-Ray: does it start and do its work? (RUN_SECONDS, then Ctrl+C)
   run-step2.bat        the traced run: mounts, -e env vars, --gpus, --gui off, --shm-size, ports ... then
                        facts + merge + the needs report (step2-needs.txt)
   run-step2-cpu.bat    the same run without the GPU, to compare (only for projects that use a GPU)
@@ -13,10 +14,16 @@ Reads the Step 1 map (xray_static.py output) and writes, into runs/NAME/:
   run-explore.bat      runs the app with NO time limit (video files loop), container named NAME-explore: look
                        inside with  docker exec -it NAME-explore bash ; stop with  docker stop -t 60 NAME-explore ;
                        X-Ray's report of the same run is then in runs/NAME/explore/ to compare with what you saw
-  run-load.bat A       a 5-minute load test (no line counting, GPU logged every 2 s, the app's own log folders
-                       kept) into runs/NAME/load-A/; run it again with B, C ... after changing cameras / solutions
+  run-load.bat A       a load test (no line counting, GPU logged every 2 s, the app's own log folders kept) into
+                       runs/NAME/load-A/; run it again with B, C ... after changing cameras / solutions
 Every line is commented. Open them in Notepad, change what you want, then run them. Docker is never started by
 this script itself. Standard library only.
+
+Settings at the top of every X-Ray run file (change them in Notepad):
+  RUN_SECONDS  how long the program runs, then it gets Ctrl+C (0 = until it ends / you stop it); load 300, explore 0
+  LOOP         1 = a video FILE the program reads starts again when it ends (the program keeps working)
+  VIDEOS       a folder of videos: the program plays them one after the other instead of its own video file
+               (with LOOP=1 the list starts again). Cameras and streams are never touched.
 
   python xray_runfile.py --static runs\\zip\\zip.json --project "C:\\...\\ZIP-main" --name zip
   python xray_runfile.py --static runs/zip/zip.json --project ~/ZIP-main --name zip --shell sh     (Linux / WSL)
@@ -44,7 +51,7 @@ except ImportError:                   # pragma: no cover - xray_needs.py missing
     def const_of(path, consts, outer=False):
         return None
 
-VERSION = "0.1.9"
+VERSION = "0.2.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -440,11 +447,34 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
     folder = load or explore            # results in their own folder (load-A, explore)
     L = head(sh, xdir, out_dir, "EXPLORE: the app runs until you stop it (video files loop), so you can look inside "
              "the container by hand" if explore else
-             "a 5-minute LOAD TEST (usage: run-load A, then B, C ... for the next setups)" if load else
+             "a LOAD TEST, RUN_SECONDS long (usage: run-load A, then B, C ... for the next setups)" if load else
              "the traced run on the " + ("planned image " + name + "-slim + verify" if slim else
                                          "naive image" + (" without the GPU" if cpu else "")))
     if p["notes"]:
         L += [sh.rem + "CHECK BEFORE RUNNING:"] + [sh.rem + "  - " + n for n in p["notes"]] + [""]
+    # settings at the top of the file: how long, loop, which videos (change them in Notepad)
+    secs = 300 if load else 0 if explore else p["stop_after"]
+    loop = 1 if (load or explore) else 0
+    if sh.bat:
+        L += ["REM ---- settings: change them here, then run this file ----",
+              "REM RUN_SECONDS: how long the program runs, then it is stopped (0 = until it ends by itself or you stop it)",
+              f'set "RUN_SECONDS={secs}"',
+              "REM LOOP: 1 = a video FILE starts again from the beginning when it ends (the program keeps working)",
+              f'set "LOOP={loop}"',
+              "REM VIDEOS: a folder with videos (.mp4 .avi .mov ...): the program plays them one after the other instead",
+              "REM         of its own video (with LOOP=1 the list starts again). Empty = the program's own video.",
+              "REM         (both only matter for programs that read video FILES; cameras / streams are not touched)",
+              'set "VIDEOS="',
+              "REM " + "-" * 60,
+              'set "XSTOP="', 'if not "%RUN_SECONDS%"=="0" set "XSTOP=--stop-after %RUN_SECONDS%"',
+              'set "XVID="', 'if not "%VIDEOS%"=="" set XVID=-v "%VIDEOS%:/xvideos:ro" -e XRAY_PLAYLIST=/xvideos', ""]
+    else:
+        L += ["# ---- settings: change them here ----",
+              f"RUN_SECONDS={secs}".ljust(16) + "# how long the program runs, then it is stopped (0 = until it ends / you stop it)",
+              f"LOOP={loop}".ljust(16) + "# 1 = a video FILE starts again when it ends (the program keeps working)",
+              'VIDEOS=""'.ljust(16) + "# a folder of videos: played one after the other instead of the program's own video",
+              'XSTOP=""; [ "$RUN_SECONDS" != "0" ] && XSTOP="--stop-after $RUN_SECONDS"',
+              'XVID=(); [ -n "$VIDEOS" ] && XVID=(-v "$VIDEOS:/xvideos:ro" -e XRAY_PLAYLIST=/xvideos)', ""]
     suffix = "-cpu" if cpu else "-slim" if slim else ""
     image = name + "-slim" if slim else p["image"]
     if load:
@@ -453,21 +483,26 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
             L += ['set "L=%~1"', 'if "%L%"=="" set "L=A"',
                   sh.rem + "the small image if it was built, else the naive one",
                   'set "IMG=' + name + '-slim"', "docker image inspect %IMG% >nul 2>&1 || set \"IMG=" + p["image"] + '"',
-                  'echo Load test %L% on image %IMG% - 5 minutes. Results: runs\\' + name + '\\load-%L%\\', ""]
+                  'echo Load test %L% on image %IMG% - %RUN_SECONDS% s. Results: runs\\' + name + '\\load-%L%\\', ""]
         else:
             L += ['L="${1:-A}"', 'IMG=' + name + '-slim',
                   'docker image inspect "$IMG" >/dev/null 2>&1 || IMG=' + p["image"],
-                  'echo "Load test $L on image $IMG - 5 minutes. Results: runs/' + name + '/load-$L/"', ""]
+                  'echo "Load test $L on image $IMG - $RUN_SECONDS s. Results: runs/' + name + '/load-$L/"', ""]
         image = "%IMG%" if sh.bat else "$IMG"
     if explore:
         LB = "explore"
         cn = name + "-explore"
         L += ["docker rm -f " + cn + (" >nul 2>&1" if sh.bat else " >/dev/null 2>&1")]
-        for t in ["The app starts now and keeps running (a video file starts again when it ends).",
-                  "In a SECOND window:   docker exec -it " + cn + " bash      (look inside, see GUIDE.md section 10/11)",
+        for t in ["The app starts now and keeps running (LOOP=1: a video file starts again when it ends).",
+                  "In a SECOND window:   docker exec -it " + cn + " python /xray/xray_look.py            (what it uses now)",
+                  "                      docker exec -it " + cn + " python /xray/xray_look.py --watch 5  (live changes)",
+                  "                      docker exec -it " + cn + " bash      (look around by hand, see GUIDE.md)",
                   "                      docker stats   /   docker top " + cn,
                   "To stop:              docker stop -t 60 " + cn + "      (then this window writes the X-Ray report)"]:
             L.append("echo " + t if sh.bat else "echo '" + t + "'")
+        L.append('if not "%RUN_SECONDS%"=="0" echo It also stops by itself after %RUN_SECONDS% s - RUN_SECONDS above.'
+                 if sh.bat else
+                 '[ "$RUN_SECONDS" != "0" ] && echo "It also stops by itself after $RUN_SECONDS s - RUN_SECONDS above."')
         L.append("")
     entries = p["entries"] or ["main.py"]
     envs = list(p["env"]) + (p["env_cpu"] if cpu else [])
@@ -533,11 +568,10 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
             a.append("  -e " + n + "=" + v)
         if load:
             a.append("  -e XRAY_COVERAGE=0")       # no line counting: it would slow the app and skew the numbers
-        if explore:
-            a.append("  -e XRAY_LOOP_VIDEO=1")     # a video file starts again at its end: the app keeps running
+        a.append("  -e XRAY_LOOP_VIDEO=%LOOP% %XVID%" if sh.bat else
+                 '  -e XRAY_LOOP_VIDEO="$LOOP" ${XVID[@]+"${XVID[@]}"}')
         a.append("  " + image)
-        stop = 300 if load else 0 if explore else p["stop_after"]
-        flags = (" --gui off" if p["gui"] else "") + (" --stop-after " + str(stop) if stop else "")
+        flags = (" --gui off" if p["gui"] else "") + (" %XSTOP%" if sh.bat else " $XSTOP")
         a.append("  python /xray/xray_trace.py run --out /xray-out --root " + p["workdir"] + flags + " -- python " + e)
         msg = ("Explore run" if explore else "Load test" if load else "Step 2" + (" (CPU)" if cpu else " (planned image)" if slim else "")) + (": " + e
                + " - the window stays quiet until it ends. Log: " + log)
@@ -575,16 +609,71 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
     return finish(sh, L, report, "Done. Read " + report + " - WHAT THE RUN USED is at the end - and the end of the log.")
 
 
+def write_naive_run(p, sh, out_dir):
+    """the naive image ON ITS OWN, without X-Ray: does it start and do its work? Stopped after RUN_SECONDS"""
+    name, R = p["name"], ("%RUN%" if sh.bat else "$RUN")
+    sep = "\\" if sh.bat else "/"
+    cn = name + "-run"
+    a = ["docker run --rm --name " + cn + (" --gpus all" if p["gpu"] else "") + (" --shm-size 2g" if p["shm"] else "")
+         + (" --mac-address " + p["mac"] if p["mac"] else "") + "".join(" -p " + str(x) + ":" + str(x) for x in p["ports"])]
+    a += ['  -v "' + host + ":" + cont + ":" + mode + '"' for host, cont, mode, why in p["mounts"]]
+    if p["out_mount"]:
+        a.append('  -v "' + R + sep + 'out-naive:/xout"')
+    if p["env"] or p["env_optional"]:
+        a.append('  --env-file "' + R + sep + 'run.env"')
+    a.append("  " + p["image"])
+    if sh.bat:
+        L = ["@echo off", "REM Generated by xray_runfile.py " + VERSION + ": run the naive image ON ITS OWN (no X-Ray) - "
+             "does it start and do its work?", "setlocal", 'set "RUN=' + out_dir + '"', "",
+             "REM RUN_SECONDS: stop it after this many seconds (0 = until it ends by itself or you press Ctrl+C)",
+             'set "RUN_SECONDS=120"', ""]
+        if p["gui"]:
+            L += ["REM The code opens windows (cv2.imshow). Without X-Ray (which switches them off) a container has no",
+                  "REM screen: switch them off the way your code allows (an env var in run.env), or it may stop there."]
+        L += [sh.rem + "  " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
+        L += ["docker rm -f " + cn + " >nul 2>&1", 'mkdir "%RUN%\\out-naive" 2>nul' if p["out_mount"] else "",
+              "REM the stop: Ctrl+C for the program (SIGINT, as on your PC), then docker stop (30 s to end, then killed)",
+              'if not "%RUN_SECONDS%"=="0" start "stop ' + cn + '" /min cmd /c "timeout /t %RUN_SECONDS% /nobreak >nul '
+              '& docker kill -s INT ' + cn + ' >nul 2>&1 & docker stop -t 30 ' + cn + ' >nul 2>&1"',
+              "echo The program's own output follows. It stops after %RUN_SECONDS% s (0 = when it ends).", ""]
+        L += [x + " ^" for x in a[:-1]] + [a[-1], "", "echo.",
+                                            "echo Done." + (" What it wrote is in runs\\" + name + "\\out-naive"
+                                                            if p["out_mount"] else ""), "endlocal"]
+        return "\r\n".join(L) + "\r\n"
+    L = ["#!/usr/bin/env bash", "# Generated by xray_runfile.py " + VERSION + ": run the naive image on its own (no X-Ray) - "
+         "does it start and do its work?", 'RUN="' + out_dir + '"',
+         "RUN_SECONDS=120   # stop it after this many seconds (0 = until it ends / Ctrl+C)", ""]
+    if p["gui"]:
+        L += ["# The code opens windows (cv2.imshow). Without X-Ray (which switches them off) a container has no",
+              "# screen: switch them off the way your code allows (an env var in run.env), or it may stop there."]
+    L += ["#   " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
+    L += ["docker rm -f " + cn + " >/dev/null 2>&1"]
+    if p["out_mount"]:
+        L += ['mkdir -p "$RUN/out-naive"; chmod 777 "$RUN/out-naive"']
+    L += ["# the stop: Ctrl+C for the program (SIGINT, as on your PC), then docker stop (30 s to end, then killed)",
+          '[ "$RUN_SECONDS" != "0" ] && (sleep "$RUN_SECONDS"; docker kill -s INT ' + cn + '; docker stop -t 30 ' + cn
+          + ') >/dev/null 2>&1 &',
+          "echo \"The program's own output follows. It stops after $RUN_SECONDS s (0 = when it ends).\"", ""]
+    L += [x + " \\" for x in a[:-1]] + [a[-1], "echo", "echo 'Done." + (" What it wrote is in runs/" + name + "/out-naive" if p["out_mount"] else "")
+                                         + "'"]
+    return "\n".join(L) + "\n"
+
+
 def write_build(p, sh, out_dir):
     d = p["dockerfile"] if p["dockerfile"] and os.path.basename(p["dockerfile"]) == "Dockerfile.naive" else None
     if not d:
         return None
+    try:     # files from outside the project that xray_naive.py --copy puts into the image
+        ctx = "".join(f' --build-context "{m.group(1).strip()}"' for m in re.finditer(
+            r"^# xray-build-context: (.+)$", open(d, encoding="utf-8", errors="replace").read(), re.M))
+    except OSError:
+        ctx = ""
     if sh.bat:
         return ("@echo off\r\nREM Generated by xray_runfile.py: build the naive image (several minutes the first time)\r\n"
-                f'docker build -f "{d}" -t {p["image"]} "{p["project"]}" > "{out_dir}\\build.log" 2>&1\r\n'
+                f'docker build -f "{d}"{ctx} -t {p["image"]} "{p["project"]}" > "{out_dir}\\build.log" 2>&1\r\n'
                 f'docker images {p["image"]}\r\nREM nothing listed above = the build failed: read build.log\r\n')
     return ("#!/usr/bin/env bash\n# Generated by xray_runfile.py: build the naive image\n"
-            f'docker build -f "{d}" -t {p["image"]} "{p["project"]}" > "{out_dir}/build.log" 2>&1\n'
+            f'docker build -f "{d}"{ctx} -t {p["image"]} "{p["project"]}" > "{out_dir}/build.log" 2>&1\n'
             f'docker images {p["image"]}\n')
 
 
@@ -621,6 +710,7 @@ def main(argv=None):
     b = write_build(p, sh, out_dir)
     if b:
         files["build-naive" + ext] = b
+    files["run-naive" + ext] = write_naive_run(p, sh, out_dir)
     files["run-step2" + ext] = write_run(p, sh, HERE, out_dir, cpu=False)
     if p["gpu"]:
         files["run-step2-cpu" + ext] = write_run(p, sh, HERE, out_dir, cpu=True)

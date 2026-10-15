@@ -601,6 +601,17 @@ def _install():
     # the app keeps working while you look inside the container). Streams and cameras are not touched.
     LOOP_VIDEO = (os.environ.get("XRAY_LOOP_VIDEO") or "").strip() in ("1", "yes", "on", "true")
     LOOPS = set()
+    # XRAY_PLAYLIST: a folder of videos (or "a.mp4;b.mp4"): a video FILE the app opens plays these one after the other
+    # instead; after the last one the app sees the end of the video - or, with XRAY_LOOP_VIDEO=1, the list starts again.
+    PLAYLIST = []
+    for _p in (os.environ.get("XRAY_PLAYLIST") or "").split(";"):
+        _p = _p.strip()
+        if _p and os.path.isdir(_p):
+            PLAYLIST += sorted(os.path.join(_p, f) for f in os.listdir(_p) if os.path.splitext(f)[1].lower() in
+                               (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".mpg", ".mpeg", ".wmv", ".webm", ".ts", ".flv"))
+        elif _p:
+            PLAYLIST.append(_p)
+    PL = {}     # id(VideoCapture) -> index of the playlist video it plays now
     try:
         GUI_SAVE = float(os.environ.get("XRAY_GUI_SAVE", "5"))
     except ValueError:
@@ -692,27 +703,41 @@ def _install():
             if src is None:
                 return None
             return ("video_open", {"source": src if isinstance(src, int) else pathish(src),
-                                   "substituted_by": cam_sub(src),
+                                   "substituted_by": cam_sub(src) or (f"playlist of {len(PLAYLIST)} videos" if PLAYLIST
+                                                                      and isinstance(src, str) and "://" not in src
+                                                                      else None),
                                    "opened": bool(self.isOpened()) if e is None and self is not None and
                                    hasattr(self, "isOpened") else None, "error": err(e)}, (str(src),))
+
+        def playlist(self, a2, kw2, new):
+            """a video FILE (not a stream / camera / substitute): play the playlist instead"""
+            src = a2[0] if a2 else kw2.get("filename")
+            LOOPS.discard(id(self))       # ids are reused after an object is freed: forget the old object's state
+            PL.pop(id(self), None)
+            if PLAYLIST and new is None and isinstance(src, str) and "://" not in src:
+                PL[id(self)] = 0
+                return (PLAYLIST[0],) + tuple(a2[1:]), {k: v for k, v in kw2.items() if k != "filename"}
+            return a2, kw2
 
         def vc_pre(self, a, kw):
             a2, kw2, new = cam_args(a, kw)
             SUBS[id(self)] = new
+            a2, kw2 = playlist(self, a2, kw2, new)
             src = a2[0] if a2 else kw2.get("filename")
-            if LOOP_VIDEO and isinstance(src, str) and "://" not in src:
+            if LOOP_VIDEO and isinstance(src, str) and "://" not in src and id(self) not in PL:
                 LOOPS.add(id(self))
             return a2, kw2
 
         def vc_extra(base):
-            if not CAMERA and not LOOP_VIDEO:
+            if not CAMERA and not LOOP_VIDEO and not PLAYLIST:
                 return {}
 
             def open(self, *a, **kw):
                 a2, kw2, new = cam_args(a, kw)
                 SUBS[id(self)] = new
+                a2, kw2 = playlist(self, a2, kw2, new)
                 src = a2[0] if a2 else kw2.get("filename")
-                if LOOP_VIDEO and isinstance(src, str) and "://" not in src:
+                if LOOP_VIDEO and isinstance(src, str) and "://" not in src and id(self) not in PL:
                     LOOPS.add(id(self))
                 return base.open(self, *a2, **kw2)
 
@@ -728,12 +753,22 @@ def _install():
                             time.sleep(nxt - now)
                         PACE[id(self)] = max(now, nxt or 0) + 1.0 / fps
                 r = base.read(self, *a, **kw)
+                if not r[0] and id(self) in PL:                # end of a playlist video: the next one
+                    i = PL[id(self)] + 1
+                    if i >= len(PLAYLIST) and LOOP_VIDEO:
+                        i = 0
+                    if i < len(PLAYLIST):
+                        PL[id(self)] = i
+                        base.open(self, PLAYLIST[i])
+                        r = base.read(self, *a, **kw)
+                    return r
                 if not r[0] and ((sub and "://" not in sub) or id(self) in LOOPS):
                     base.set(self, 1, 0)          # CAP_PROP_POS_FRAMES = 0: replay the file from the start
                     r = base.read(self, *a, **kw)
                 return r
             return {"open": open, "read": read}
-        subclass_ctor(m, "VideoCapture", vc, pre=vc_pre if (CAMERA or LOOP_VIDEO) else None, extra=vc_extra)
+        subclass_ctor(m, "VideoCapture", vc, pre=vc_pre if (CAMERA or LOOP_VIDEO or PLAYLIST) else None,
+                      extra=vc_extra)
         cls = getattr(m, "VideoCapture", None)
         if cls is not None and getattr(cls, "_xray_wrapped", False) and isinstance(cls, type):
             wrap(cls, "open", lambda a, kw, r, e: ("video_open", {"source": pathish(arg(a, kw, 1, "filename")),

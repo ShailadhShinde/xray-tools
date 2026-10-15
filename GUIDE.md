@@ -22,6 +22,17 @@ Read this guide once from top to bottom before you start. Then follow it step by
 | **output JSON** | the file each X-Ray step writes (you open it in the viewer, or give it to the next step) |
 | **terminal** | Linux / WSL: the Ubuntu window. Windows: CMD (Command Prompt) or the PyCharm "Terminal" tab. Nothing in this guide needs PowerShell. |
 
+**Where do I type a command?** Two places, and a command typed in the wrong one fails:
+
+| The block is marked | Type it in |
+|---|---|
+| `bat` / "in CMD" | the Windows CMD window on your PC (prompt `C:\...>`) |
+| `bash` / "inside" | the container. First open a shell in it: `docker exec -it NAME bash` (a running container) or `docker run --rm -it --entrypoint bash IMAGE` (an image). The prompt changes to something like `root@1a2b3c4d:/app#`; `exit` goes back to CMD |
+
+`SP=$(python -c ...)`, `ldd`, `ls /proc/...`, `$LD_LIBRARY_PATH` are Linux commands: typed in CMD they fail with
+"'SP' is not recognized as an internal or external command". Inside, `python: command not found` = that image only
+has `python3`.
+
 **`python3` or `python`?** On Linux / WSL / Mac type `python3`. On Windows type `python`.
 This guide writes `python3`; change it if you are on Windows.
 Check it works: `python3 --version` must print 3.8 or newer. X-Ray needs nothing else (no pip install).
@@ -218,8 +229,23 @@ minute, without installing anything (pip only reads the package index - it needs
 | MISSING | that version does not exist for Linux / this Python (`No matching distribution`) | lists the nearest versions that do: change the pin |
 | WINDOWS | a Windows-only package (`pyreadline3`, `pywin32` ...) - a `pip freeze` from a Windows PC | left out |
 | INDEX | `torch==2.8.0+cu126`: exists only on PyTorch's own index | the index line is added |
-| FIXED AUTOMATICALLY | lines that would stop the build and have one right fix: torchaudio / torchvision set to the build of your torch, extra `nvidia-*` pins next to a CUDA torch left out (torch brings its own), a package listed twice, a pin with no Linux file -> the nearest version that has one, a pin that clashes with what another package needs -> loosened | changes `requirements.docker.txt` and `Dockerfile.naive` only (your file stays as it is) and lists every change at the top of `naive-check.txt` |
-| CANNOT BE INSTALLED TOGETHER | a clash with no single right fix | shows pip's reason (the whole file installed at once, like the build) |
+| INSTALLED IN A SECOND STEP | a line pip refuses to install together with another one: torch `+cu126` pins its own `nvidia-cublas-cu12` version (12.6.x) but your file pins `nvidia-cublas-cu12==12.9.2.10`; `torchaudio 2.11.0 depends on torch==2.11.0` but your file pins torch 2.12.1 | installed **exactly as pinned**, after everything else, with `pip install --no-deps` (Dockerfile.naive section 3c). Nothing is left out, no version is changed |
+| ADDED | what a second-step package needs that is not in your file and nothing else installs (`--no-deps` would skip it) | installed right after it; `-c` keeps every version installed before exactly as it is |
+| LISTED TWICE | the same package on two lines | the line that installs (the newer one if both) is kept, the other is reported |
+| a pin with no Linux file / a local path | `pkg @ file:///C:/...` or a version that has no Linux file at all | installed by name / the nearest version that has a Linux file (the only way it can work on Linux) |
+| CANNOT BE INSTALLED TOGETHER | a clash that none of the above solves | shows pip's reason (the whole file installed at once, like the build) |
+
+**Why a second step - the error you had.** A `pip freeze` comes from a PC where packages were installed at different
+times: torch first (with the nvidia-* versions it asks for), later newer nvidia-* packages or a torchaudio of another
+torch. Each time pip only **warned** ("pip's dependency resolver does not currently take into account ..."), so that
+PC has exactly the versions in the file. A Docker build installs the whole file in **one** `pip install`, and in one
+install pip refuses the same combination (`ResolutionImpossible`). The second step repeats what happened on the PC:
+first everything else, then those lines with `--no-deps`. `naive-check.txt` lists each one with pip's own reason.
+In the build log you then see the same warning the PC saw, plus `pip check` lines like `torch 2.12.1+cu126 has
+requirement nvidia-cublas-cu12==12.6..., but you have nvidia-cublas-cu12 12.9.2.10` - information, the build goes on.
+Does the program work with those versions (the GPU too)? That is what the runs check: `run-naive`, the X-Ray Step 2
+run, and `xray_look.py --image` (section 10a: every package is imported, and the GPU frameworks are tested).
+Windows-only packages (`pywin32`, `pyreadline3` ...) are the only lines left out: no Linux version of them exists.
 
 ```bat
 python xray_naive.py --project "PROJECT_FOLDER" --requirements requirements.txt --entry main.py --name app --gpu
@@ -242,6 +268,21 @@ MISSING for packages that need the newer Python).
 It writes `runs\app\naive\`: `naive-check.txt` (read it), `Dockerfile.naive`, `Dockerfile.naive.dockerignore`,
 `requirements.docker.txt`. Copy the three Docker files into the project folder - the tool never overwrites the
 project's own files. Then `xray_runfile.py` writes `build-naive.bat` as usual.
+
+**Files your code reads from your PC** (a model on the Desktop, a video on D:): run the check with
+`--static runs\app\app.json` (the Step 1 map) and `naive-check.txt` ends with FILES OUTSIDE THE PROJECT:
+- **every env var your code reads**: its value in your code (`C:\Users\me\Desktop\...\best_blend.onnx`) and what it
+  becomes in the container (`/xin/model_onnx/best_blend.onnx` - Dockerfile.naive sets it with `ENV`), outputs
+  (`/xout/...`), and the ones used as they are;
+- **CODE CHANGES NEEDED**: a Windows path written in the code WITHOUT an env var (`VIDEO_IN = r"D:\..."`) cannot be
+  fixed by any Docker setting. It shows WHERE (file:line), NOW, and CHANGE TO
+  (`VIDEO_IN = os.getenv("VIDEO_IN", r"D:\...")` - the old value stays the default, your PC runs as before);
+- **copy or keep outside**, per file: a file up to 500 MB that exists on this PC is COPIED into the image (it runs
+  anywhere on its own); bigger ones, or ones not found, are KEPT OUTSIDE and mounted with `-v` at run time. Choose
+  yourself with `--copy MODEL_ONNX` / `--mount MODEL_ONNX` (or `--copy all` / `--mount all`). A copied file is taken
+  from its folder at build time with `--build-context` (build-naive.bat adds it);
+- the exact **build** and **run** commands, and how to pass env vars: `docker run ... -e NAME=value ...` or
+  `--env-file run.env` (one `NAME=value` per line). xray_runfile.py writes `runs\app\run.env` with all of them.
 
 `Dockerfile.naive` is written in 5 sections, each decided from the tables above, with the reason as a comment
 above every line (also good to know when you write a Dockerfile by hand):
@@ -266,9 +307,25 @@ The only GPU part that comes from the host is the driver (`libcuda.so`): `--gpus
 ## 4. Step 2 - Watch it run (needs Docker and an image that runs the app)
 
 **Shortcut:** `python xray_runfile.py --static runs/NAME/NAME.json --project PROJECT --name NAME` writes these files into
-`runs/NAME/` (`.bat` on Windows, `.sh` on Linux): `build-naive`, `run-step2` (+ `run-step2-cpu` for GPU apps),
-`run-step3-4` (package scan + plan), `build-slim` and `run-slim` (the same run on the new image, then `verify.txt`).
+`runs/NAME/` (`.bat` on Windows, `.sh` on Linux): `build-naive`, `run-naive` (the image ON ITS OWN, no X-Ray: does it
+start and do its work?), `run-step2` (+ `run-step2-cpu` for GPU apps), `run-step3-4` (package scan + plan),
+`build-slim` and `run-slim` (the same run on the new image, then `verify.txt`), `run-load`, `run-explore`.
 Run them in that order. The sections below explain what they do.
+
+**How long it runs, loop, several videos** - the top of every run file (open it in Notepad, change, save, run):
+
+| Setting | Meaning |
+|---|---|
+| `RUN_SECONDS` | the program is stopped after this many seconds (it gets Ctrl+C, like on your PC). `0` = until it ends by itself / you stop it. `600` = 10 minutes. Defaults: run-step2 / run-slim 180, run-load 300, run-explore 0, run-naive 120 |
+| `LOOP` | `1` = a video FILE the program reads starts again from the first frame when it ends, so a short video keeps it working for all of `RUN_SECONDS` |
+| `VIDEOS` | a folder with videos (`.mp4 .avi .mov .mkv ...`), e.g. `set "VIDEOS=D:\test videos"`: the program plays them one after the other (sorted by name) instead of its own video file; with `LOOP=1` the list starts again. Empty = its own video |
+
+`LOOP` and `VIDEOS` change only video FILES the program opens with `cv2.VideoCapture` (cameras and `rtsp://` streams
+are never touched), and only in the X-Ray runs (run-naive has no X-Ray: it has `RUN_SECONDS` only). A program that
+writes its results only at its very end (a CSV after the last frame) writes nothing when `RUN_SECONDS` stops it
+first - for those, `LOOP=0` and `RUN_SECONDS=0`.
+Example - the worker on the slim image for 10 minutes on a 2-minute video: in `run-slim.bat` set
+`RUN_SECONDS=600` and `LOOP=1`.
 
 Why: reading code cannot tell which `if` really runs, which of two installed packages is loaded, whether the GPU is
 really used, what a library writes. Step 2 runs the app **inside its current image** with X-Ray watching.
@@ -441,6 +498,12 @@ python3 xray_plan.py verify --naive app-runtime.json --planned app-xray-runtime.
 | `could not select device driver "" with capabilities: [[gpu]]` | `--gpus all` without the NVIDIA container toolkit on that machine |
 | `timed out waiting for /mnt/wslg` | Docker Desktop cannot show windows: use `--gui off` |
 | verify says `CHECK` | send `step4-verify.log` |
+| `'SP' is not recognized as an internal or external command` (or `ldd`, `grep`, `$PID` ...) | a command for INSIDE the container typed in CMD: first `docker exec -it NAME bash`, then type it there (section 0) |
+| inside: `python: command not found` | that image has `python3` only: type `python3` |
+| inside: `ls: cannot access '/proc//fd'` | `PID` is empty: run the `PID=...` line of section 10b first, or type the number (`PID=25`) |
+| build log: `ERROR: pip's dependency resolver does not currently take into account ...` / `pip check` lines | expected when naive-check.txt lists INSTALLED IN A SECOND STEP lines: the same warning your PC had, the build goes on |
+| the image builds, the program says `No module named ...` / `undefined symbol` / `numpy.core.multiarray failed to import` | `xray_look.py --image` (section 10a): every package is imported and each failure gets its reason |
+| `ResolutionImpossible` in a naive build | the requirements file changed after the check: run xray_naive.py again and use the new Dockerfile.naive |
 | anything else | send the log; say which step and the exact command you typed |
 
 ## 8. What to send to Claude, and what never to send
@@ -459,10 +522,97 @@ chat, not publicly.
 | 4 plan | `xray_plan.py plan --project --dockerfile --compose ...` | plans/app/ | `NOTE:` lines, the Dockerfile |
 | 4 verify | same run on the new image, `facts`, `verify` | verdict | `VERDICT: PASS` |
 
-## 10. Check it yourself - by hand, without X-Ray
+## 10. Look inside a container - for ANY project, without knowing its file or package names
 
-X-Ray does these looks automatically, over a whole run. Doing a few by hand is the best way to trust (or question)
-what it says, and to teach it. All commands are for Windows CMD; `IMAGE` is e.g. `app-naive` or `app-slim`.
+Two ways, both read-only (nothing is changed): **10a** X-Ray's look tool, **10b** the same by hand with standard
+commands, for a PC without X-Ray. `NAME` is the container's name (`docker ps`, last column); X-Ray's explore run
+names it `APP-explore`, run-naive `APP-run`. Start the program first (run-explore / run-naive / your own
+`docker run`), then use a SECOND CMD window.
+
+### 10a. With X-Ray: xray_look.py
+
+In CMD (X-Ray's run files mount the tools at `/xray` inside the container):
+```bat
+docker exec -it NAME python /xray/xray_look.py              & REM one look: what runs, what is open, what is loaded
+docker exec -it NAME python /xray/xray_look.py --watch 5    & REM every 5 s: what CHANGED (Ctrl+C to stop)
+docker exec -it NAME python /xray/xray_look.py --all        & REM every library, not only the summary
+```
+Any other container (no `/xray` in it): copy the one file in first.
+```bat
+docker cp xray_look.py NAME:/tmp/xray_look.py
+docker exec -it NAME python /tmp/xray_look.py
+```
+It shows, per process: the files open right now (models, videos, logs - `WRITING` = being written; `mounted from
+your PC` = it came with `-v`), network connections, RAM now / peak, threads, and every loaded library grouped by
+where it comes from: `pip package X`, `apt package Y`, `GPU driver from your PC`, the base image. `[CUDA]` marks the
+GPU libraries, and the GPU line says whether the program really runs on the GPU. `--watch` prints `+opened`,
+`-closed`, `+loaded`, `+network` as they happen.
+
+**An image, nothing running** (does everything in it work?):
+```bat
+docker run --rm --gpus all -v "%CD%:/x:ro" --entrypoint "" IMAGE python /x/xray_look.py --image
+```
+(run it in the xray-tools folder; leave out `--gpus all` on a PC without an NVIDIA GPU.) It shows: which Python and
+`LD_LIBRARY_PATH` (each folder checked), the biggest pip packages, the system libraries the pip packages need and
+the apt package each comes from, MISSING ones with the `apt-get install` that adds them, the CUDA libraries in the
+image, then **DOES EVERY PACKAGE IMPORT?** - every pip package is imported in a separate Python, the way your code
+does, and each failure gets its reason (`built for NumPy 1.x, but NumPy 2.x is installed`, `'six' is missing`,
+`compiled for another version of torch`, `a system library is missing`), and last a GPU test per framework (torch:
+`GPU: True` + the card; onnxruntime: its providers).
+
+### 10b. By hand - the same, with standard commands (no X-Ray needed)
+
+**From CMD** (no shell inside needed):
+```bat
+docker ps                                       & REM running containers: NAME is the last column
+docker top NAME                                 & REM its processes (PID as seen from the PC)
+docker stats NAME                               & REM live CPU / RAM / network (Ctrl+C to stop)
+docker logs -f NAME                             & REM what the program prints
+docker diff NAME                                & REM every file it ADDED (A) / CHANGED (C) / DELETED (D) since start - outside mounts
+docker inspect -f "{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}" NAME   & REM what is mounted from your PC
+docker inspect -f "{{range .Config.Env}}{{println .}}{{end}}" NAME                             & REM the env vars it got
+docker exec -it NAME bash                       & REM a shell INSIDE (sh if there is no bash; -u 0 = as root)
+```
+**Inside** (after `docker exec -it NAME bash`) - these need no names and no extra tools, so they work in any
+Debian / Ubuntu based image, slim ones too (`ps`, `lsof`, `ss` are often not installed; `/proc` always is):
+```bash
+# 1. every process and its command line (PID first)
+for p in /proc/[0-9]*; do echo "${p#/proc/}  $(tr '\0' ' ' < $p/cmdline 2>/dev/null)"; done
+# 2. pick the program: the first Python process that is not X-Ray (or type it: PID=25)
+PID=$(for p in /proc/[0-9]*; do c=$(tr '\0' ' ' < $p/cmdline 2>/dev/null); case "$c" in *xray_*) ;; *python*) echo ${p#/proc/};; esac; done | sort -n | head -1); echo "PID=$PID: $(tr '\0' ' ' < /proc/$PID/cmdline)"
+# 3. files it has open RIGHT NOW (models, videos, logs; sockets = network)
+ls -l /proc/$PID/fd | grep -v -e 'pipe:' -e 'anon_inode:' -e ' /dev/'
+ls -l /proc/$PID/cwd                                                     # the folder it runs in
+# 4. libraries it has loaded now, and how many
+grep -o '/[^ ]*\.so[^ ]*' /proc/$PID/maps | sort -u
+grep -o '/[^ ]*\.so[^ ]*' /proc/$PID/maps | sort -u | wc -l
+# 5. the apt package of each system library (a library with no package = a pip wheel, Python itself, or the driver)
+grep -o '/[^ ]*\.so[^ ]*' /proc/$PID/maps | sort -u | grep -v -e site-packages -e dist-packages | xargs dpkg -S 2>/dev/null | cut -d: -f1 | sort -u
+# 6. the pip packages whose compiled parts are loaded
+grep -o '/[^ ]*-packages/[^/]*' /proc/$PID/maps | sort -u | sed 's|.*-packages/||'
+# 7. GPU: CUDA libraries loaded (none = it runs on the CPU, or has not reached its GPU code yet) + GPU memory
+grep -o '/[^ ]*\.so[^ ]*' /proc/$PID/maps | sort -u | grep -iE 'cuda|cudnn|cublas|cufft|curand|nvrtc|nvjit|libnv' || echo "no CUDA library loaded"
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv             # only with --gpus all
+# 8. RAM now / peak, threads
+grep -E 'VmRSS|VmHWM|Threads' /proc/$PID/status
+# 9. the env vars the program really got
+tr '\0' '\n' < /proc/$PID/environ | sort | cut -c1-150
+# 10. watch the open files change, every 2 s (Ctrl+C stops the watching, not the program)
+while sleep 2; do clear; date; ls -l /proc/$PID/fd | grep -v -e 'pipe:' -e 'anon_inode:' -e ' /dev/'; done
+# 11. where pip puts packages, and which Python runs
+SP=$(python -c "import site;print(site.getsitepackages()[0])"); echo $SP; which python; python --version
+```
+**Which Python code runs right now** (the function / line, not only the file): `py-spy` reads the program's stack
+from outside. It needs internet in the container and `--cap-add SYS_PTRACE` (run-explore has it):
+```bash
+pip install py-spy && py-spy dump --pid $PID          # every thread: file, function, line
+```
+**Network** (slim images have no `ss`): `apt-get update && apt-get install -y iproute2 && ss -tnp` (as root:
+`docker exec -u 0 -it NAME bash`), or `xray_look.py`, which reads `/proc/net/tcp` itself.
+
+What a look by hand cannot see, and X-Ray can: a file the program read for one second at its start (gone from
+`/proc/PID/fd` a moment later), which lines of your code ran, an env var read with a computed name. A look is one
+moment; X-Ray's report covers the whole run.
 
 **Look inside an image (nothing of the app runs):**
 ```bat
@@ -475,16 +625,16 @@ ls -la /app                           # the files that are in the image
 du -sh /app/* | sort -h               # their sizes
 pip list                              # installed packages
 du -sh $(python -c "import site;print(site.getsitepackages()[0])")/* | sort -h | tail -15   # biggest packages
-python -c "import cv2, numpy; print('imports ok')"                                          # does an import work?
+pip check                             # versions that do not match what another package asks for
 cat /etc/os-release                   # which Linux
 ```
-**The GPU from inside a container:**
+**The GPU from inside a container** (in CMD):
 ```bat
 docker run --rm --gpus all --entrypoint "" IMAGE nvidia-smi
 docker run --rm --gpus all --entrypoint "" IMAGE python -c "import torch; print(torch.cuda.is_available())"
 docker run --rm --gpus all --entrypoint "" IMAGE python -c "import onnxruntime as o; print(o.get_available_providers())"
 ```
-**Compare two images:**
+**Compare two images** (in CMD):
 ```bat
 docker images
 docker history IMAGE                  & REM which Dockerfile line added how many MB (--no-trunc: full commands)
@@ -492,25 +642,6 @@ REM docker image ls on newer Docker: CONTENT SIZE = the compressed download, DIS
 REM older Docker shows one SIZE column = the unpacked size
 docker run --rm --entrypoint "" app-naive ls /app
 docker run --rm --entrypoint "" app-slim ls /app
-```
-**Inside a RUNNING container** (start the app normally, then in a second CMD):
-```bat
-docker ps                             & REM the CONTAINER ID
-docker stats                          & REM live CPU / RAM per container (Ctrl+C to stop)
-docker logs -f CONTAINER_ID           & REM the app's output
-docker exec -it CONTAINER_ID bash
-```
-inside:
-```bash
-ps aux                                # every process of the app (PID = 2nd column)
-# slim images have no "ps": this lists PID + command instead
-for p in /proc/[0-9]*; do printf "%s  " ${p#/proc/}; tr "\0" " " < $p/cmdline; echo; done
-ls -l /proc/PID/fd | grep -E "onnx|pt|jpg|mp4|csv"     # files that process has open RIGHT NOW (models, videos)
-awk '{print $6}' /proc/PID/maps | grep '\.so' | sort -u # libraries it loaded
-df -h /dev/shm                        # shared memory in use (frames between processes)
-nvidia-smi                            # GPU memory per process
-env | sort                            # the env vars the container really got
-ls -la /app/logs                      # what it wrote
 ```
 **Check one X-Ray claim by hand**, e.g. "folder `old_models/` is not used": while the app runs,
 `ls -l /proc/*/fd 2>/dev/null | grep old_models` shows nothing -> nothing has it open. (A short look can miss a
@@ -593,9 +724,11 @@ them - run longer, or start from the code), env vars read with a computed name, 
 
 ## 12. Explore mode - the app keeps running, you look inside, then compare with X-Ray
 
-`run-explore.bat` (made by `xray_runfile.py`) starts the NAIVE image with X-Ray watching, but with **no time
-limit**, and a video FILE starts again from the beginning when it ends (`XRAY_LOOP_VIDEO=1`; camera streams are
-not touched). The container has a fixed name, `NAME-explore`, so you never need to look up its ID.
+`run-explore.bat` (made by `xray_runfile.py`) starts the NAIVE image with X-Ray watching, with `RUN_SECONDS=0` (no
+time limit) and `LOOP=1` (a video FILE starts again from the beginning when it ends; camera streams are not touched).
+Change both at the top of the file (section 4: e.g. `RUN_SECONDS=600` stops it by itself after 10 minutes; `VIDEOS`
+plays a folder of videos). The container has a fixed name, `NAME-explore`, so you never need to look up its ID, and
+it can be watched (`--cap-add SYS_PTRACE`: py-spy, strace).
 
 **Window 1:**
 ```bat
@@ -603,28 +736,29 @@ runs\NAME\run-explore.bat
 ```
 **Window 2** (as long as you like):
 ```bat
+docker exec -it NAME-explore python /xray/xray_look.py --watch 5
 docker top NAME-explore
 docker stats NAME-explore
 docker exec -it NAME-explore bash
 ```
-then everything from sections 10 and 11 works inside (the image runs as root, so `apt-get install -y strace lsof
+then everything from sections 10b and 11 works inside (the image runs as root, so `apt-get install -y strace lsof
 procps iproute2` works if the PC has internet). `strace` can also attach to the RUNNING process:
 `strace -f -p PID -e trace=openat,connect -o /tmp/t.txt` (Ctrl+C to stop it; the app keeps running).
 
 **Stop** (in any window): `docker stop -t 60 NAME-explore` - the app gets Ctrl+C, X-Ray saves its recording and
-window 1 writes `runs\NAME\explore\needs.txt`.
+window 1 writes `runs\NAME\explore\needs.txt`. With `RUN_SECONDS` set it stops by itself.
 
 **Compare** - what you saw by hand, and where X-Ray has the same thing:
 
 | By hand | In `explore\needs.txt` / `explore\runtime.json` |
 |---|---|
-| `ls -l /proc/PID/fd` - video / model files open | YOU PROVIDE: video / data / model lines |
-| `ss -tnp` - camera :554, database :5432 | YOU PROVIDE: network lines (one per host) |
-| `env \| sort`, `grep -rn getenv` | YOU PROVIDE: env lines |
-| `awk '{print $6}' /proc/PID/maps \| grep .so` | Step 3 (`xray_pkg.py`) turns these into apt packages |
+| `xray_look.py`, `ls -l /proc/PID/fd` - video / model files open | YOU PROVIDE: video / data / model lines |
+| `xray_look.py` NETWORK, `ss -tnp` - camera :554, database :5432 | YOU PROVIDE: network lines (one per host) |
+| `tr '\0' '\n' < /proc/PID/environ`, `grep -rn getenv` | YOU PROVIDE: env lines |
+| `xray_look.py` LIBRARIES, `/proc/PID/maps` + `dpkg -S` | Step 3 (`xray_pkg.py`) turns these into apt packages |
 | `docker stats`, `VmHWM` in `/proc/PID/status` | WHAT THE RUN USED: RAM peak, cores |
 | `nvidia-smi` | WHAT THE RUN USED: GPU line |
-| `find / -newer /tmp/start` | files written (logs / output folders) |
+| `docker diff NAME-explore`, `find / -newer /tmp/start` | files written (logs / output folders) |
 
 Differences are normal in one direction: a look by hand sees one moment, X-Ray sees the whole run (a file read
 once at start is gone from `/proc/PID/fd` a second later, but X-Ray saw it open).
@@ -636,20 +770,25 @@ so the end never comes. The Step 2 run covers them.
 ## 13. Prove each Dockerfile line yourself
 
 Every line of a Dockerfile has a reason you can see inside the image. Use a throwaway container (`--rm` deletes it
-on `exit`, so you can break things freely):
+on `exit`, so you can break things freely). In CMD:
 ```bat
 docker run --rm -it --entrypoint bash IMAGE
 ```
+then type these INSIDE (the prompt is `root@...:/app#`, not `C:\...>`). `xray_look.py --image` (section 10a) does
+most of it in one go; this is the same by hand:
 ```bash
 which python; python --version; echo $PATH          # which Python, and is the venv first on PATH
-SP=$(python -c "import site;print(site.getsitepackages()[0])")
-# a GPU package and the CUDA libraries it opens by name ("not found" = it would fall back to the CPU)
-ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep -E "cu|nvrtc|not found"   # torch: $SP/torch/lib/libtorch_cuda.so
+SP=$(python -c "import site;print(site.getsitepackages()[0])"); echo $SP     # where pip put the packages
+pip check                                           # versions that do not match what another package asks for
+# every system library a compiled file of a pip package needs and that is NOT in the image (empty = none missing)
+find $SP -name '*.so*' -type f -exec ldd {} + 2>/dev/null | awk '/:$/{f=substr($0,1,length($0)-1)} /not found/{print $1, f}' | sort -u | while read lib f; do [ -z "$(find $SP -name "$lib" -print -quit)" ] && echo "MISSING $lib   needed by $f"; done
+# the GPU part of every package, and the CUDA libraries it opens ("not found" = it falls back to the CPU)
+for f in $(find $SP -name '*cuda*.so*' -type f); do echo "== $f"; ldd $f | grep -E 'libcu|libnv|not found'; done
 echo $LD_LIBRARY_PATH                               # extra folders Linux searches for libraries
-dpkg -S /usr/lib/x86_64-linux-gnu/libGL.so.1.7.0    # which apt package brought a file (no answer: a pip wheel, or the driver)
-apt-cache rdepends --installed libllvm20            # who pulled a big package in
+dpkg -S $(readlink -f /usr/lib/x86_64-linux-gnu/libz.so.1)   # which apt package brought a file (any path; no answer = a pip wheel, Python itself or the driver)
 dpkg-query -W -f='${Installed-Size}\t${Package}\n' | sort -rn | head -15    # the biggest apt packages (KB)
-# break one on purpose and read the error a too-small image would give
+apt-cache rdepends --installed PACKAGE              # who pulled a big apt package in (a name from the line above)
+# break one on purpose and read the error a too-small image would give (here: a library cv2 needs)
 mkdir -p /tmp/hidden && mv /usr/lib/x86_64-linux-gnu/libGL.so.1* /tmp/hidden/ && python -c "import cv2"
 ```
 With the GPU (`docker run --rm -it --gpus all ...`): `ldconfig -p | grep libcuda` shows the driver library, and
