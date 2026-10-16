@@ -18,6 +18,8 @@ Reads the Step 1 map (xray_static.py output) and writes, into runs/NAME/:
                        runs/NAME/load-A/; run it again with B, C ... after changing cameras / solutions
   compare-images.bat   two images side by side (default NAME-naive against NAME-slim, or any two): sizes, the apt /
                        pip packages only one has, where each gets its CUDA libraries, what each X-Ray run used
+  videos.bat [FOLDER]  can the image read your videos? each one is opened with the image's own OpenCV; the ones it
+                       cannot read (AV1 ...) are converted to H.264 into FOLDER\\h264 (xray_videos.py)
 Every line is commented. Open them in Notepad, change what you want, then run them. Docker is never started by
 this script itself. Standard library only.
 
@@ -53,7 +55,7 @@ except ImportError:                   # pragma: no cover - xray_needs.py missing
     def const_of(path, consts, outer=False):
         return None
 
-VERSION = "0.2.1"
+VERSION = "0.2.3"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -101,6 +103,227 @@ def workdir_and_cmd(project, dockerfile):
                 wd = m[-1]
             return wd, cand
     return wd, None
+
+
+# --------------------------------------------------------------------------- windows (cv2.imshow) and their switch
+OFF_TRY = ["0", "1", "false", "true", "no", "yes", "off", "on", ""]
+
+
+class _Env:
+    """a stand-in for os / os.environ while trying values: every env var NAME reads `value`, the others their default"""
+    def __init__(self, name, value):
+        self.name, self.value = name, value
+        self.environ = self
+
+    def getenv(self, key, default=None):
+        return self.value if key == self.name else default
+
+    def get(self, key, default=None):
+        return self.getenv(key, default)
+
+    def __getitem__(self, key):
+        if key == self.name:
+            return self.value
+        raise KeyError(key)
+
+    def __contains__(self, key):
+        return key == self.name
+
+
+def _env_reads(node):
+    """env var names read in an expression: os.getenv("X"), os.environ.get("X"), os.environ["X"], getenv("X")"""
+    import ast
+    out = []
+    for n in ast.walk(node):
+        f = getattr(n, "func", None)
+        environ_get = isinstance(f, ast.Attribute) and f.attr == "get" and (
+            (isinstance(f.value, ast.Attribute) and f.value.attr == "environ") or
+            (isinstance(f.value, ast.Name) and f.value.id == "environ"))
+        if isinstance(n, ast.Call) and n.args and isinstance(n.args[0], ast.Constant) and \
+                isinstance(n.args[0].value, str) and (
+                environ_get or (isinstance(f, ast.Attribute) and f.attr == "getenv") or
+                (isinstance(f, ast.Name) and f.id == "getenv")):
+            out.append(n.args[0].value)
+        elif isinstance(n, ast.Subscript) and isinstance(n.value, ast.Attribute) and n.value.attr == "environ":
+            k = n.slice if not isinstance(n.slice, ast.Index) else n.slice.value     # Python 3.8: ast.Index
+            if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                out.append(k.value)
+    return out
+
+
+def _truth(node, known, env):
+    """True / False / None (unknown) for an if-condition, with the names in `known` and one env var set"""
+    import ast
+    if isinstance(node, ast.BoolOp):
+        vals = [_truth(v, known, env) for v in node.values]
+        if isinstance(node.op, ast.And):
+            return False if False in vals else True if all(v is True for v in vals) else None
+        return True if True in vals else False if all(v is False for v in vals) else None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        v = _truth(node.operand, known, env)
+        return None if v is None else not v
+    try:
+        code = compile(ast.Expression(body=node), "<if>", "eval")
+        g = {"__builtins__": {"int": int, "bool": bool, "str": str, "float": float, "len": len}, "os": env,
+             "getenv": env.getenv, "environ": env}
+        return bool(eval(code, g, dict(known)))      # only expressions from the project's own if-conditions
+    except Exception:
+        return None
+
+
+def window_switch(st, project):
+    """the env var setting that turns the program's windows (cv2.imshow ...) off, found in its code: the `if` around
+    each window call, and the env var that condition comes from (SHOW = os.getenv("SHOW", "1") == "1" ... if SHOW:).
+    -> {"env", "value", "where", "calls"}; "env" None = a window call with no such switch"""
+    import ast
+    calls = [(x.get("file"), x.get("line"), str(f["subject"])) for f in st.get("facts", [])
+             if f.get("category") == "gui_usage" and live(f) for x in (f.get("sites") or [])[:1] if x.get("line")]
+    calls = [c for c in calls if re.search(r"imshow|namedWindow|plt\.show|show\(", c[2])] or calls
+    if not calls:
+        return None
+    files = {c[0] for c in calls} | {x.get("file") for f in st.get("facts", []) if f.get("category") == "env_var"
+                                      for x in (f.get("sites") or []) if x.get("file")}
+    trees, assigns = {}, {}            # variable name -> (env var, expression of its value)
+    for rel in files:
+        try:
+            with open(os.path.join(project, rel), encoding="utf-8", errors="replace") as fh:
+                trees[rel] = ast.parse(fh.read())
+        except (OSError, SyntaxError, ValueError, TypeError):
+            continue
+        for n in ast.walk(trees[rel]):
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                e = _env_reads(n.value)
+                if len(e) == 1:
+                    assigns[n.targets[0].id] = (e[0], n.value)
+    guards = []                        # per window call: the if-conditions it sits in (test, in the if-branch?)
+    for rel, line, what in calls:
+        tree = trees.get(rel)
+        if tree is None:
+            return {"env": None, "calls": calls}
+        parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+        call = next((n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n, "lineno", 0) == line), None)
+        g, node = [], call
+        while node in parents:
+            par = parents[node]
+            if isinstance(par, (ast.If, ast.While)) and node in par.body:
+                g.append((par.test, True))
+            elif isinstance(par, ast.If) and node in par.orelse:
+                g.append((par.test, False))
+            node = par
+        guards.append(g)
+    names = set()
+    for g in guards:
+        for test, _b in g:
+            names |= {n.id for n in ast.walk(test) if isinstance(n, ast.Name) and n.id in assigns}
+            names |= {"env:" + e for e in _env_reads(test)}
+    for key in sorted(names):
+        env = key[4:] if key.startswith("env:") else assigns[key][0]
+        for value in OFF_TRY:
+            fake = _Env(env, value)
+            known = {}
+            for var, (e, expr) in assigns.items():
+                if e == env:
+                    try:
+                        known[var] = eval(compile(ast.Expression(body=expr), "<v>", "eval"),
+                                          {"__builtins__": {"int": int, "bool": bool, "str": str, "float": float},
+                                           "os": fake, "getenv": fake.getenv, "environ": fake})
+                    except Exception:
+                        pass
+            ok = True
+            for g in guards:           # every window call must be skipped: some if around it decides "no"
+                if not any(_truth(test, known, fake) is (not branch) for test, branch in g):
+                    ok = False
+                    break
+            if ok:
+                return {"env": env, "value": value, "calls": calls}
+    return {"env": None, "calls": calls}
+
+
+def video_codec(path):
+    """the video codec of a file, read from its header (MP4 / MOV, MKV / WebM, AVI) - None when unknown"""
+    import struct
+    names = {b"avc1": "H.264", b"avc3": "H.264", b"hvc1": "H.265", b"hev1": "H.265", b"av01": "AV1", b"vp09": "VP9",
+             b"vp08": "VP8", b"mp4v": "MPEG-4 part 2", b"mjpa": "MJPEG", b"jpeg": "MJPEG", b"apch": "ProRes",
+             b"apcn": "ProRes", b"apcs": "ProRes", b"ap4h": "ProRes", b"dvh1": "Dolby Vision (H.265)",
+             b"dvhe": "Dolby Vision (H.265)", b"H264": "H.264", b"h264": "H.264", b"HEVC": "H.265", b"XVID": "MPEG-4 part 2",
+             b"DIVX": "MPEG-4 part 2", b"MJPG": "MJPEG", b"AV01": "AV1", b"FMP4": "MPEG-4 part 2", b"DX50": "MPEG-4 part 2",
+             b"AVdn": "DNxHD", b"AVdh": "DNxHR", b"s263": "H.263", b"H263": "H.263", b"mp2v": "MPEG-2", b"xvid": "MPEG-4 part 2",
+             b"FFV1": "FFV1", b"ap4x": "ProRes", b"apco": "ProRes", b"vp80": "VP8", b"VP80": "VP8", b"VP90": "VP9"}
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+            if head[4:8] in (b"ftyp", b"moov", b"mdat", b"free", b"wide", b"skip"):        # MP4 / MOV
+
+                def boxes(start, end):
+                    pos = start
+                    while pos + 8 <= end:
+                        fh.seek(pos)
+                        sz, typ = struct.unpack(">I4s", fh.read(8))
+                        hdr = 8
+                        if sz == 1:
+                            sz, hdr = struct.unpack(">Q", fh.read(8))[0], 16
+                        elif sz == 0:
+                            sz = end - pos
+                        if sz < hdr:
+                            return
+                        yield typ, pos + hdr, pos + sz
+                        pos += sz
+
+                def read_at(pos, n):
+                    fh.seek(pos)
+                    return fh.read(n)
+
+                def find(start, end, path_):
+                    for typ, a, b in boxes(start, end):
+                        if typ == path_[0]:
+                            if len(path_) == 1:
+                                yield a, b
+                            else:
+                                yield from find(a, b, path_[1:])
+                for a, b in find(0, size, [b"moov"]):
+                    for ta, tb in find(a, b, [b"trak"]):
+                        kind = next((read_at(ha + 8, 4) for ha, hb in find(ta, tb, [b"mdia", b"hdlr"])), b"")
+                        if kind != b"vide":
+                            continue
+                        for sa, sb in find(ta, tb, [b"mdia", b"minf", b"stbl", b"stsd"]):
+                            fourcc = read_at(sa + 12, 4)
+                            return names.get(fourcc, fourcc.decode("latin-1").strip() or None)
+                return None
+            fh.seek(0)
+            data = fh.read(8 << 20)
+            if head[:4] == b"\x1aE\xdf\xa3":                                       # Matroska / WebM
+                for cid, nm in ((b"V_AV1", "AV1"), (b"V_MPEGH/ISO/HEVC", "H.265"), (b"V_MPEG4/ISO/AVC", "H.264"),
+                                (b"V_VP9", "VP9"), (b"V_VP8", "VP8"), (b"V_FFV1", "FFV1"), (b"V_THEORA", "Theora"),
+                                (b"V_MPEG2", "MPEG-2"), (b"V_MPEG4/ISO/ASP", "MPEG-4 part 2"), (b"V_MJPEG", "MJPEG"),
+                                (b"V_PRORES", "ProRes"), (b"FFV1", "FFV1")):        # FFV1: a fourcc in V_MS/VFW/FOURCC
+                    if cid in data:
+                        return nm
+            if head[:4] == b"\x00\x00\x01\xba":                                   # MPEG program stream (.mpg)
+                return "MPEG-2" if b"\x00\x00\x01\xb5" in data else "MPEG-1/2"
+            if head[:4] == b"OggS":
+                return "Theora" if b"\x80theora" in data else "Ogg"
+            if head[:4] == b"\x30\x26\xb2\x75":                                   # ASF (.wmv)
+                for cid in (b"WMV1", b"WMV2", b"WMV3", b"WVC1", b"WMVA"):
+                    if cid in data:
+                        return cid.decode()
+                return "WMV"
+            if head[:4] == b"GIF8":
+                return "GIF"
+            if head[:4] == b"RIFF" and head[8:12] == b"AVI ":                     # AVI: strh 'vids' + fourcc
+                i = data.find(b"vids")
+                if i >= 0:
+                    fourcc = data[i + 4:i + 8]
+                    return names.get(fourcc, fourcc.decode("latin-1").strip() or None)
+    except (OSError, struct.error, ValueError):
+        return None
+    return None
+
+
+VIDEO_EXT = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
+CODEC_NOTE = {"AV1": "OpenCV's Linux wheel cannot read AV1 (no software AV1 decoder inside; its own AV1 decoder needs "
+                     "hardware decoding, which a container does not have): runs\\NAME\\videos.bat converts it to H.264",
+              "VP9": "OpenCV's Linux wheel reads VP9 in software - fine"}
 
 
 def plan(st, project, name, image, dockerfile, stop_after):
@@ -159,6 +382,7 @@ def plan(st, project, name, image, dockerfile, stop_after):
             p["notes"].append(f"code change needed: {f['subject']} is hardcoded ({s}) - the run cannot find it")
     p["gpu"] = any(f.get("mechanism") not in ("env_default",) for f in by.get("gpu_usage", []))
     p["gui"] = bool(by.get("gui_usage"))
+    p["window"] = window_switch(st, project) if p["gui"] else None
     p["shm"] = bool(by.get("ipc_shared_memory"))
     for f in by.get("listen_port", []):
         port = f.get("port") or str(f["subject"]).rsplit(":", 1)[-1]
@@ -611,11 +835,36 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
     return finish(sh, L, report, "Done. Read " + report + " - WHAT THE RUN USED is at the end - and the end of the log.")
 
 
+EXIT_CODES = [("0", "normal end"), ("1", "a Python error: read the Traceback above"),
+              ("125", "docker could not start the container: read docker's message above"),
+              ("130", "stopped with Ctrl+C (RUN_SECONDS)"),
+              ("134", "aborted - in a container usually a window (no screen: 'Could not load the Qt platform plugin xcb')"),
+              ("137", "killed: docker stop after 30 s, or out of memory (docker stats shows the RAM)"),
+              ("139", "crashed (segmentation fault) - in a container usually a window (no screen), else a native library")]
+
+
+def window_lines(p, rem):
+    """what run-naive says about the program's windows"""
+    w = p.get("window") or {}
+    where = ", ".join(f"{c[2]} at {c[0]}:{c[1]}" for c in (w.get("calls") or [])[:3])
+    if not p["gui"]:
+        return []
+    if w.get("env"):
+        return [rem + f"WINDOWS: the code opens windows ({where}) only when {w['env']} is on. A container has no screen,",
+                rem + f"so this run sets {w['env']}={w['value']} (found in the code's own if-condition). X-Ray's runs switch",
+                rem + "windows off themselves and keep the code as it is."]
+    return [rem + f"WINDOWS: the code always opens windows ({where}) - no setting switches them off. A container has",
+            rem + "no screen: the program stops at the first window ('Could not load the Qt platform plugin xcb', exit",
+            rem + "code 134 or 139). Watch it with run-explore / run-load instead (X-Ray switches windows off), or make the",
+            rem + "window optional in the code:  if os.getenv(\"SHOW\", \"1\") == \"1\":  around cv2.imshow / waitKey."]
+
+
 def write_naive_run(p, sh, out_dir):
     """the naive image ON ITS OWN, without X-Ray: does it start and do its work? Stopped after RUN_SECONDS"""
     name, R = p["name"], ("%RUN%" if sh.bat else "$RUN")
     sep = "\\" if sh.bat else "/"
     cn = name + "-run"
+    w = p.get("window") or {}
     a = ["docker run --rm --name " + cn + (" --gpus all" if p["gpu"] else "") + (" --shm-size 2g" if p["shm"] else "")
          + (" --mac-address " + p["mac"] if p["mac"] else "") + "".join(" -p " + str(x) + ":" + str(x) for x in p["ports"])]
     a += ['  -v "' + host + ":" + cont + ":" + mode + '"' for host, cont, mode, why in p["mounts"]]
@@ -623,31 +872,34 @@ def write_naive_run(p, sh, out_dir):
         a.append('  -v "' + R + sep + 'out-naive:/xout"')
     if p["env"] or p["env_optional"]:
         a.append('  --env-file "' + R + sep + 'run.env"')
+    if p["gui"] and w.get("env"):
+        a.append("  -e " + w["env"] + "=" + w["value"])        # after --env-file: this value wins
     a.append("  " + p["image"])
     if sh.bat:
         L = ["@echo off", "REM Generated by xray_runfile.py " + VERSION + ": run the naive image ON ITS OWN (no X-Ray) - "
              "does it start and do its work?", "setlocal", 'set "RUN=' + out_dir + '"', "",
              "REM RUN_SECONDS: stop it after this many seconds (0 = until it ends by itself or you press Ctrl+C)",
              'set "RUN_SECONDS=120"', ""]
-        if p["gui"]:
-            L += ["REM The code opens windows (cv2.imshow). Without X-Ray (which switches them off) a container has no",
-                  "REM screen: switch them off the way your code allows (an env var in run.env), or it may stop there."]
+        L += window_lines(p, "REM ")
         L += [sh.rem + "  " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
         L += ["docker rm -f " + cn + " >nul 2>&1", 'mkdir "%RUN%\\out-naive" 2>nul' if p["out_mount"] else "",
               "REM the stop: Ctrl+C for the program (SIGINT, as on your PC), then docker stop (30 s to end, then killed)",
               'if not "%RUN_SECONDS%"=="0" start "stop ' + cn + '" /min cmd /c "timeout /t %RUN_SECONDS% /nobreak >nul '
               '& docker kill -s INT ' + cn + ' >nul 2>&1 & docker stop -t 30 ' + cn + ' >nul 2>&1"',
-              "echo The program's own output follows. It stops after %RUN_SECONDS% s (0 = when it ends).", ""]
-        L += [x + " ^" for x in a[:-1]] + [a[-1], "", "echo.",
-                                            "echo Done." + (" What it wrote is in runs\\" + name + "\\out-naive"
-                                                            if p["out_mount"] else ""), "endlocal"]
+              'if "%RUN_SECONDS%"=="0" echo The program\'s own output follows. It runs until it ends by itself - RUN_SECONDS is 0.',
+              'if not "%RUN_SECONDS%"=="0" echo The program\'s own output follows. It is stopped after %RUN_SECONDS% seconds.',
+              ""]
+        L += [x + " ^" for x in a[:-1]] + [a[-1], 'set "RC=%ERRORLEVEL%"', "echo.",
+                                            "echo The program ended with exit code %RC%:"]
+        L += [f'if "%RC%"=="{c}" echo   {c} = {t}' for c, t in EXIT_CODES]
+        if p["out_mount"]:
+            L.append("echo What it wrote is in runs\\" + name + "\\out-naive")
+        L += ["endlocal"]
         return "\r\n".join(L) + "\r\n"
     L = ["#!/usr/bin/env bash", "# Generated by xray_runfile.py " + VERSION + ": run the naive image on its own (no X-Ray) - "
          "does it start and do its work?", 'RUN="' + out_dir + '"',
          "RUN_SECONDS=120   # stop it after this many seconds (0 = until it ends / Ctrl+C)", ""]
-    if p["gui"]:
-        L += ["# The code opens windows (cv2.imshow). Without X-Ray (which switches them off) a container has no",
-              "# screen: switch them off the way your code allows (an env var in run.env), or it may stop there."]
+    L += window_lines(p, "# ")
     L += ["#   " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
     L += ["docker rm -f " + cn + " >/dev/null 2>&1"]
     if p["out_mount"]:
@@ -655,9 +907,70 @@ def write_naive_run(p, sh, out_dir):
     L += ["# the stop: Ctrl+C for the program (SIGINT, as on your PC), then docker stop (30 s to end, then killed)",
           '[ "$RUN_SECONDS" != "0" ] && (sleep "$RUN_SECONDS"; docker kill -s INT ' + cn + '; docker stop -t 30 ' + cn
           + ') >/dev/null 2>&1 &',
-          "echo \"The program's own output follows. It stops after $RUN_SECONDS s (0 = when it ends).\"", ""]
-    L += [x + " \\" for x in a[:-1]] + [a[-1], "echo", "echo 'Done." + (" What it wrote is in runs/" + name + "/out-naive" if p["out_mount"] else "")
-                                         + "'"]
+          'if [ "$RUN_SECONDS" = "0" ]; then echo "The program\'s own output follows. It runs until it ends by itself."; '
+          'else echo "The program\'s own output follows. It is stopped after $RUN_SECONDS seconds."; fi', ""]
+    L += [x + " \\" for x in a[:-1]] + [a[-1], "RC=$?", "echo", 'echo "The program ended with exit code $RC:"',
+                                         "case $RC in"]
+    L += [f'  {c}) echo "  {c} = {t}";;' for c, t in EXIT_CODES] + ["esac"]
+    if p["out_mount"]:
+        L.append("echo 'What it wrote is in runs/" + name + "/out-naive'")
+    return "\n".join(L) + "\n"
+
+
+def write_videos(p, sh, xdir, out_dir):
+    """videos.bat FOLDER: every video opened with the image's own OpenCV; the ones it cannot read -> H.264 copies"""
+    name = p["name"]
+    vid = next(((n, v, re.sub(r"^was ", "", why).split(" - ")[0]) for n, v, why in p["env"]
+                if re.search(r"\.(" + "|".join(x[1:] for x in VIDEO_EXT) + r")\b", why, re.I)), None)
+    host = split_path(vid[2])[0] if vid else ""
+    cont_dir = vid[1].rsplit("/", 1)[0] if vid else ""
+    if sh.bat:
+        L = ["@echo off", "REM Generated by xray_runfile.py " + VERSION + ": can the image read your videos? Every video in a "
+             "folder is opened", "REM with the OpenCV inside the image (the library your program uses) and a few frames "
+             "are read. The ones it", "REM cannot read (AV1 ...) are converted to H.264 into the subfolder h264 of that "
+             "folder; the originals stay.",
+             "REM Usage: videos                      " + ("the folder of your program's video (" + vid[0] + ")" if vid else
+                                                         "(give a folder)"),
+             'REM        videos "D:\\other videos"    any folder (its subfolders too)',
+             "setlocal", 'set "X=' + xdir + '"', 'set "RUN=' + out_dir + '"',
+             'set "DIR=%~1"', 'if "%DIR%"=="" set "DIR=' + host + '"',
+             'if "%DIR%"=="" echo Give a folder: videos "D:\\your videos"', 'if "%DIR%"=="" exit /b 1',
+             'if "%DIR:~-1%"=="\\" set "DIR=%DIR:~0,-1%"',
+             "REM IMG: the image whose OpenCV decides (the slim image has the same OpenCV version)",
+             'set "IMG=' + p["image"] + '"',
+             "REM CONVERT: 1 = convert the videos the image cannot read, 0 = only check",
+             'set "CONVERT=1"',
+             'mkdir "%RUN%\\videos" 2>nul', 'del "%RUN%\\videos\\unreadable.txt" 2>nul',
+             "echo Checking the videos in %DIR% with the OpenCV inside %IMG% ...",
+             'docker run --rm --entrypoint "" -v "%X%:/xray:ro" -v "%DIR%:/v:ro" -v "%RUN%\\videos:/out" %IMG% python3 '
+             "/xray/xray_videos.py check /v --out /out",
+             'if not exist "%RUN%\\videos\\unreadable.txt" goto done', 'if "%CONVERT%"=="0" goto done', "echo.",
+             "REM ffmpeg comes from a small image, built the first time only: python:3.12-slim + imageio-ffmpeg",
+             'docker image inspect xray-ffmpeg >nul 2>&1 || docker build -t xray-ffmpeg - < "%X%\\xray_ffmpeg.Dockerfile"',
+             'docker run --rm -v "%X%:/xray:ro" -v "%DIR%:/v" -v "%RUN%\\videos:/out" xray-ffmpeg python '
+             "/xray/xray_videos.py convert /v --list /out/unreadable.txt" +
+             (' --hint "' + vid[0] + "=" + cont_dir + '"' if vid else ""), "echo.",
+             "echo Checking the copies with the same OpenCV ...",
+             'docker run --rm --entrypoint "" -v "%X%:/xray:ro" -v "%DIR%\\h264:/v:ro" %IMG% python3 '
+             "/xray/xray_videos.py check /v", "echo.",
+             "echo Use the copies: in a run file  VIDEOS=%DIR%\\h264  - or the run.env line shown above",
+             ":done", "endlocal"]
+        return "\r\n".join(L) + "\r\n"
+    L = ["#!/usr/bin/env bash", "# Generated by xray_runfile.py " + VERSION + ": can the image read your videos? Each video "
+         "is opened with the image's own OpenCV;", "# the ones it cannot read are converted to H.264 into FOLDER/h264. "
+         "Usage: bash videos.sh [FOLDER]", 'X="' + xdir + '"', 'RUN="' + out_dir + '"',
+         'DIR="${1:-' + host + '}"', '[ -n "$DIR" ] || { echo "Give a folder: bash videos.sh /path/to/videos"; exit 1; }',
+         'IMG="' + p["image"] + '"   # the image whose OpenCV decides', "CONVERT=1          # 0 = only check",
+         'mkdir -p "$RUN/videos"; chmod 777 "$RUN/videos"; rm -f "$RUN/videos/unreadable.txt"',
+         'docker run --rm --entrypoint "" -v "$X:/xray:ro" -v "$DIR:/v:ro" -v "$RUN/videos:/out" "$IMG" python3 '
+         "/xray/xray_videos.py check /v --out /out",
+         '[ -f "$RUN/videos/unreadable.txt" ] && [ "$CONVERT" = "1" ] || exit 0',
+         'docker image inspect xray-ffmpeg >/dev/null 2>&1 || docker build -t xray-ffmpeg - < "$X/xray_ffmpeg.Dockerfile"',
+         'docker run --rm -v "$X:/xray:ro" -v "$DIR:/v" -v "$RUN/videos:/out" xray-ffmpeg python /xray/xray_videos.py '
+         "convert /v --list /out/unreadable.txt" + (' --hint "' + vid[0] + "=" + cont_dir + '"' if vid else ""),
+         'echo "Checking the copies with the same OpenCV ..."',
+         'docker run --rm --entrypoint "" -v "$X:/xray:ro" -v "$DIR/h264:/v:ro" "$IMG" python3 /xray/xray_videos.py check /v',
+         'echo "Use the copies: VIDEOS=$DIR/h264 - or the run.env line shown above"']
     return "\n".join(L) + "\n"
 
 
@@ -767,16 +1080,24 @@ def main(argv=None):
     files["run-load" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, load=True)
     files["run-explore" + ext] = write_run(p, sh, HERE, out_dir, cpu=False, explore=True)
     files["compare-images" + ext] = write_compare(p, sh, HERE, out_dir)
+    files["videos" + ext] = write_videos(p, sh, HERE, out_dir)
     if p["env"] or p["env_optional"]:
         E = ["# Env vars for the runs of " + a.name + " (written by xray_runfile.py " + VERSION + "). Every run file",
              "# reads this file (--env-file): change a value here once. One NAME=value per line, no quotes,",
              "# no comment after a value. Lines starting with # are off: remove the # to switch one on."]
         for n, v, why in p["env"]:
+            m = re.search(r"was (.+)$", why)
+            c = video_codec(m.group(1)) if m and m.group(1).lower().endswith(VIDEO_EXT) else None
+            if c:
+                why += f" - video {c}" + (f": {CODEC_NOTE[c]}" if c in CODEC_NOTE else "")
             E += ["# " + why, n + "=" + v]
         if p["env_optional"]:
             E += ["", "# other env vars the code reads (its default is used while the line stays off):"]
+            sw = (p.get("window") or {}).get("env")
             for n, d, site in p["env_optional"]:
-                E += ["#   " + n + ": read at " + site, "# " + n + "=" + str(d)]
+                E += ["#   " + n + ": read at " + site + (f" - switches the program's windows: {n}="
+                                                          f"{p['window']['value']} = off (run-naive sets it; a container has "
+                                                          "no screen)" if n == sw else ""), "# " + n + "=" + str(d)]
         files["run.env"] = "\n".join(E) + "\n"
     changes = code_changes(st, os.path.abspath(a.project))
     files["code-changes.txt"] = write_code_changes(changes, a.name).replace("\n", "\r\n" if sh.bat else "\n")
@@ -788,6 +1109,10 @@ def main(argv=None):
         print(f"  {fn}")
     print(f"  image {p['image']}; entry {', '.join(p['entries']) or '?'}; GPU {'yes' if p['gpu'] else 'no'}; "
           f"window {'yes (--gui off)' if p['gui'] else 'no'}; ports {', '.join(p['ports']) or 'none'}")
+    if p["gui"]:
+        w = p.get("window") or {}
+        print("  windows: " + (f"{w['env']}={w['value']} switches them off (run-naive sets it)" if w.get("env") else
+                               "always opened, no setting switches them off - see run-naive's WINDOWS note"))
     for host, cont, mode, why in p["mounts"]:
         print(f"  mount {host} -> {cont}")
     for n, v, why in p["env"]:

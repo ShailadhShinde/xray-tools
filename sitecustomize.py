@@ -612,6 +612,8 @@ def _install():
         elif _p:
             PLAYLIST.append(_p)
     PL = {}     # id(VideoCapture) -> index of the playlist video it plays now
+    PLN = {}    # id(VideoCapture) -> frames read from that video so far
+    PL_BAD = set()   # playlist videos that gave no frame at all (a codec OpenCV cannot read here, e.g. AV1)
     try:
         GUI_SAVE = float(os.environ.get("XRAY_GUI_SAVE", "5"))
     except ValueError:
@@ -715,7 +717,7 @@ def _install():
             LOOPS.discard(id(self))       # ids are reused after an object is freed: forget the old object's state
             PL.pop(id(self), None)
             if PLAYLIST and new is None and isinstance(src, str) and "://" not in src:
-                PL[id(self)] = 0
+                PL[id(self)], PLN[id(self)] = 0, 0
                 return (PLAYLIST[0],) + tuple(a2[1:]), {k: v for k, v in kw2.items() if k != "filename"}
             return a2, kw2
 
@@ -753,14 +755,27 @@ def _install():
                             time.sleep(nxt - now)
                         PACE[id(self)] = max(now, nxt or 0) + 1.0 / fps
                 r = base.read(self, *a, **kw)
-                if not r[0] and id(self) in PL:                # end of a playlist video: the next one
-                    i = PL[id(self)] + 1
-                    if i >= len(PLAYLIST) and LOOP_VIDEO:
-                        i = 0
-                    if i < len(PLAYLIST):
-                        PL[id(self)] = i
+                k = id(self)
+                if k in PL:
+                    tries = 0
+                    while not r[0] and tries <= len(PLAYLIST):  # end of a playlist video: the next one
+                        tries += 1
+                        if not PLN.get(k) and PL[k] not in PL_BAD:
+                            PL_BAD.add(PL[k])
+                            sys.stderr.write(f"[xray-trace] VIDEOS: no frame at all from {PLAYLIST[PL[k]]} - OpenCV "
+                                             "cannot read this file here (AV1? see the guide); next video\n")
+                        i = PL[k] + 1
+                        if i >= len(PLAYLIST):
+                            if not LOOP_VIDEO or len(PL_BAD) >= len(PLAYLIST):
+                                break
+                            i = 0
+                        PL[k], PLN[k] = i, 0
+                        if i in PL_BAD:
+                            continue
                         base.open(self, PLAYLIST[i])
                         r = base.read(self, *a, **kw)
+                    if r[0]:
+                        PLN[k] = PLN.get(k, 0) + 1
                     return r
                 if not r[0] and ((sub and "://" not in sub) or id(self) in LOOPS):
                     base.set(self, 1, 0)          # CAP_PROP_POS_FRAMES = 0: replay the file from the start

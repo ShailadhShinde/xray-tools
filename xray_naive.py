@@ -51,7 +51,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Linux x86_64 platform tags (pip matches the listed tags exactly; pure-Python "any" wheels always match)
@@ -1224,6 +1224,7 @@ def run_help(o, a, gpu):
     else:
         T.append("  CODE CHANGES NEEDED: none - every path from your PC is read through an env var")
     T.append("  Files your code reads from your PC:")
+    import xray_runfile as rf            # next to this file (outside_files already loaded it)
     for it in o["items"]:
         names = ", ".join(n for n, _v in it["env"]) or "(no env var)"
         T += [f"    {names}: {it['host']}  ->  {it['cont']}  " + ("COPIED into the image: " + ", ".join(
@@ -1231,6 +1232,11 @@ def run_help(o, a, gpu):
               f"  ({it['why']})"]
         if it["missing"]:
             T.append(f"      not on this PC, so not copied: {', '.join(it['missing'])}")
+        for f in it["files"]:                 # a video: which codec - OpenCV's Linux wheel cannot read every one
+            if f.lower().endswith(rf.VIDEO_EXT):
+                c = rf.video_codec(os.path.join(it["host"], f))
+                if c:
+                    T.append(f"      video {f}: {c}" + (f" - {rf.CODEC_NOTE[c]}" if c in rf.CODEC_NOTE else ""))
     if o["items"]:
         T.append(f"    To switch: run xray_naive.py again with --copy ENV_NAME / --mount ENV_NAME (or all). Without "
                  f"them: files up to {COPY_MAX_MB} MB are copied, bigger ones stay outside.")

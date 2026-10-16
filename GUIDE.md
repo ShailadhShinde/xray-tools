@@ -312,7 +312,8 @@ The only GPU part that comes from the host is the driver (`libcuda.so`): `--gpus
 **Shortcut:** `python xray_runfile.py --static runs/NAME/NAME.json --project PROJECT --name NAME` writes these files into
 `runs/NAME/` (`.bat` on Windows, `.sh` on Linux): `build-naive`, `run-naive` (the image ON ITS OWN, no X-Ray: does it
 start and do its work?), `run-step2` (+ `run-step2-cpu` for GPU apps), `run-step3-4` (package scan + plan),
-`build-slim` and `run-slim` (the same run on the new image, then `verify.txt`), `run-load`, `run-explore`.
+`build-slim` and `run-slim` (the same run on the new image, then `verify.txt`), `run-load`, `run-explore`,
+`compare-images` (two images side by side) and `videos` (can the image read your videos - converts the ones it cannot).
 Run them in that order. The sections below explain what they do.
 
 **How long it runs, loop, several videos** - the top of every run file (open it in Notepad, change, save, run):
@@ -321,7 +322,7 @@ Run them in that order. The sections below explain what they do.
 |---|---|
 | `RUN_SECONDS` | the program is stopped after this many seconds (it gets Ctrl+C, like on your PC). `0` = until it ends by itself / you stop it. `600` = 10 minutes. Defaults: run-step2 / run-slim 180, run-load 300, run-explore 0, run-naive 120 |
 | `LOOP` | `1` = a video FILE the program reads starts again from the first frame when it ends, so a short video keeps it working for all of `RUN_SECONDS` |
-| `VIDEOS` | a folder with videos (`.mp4 .avi .mov .mkv ...`), e.g. `set "VIDEOS=D:\test videos"`: the program plays them one after the other (sorted by name) instead of its own video file; with `LOOP=1` the list starts again. Empty = its own video |
+| `VIDEOS` | a folder with videos (`.mp4 .avi .mov .mkv ...`), e.g. `set "VIDEOS=D:\test videos"`: the program plays them one after the other (sorted by name) instead of its own video file; with `LOOP=1` the list starts again. A video OpenCV cannot read here (AV1) is skipped with a message. Empty = its own video |
 
 `LOOP` and `VIDEOS` change only video FILES the program opens with `cv2.VideoCapture` (cameras and `rtsp://` streams
 are never touched), and only in the X-Ray runs (run-naive has no X-Ray: it has `RUN_SECONDS` only). A program that
@@ -329,6 +330,17 @@ writes its results only at its very end (a CSV after the last frame) writes noth
 first - for those, `LOOP=0` and `RUN_SECONDS=0`.
 Example - the worker on the slim image for 10 minutes on a 2-minute video: in `run-slim.bat` set
 `RUN_SECONDS=600` and `LOOP=1`.
+
+**Videos: can the image read them?** `runs\NAME\videos.bat` (no folder = the folder of the program's own video, or
+`videos.bat "D:\other videos"`) opens every video in the folder with the OpenCV INSIDE the image - the same library
+your program uses - and reads a few frames. The ones it cannot read are converted to H.264 into the subfolder `h264`
+(the originals stay), checked again, and it prints the `run.env` line for each copy; for a run file, `VIDEOS=` that
+`h264` folder. It works for any format because it asks the real library, not a list. A second run skips what is
+already converted. The ffmpeg it uses comes from a small image (`xray-ffmpeg`, python:3.12-slim + imageio-ffmpeg)
+that it builds the first time.
+What OpenCV's Linux wheel read in a test (4.13 and 5.0 the same): H.264 (8-bit, 10-bit, 4:2:2), H.265 (8-bit,
+10-bit), VP8, VP9, MPEG-4, MPEG-2, MJPEG, ProRes, DNxHD, FFV1, Theora, WMV, H.263, GIF - all fine; AV1 - opens, but
+no frame.
 
 Why: reading code cannot tell which `if` really runs, which of two installed packages is loaded, whether the GPU is
 really used, what a library writes. Step 2 runs the app **inside its current image** with X-Ray watching.
@@ -519,6 +531,9 @@ python3 xray_plan.py verify --naive app-runtime.json --planned app-xray-runtime.
 | build log: `ERROR: pip's dependency resolver does not currently take into account ...` / `pip check` lines | expected when naive-check.txt lists INSTALLED IN A SECOND STEP lines: the same warning your PC had, the build goes on |
 | the image builds, the program says `No module named ...` / `undefined symbol` / `numpy.core.multiarray failed to import` | `xray_look.py --image` (section 10a): every package is imported and each failure gets its reason |
 | `ResolutionImpossible` in a naive build | the requirements file changed after the check: run xray_naive.py again and use the new Dockerfile.naive |
+| `Could not load the Qt platform plugin "xcb" ... even though it was found`, exit code 134 or 139 | the program opened a window (`cv2.imshow`) and a container has no screen. `run-naive` finds the code's own switch (e.g. `if SHOW:` with `SHOW = os.getenv("SHOW", "1") == "1"`) and sets it off - its WINDOWS note at the top says which. No switch in the code: use run-explore / run-load (X-Ray switches windows off), or make the window optional in the code |
+| `[av1 @ ...] Your platform doesn't support hardware accelerated AV1 decoding`, `Failed to get pixel format`, no frames | the video is AV1. OpenCV's Linux wheel has no software AV1 decoder (its own AV1 decoder needs hardware decoding, which a container does not have) - same in OpenCV 4.13 and 5.0. Run `runs\NAME\videos.bat "D:\your folder"`: it checks every video with the image's own OpenCV and converts the ones it cannot read to H.264 (section 4, "Videos"). `naive-check.txt` and `run.env` show each video's codec; with `VIDEOS` an unreadable video is skipped with a message |
+| run-naive: `The program ended with exit code N` | the line below it says what N means (1 = a Python error, 134 / 139 = usually a window without a screen, 137 = stopped after 30 s or out of memory) |
 | `cannot open video: /xin/...` after `VIDEOIO(CV_IMAGES) ... icvExtractPattern` | the video is not at that path INSIDE the container (the OpenCV message is misleading: when FFmpeg cannot open the file, OpenCV tries the name as an image-sequence pattern). Check: `docker run --rm -v "D:\your folder:/xin/video_in" --entrypoint "" IMAGE ls -la /xin/video_in` - is the file listed, with exactly that name? Nothing listed: Docker Desktop cannot see that drive / folder (Settings -> Resources -> File sharing), or the folder path is wrong |
 | build log: `debconf: unable to initialize frontend: Dialog` / `delaying package configuration, since apt-utils is not installed` | harmless notes from apt (no screen to ask questions on). The Dockerfiles set `ARG DEBIAN_FRONTEND=noninteractive`, which removes the first one |
 | anything else | send the log; say which step and the exact command you typed |

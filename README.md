@@ -20,6 +20,7 @@ Python standard library only (Python 3.8+). Nothing to install.
 |   | `run-explore.bat`: same naive image, no time limit, video files loop; look inside, stop with `docker stop -t 60 NAME-explore` (GUIDE section 12) | | compare your own look with the report |
 | look | `xray_look.py` | inside any container | what runs, the files open now, the libraries loaded and the apt / pip package or driver each comes from, network, RAM, GPU; `--watch 5` = what changes; `--image` = missing system libraries, CUDA libraries, packages that installed the same files, does every package import, GPU test (GUIDE section 10) |
 | compare | `compare-images.bat` (xray_look `--inventory` + `--compare`) | containers + your machine | two images side by side: sizes, the apt / pip packages only one has (used in the run or not), where each gets its CUDA libraries (GUIDE section 6.2) |
+| videos | `videos.bat [FOLDER]` (`xray_videos.py check` / `convert`, `xray_ffmpeg.Dockerfile`) | containers | can the image read your videos? each is opened with the image's own OpenCV; the ones it cannot read (AV1 ...) are converted to H.264 into FOLDER\h264 (GUIDE section 4) |
 | 3 | `xray_pkg.py baseline` / `scan` / `facts` | inside containers / your machine | what is installed in the image and what is really needed |
 | 4 | `xray_plan.py plan` / `verify` | your machine | writes a slim Dockerfile, .dockerignore and compose override (or compose.yml + .env.example); checks the new image behaves the same |
 | 5 | `xray_compare.py` | your machine | several projects: one shared base image |
