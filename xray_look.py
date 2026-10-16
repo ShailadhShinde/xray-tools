@@ -12,6 +12,13 @@ Runs INSIDE the container (Linux), Python standard library only. It only reads; 
                                    does every package import (and why not), GPU test
   python xray_look.py --pid 25     only that process          --all   every library, not only a summary
 
+Two images side by side (e.g. the same project on an nvidia/cuda base and on python-slim):
+  python xray_look.py --inventory /out/a.json --label NAME     inside each image: what is in it
+  python xray_look.py --compare a.json b.json [--runtime-a RUN_A.json] [--runtime-b RUN_B.json]  on your PC: sizes,
+        what only one image has (biggest first), CUDA libraries and where each image gets them, and with X-Ray's
+        run of an image (runs/NAME/NAME-runtime.json) whether that run used each package
+  (xray_runfile.py writes compare-images.bat, which does all three)
+
 Get it into the container:
   X-Ray's run files mount the tools at /xray:   docker exec -it NAME python /xray/xray_look.py
   any other container:   docker cp xray_look.py NAME:/tmp/xray_look.py
@@ -26,7 +33,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 CUDA_RE = re.compile(r"lib(cuda|cudart|cublas|cublasLt|cudnn|cufft|curand|cusparse|cusolver|nvrtc|nccl|nvJitLink|"
                      r"nvinfer|onnxruntime_providers_cuda|onnxruntime_providers_tensorrt|torch_cuda|c10_cuda)", re.I)
 DRIVER_RE = re.compile(r"/libcuda\.so|/libnvidia-|/libnvcuvid|/libdxcore|/usr/lib/wsl/")
@@ -387,6 +394,22 @@ def look_image(a):
     else:
         L.append("    MISSING: none - every system library the pip packages ask for is in the image")
     # CUDA libraries in the image, and where they are
+    cud = cuda_libs(sites)
+    L += ["", "  CUDA LIBRARIES IN THE IMAGE:"]
+    L += [f"    {n:<22} {mb(os.path.getsize(p)) if os.path.exists(p) else '?':>8}  {src.of(p).replace(':', ' ', 1):<28} {p}"
+          for n, p in sorted(set(cud))] or ["    none (a CPU image, or the CUDA libraries come with a package not listed)"]
+    if any("site-packages" in p for _n, p in cud) and not os.environ.get("LD_LIBRARY_PATH"):
+        L.append("    note: CUDA libraries from pip (site-packages/nvidia) but no LD_LIBRARY_PATH - torch finds them "
+                 "itself; onnxruntime and others that open them by name need LD_LIBRARY_PATH")
+    L += [""] + same_files_installed(sites)
+    if not a.no_imports:
+        L += [""] + import_test(sites)
+    L += ["", *gpu_test()]
+    print("\n".join(L), flush=True)
+
+
+def cuda_libs(sites):
+    """[(name, real path)] of the main CUDA libraries: the system folders (ldconfig) and the pip wheels (nvidia/*/lib)"""
     cud = []
     lc = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True).stdout if shutil.which("ldconfig") else ""
     for line in lc.splitlines():
@@ -397,16 +420,211 @@ def look_image(a):
         for f in glob.glob(os.path.join(d, "nvidia", "*", "lib", "lib*.so.*")):
             if re.search(r"lib(cudart|cublas|cublasLt|cudnn|cufft|curand|nvrtc)\.so\.\d+$", f):
                 cud.append((os.path.basename(f), f))
-    L += ["", "  CUDA LIBRARIES IN THE IMAGE:"]
-    L += [f"    {n:<22} {mb(os.path.getsize(p)) if os.path.exists(p) else '?':>8}  {src.of(p).replace(':', ' ', 1):<28} {p}"
-          for n, p in sorted(set(cud))] or ["    none (a CPU image, or the CUDA libraries come with a package not listed)"]
-    if any("site-packages" in p for _n, p in cud) and not os.environ.get("LD_LIBRARY_PATH"):
-        L.append("    note: CUDA libraries from pip (site-packages/nvidia) but no LD_LIBRARY_PATH - torch finds them "
-                 "itself; onnxruntime and others that open them by name need LD_LIBRARY_PATH")
-    if not a.no_imports:
-        L += [""] + import_test(sites)
-    L += ["", *gpu_test()]
+    return sorted(set(cud))
+
+
+def canon(n):
+    return re.sub(r"[-_.]+", "-", str(n)).lower()
+
+
+# --------------------------------------------------------------------------- two images side by side
+def inventory(a):
+    """what is in this image, as data for --compare: OS, Python, apt and pip packages with sizes, CUDA libraries,
+    folder sizes (mounted folders not counted)"""
+    import csv
+    import json
+    src = Sources()
+    sites = [p for p in sys.path if p.endswith(("site-packages", "dist-packages")) and os.path.isdir(p)]
+    osr = dict(re.findall(r'^(\w+)="?([^"\n]*)"?$', read("/etc/os-release") or "", re.M))
+    inv = {"tool": "xray-look-inventory", "version": VERSION, "label": a.label or os.environ.get("HOSTNAME", "?"),
+           "os": osr.get("PRETTY_NAME", "?"), "python": {"exe": sys.executable, "version": sys.version.split()[0],
+                                                       "prefix": sys.prefix, "sites": sites},
+           "env": {k: os.environ.get(k, "") for k in ("PATH", "LD_LIBRARY_PATH")}, "user": os.environ.get("USER", ""),
+           "apt": {}, "pip": {}, "cuda": [], "dirs": {}}
+    if shutil.which("dpkg-query"):
+        out = subprocess.run(["dpkg-query", "-W", "-f=${Package}\t${Version}\t${Installed-Size}\n"],
+                             capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            f = line.split("\t")
+            if len(f) == 3:
+                inv["apt"][f[0]] = {"version": f[1], "bytes": int(f[2] or 0) * 1024}
+    for d in sites:
+        for di in glob.glob(os.path.join(d, "*.dist-info")):
+            name, _, ver = os.path.basename(di)[:-10].partition("-")
+            size, tops = 0, set()
+            for row in csv.reader((read(os.path.join(di, "RECORD")) or "").splitlines()):
+                if len(row) >= 3:
+                    size += int(row[2]) if row[2].isdigit() else 0
+                    top = row[0].split("/")[0]
+                    if top and not top.endswith((".dist-info", ".data")) and top != "..":
+                        tops.add(top)
+            inv["pip"][canon(name)] = {"version": ver, "bytes": size, "tops": sorted(tops)}
+    for n, path in cuda_libs(sites):
+        inv["cuda"].append({"lib": n, "path": path, "bytes": os.path.getsize(path) if os.path.exists(path) else 0,
+                            "from": src.of(path)})
+    skip = set(src.mounts) | {"/proc", "/sys", "/dev"}
+    sizes = {}
+    for root, dirs, files in os.walk("/"):
+        dirs[:] = [x for x in dirs if os.path.join(root, x) not in skip]
+        n = 0
+        for f in files:
+            try:
+                st = os.lstat(os.path.join(root, f))
+            except OSError:
+                continue
+            if not os.path.islink(os.path.join(root, f)):
+                n += st.st_size
+        parts = [x for x in root.split("/") if x]
+        for k in range(0, min(len(parts), 3) + 1):
+            key = "/" + "/".join(parts[:k])
+            sizes[key] = sizes.get(key, 0) + n
+    inv["dirs"] = {k: v for k, v in sizes.items() if v >= 1048576}
+    with open(a.inventory, "w", encoding="utf-8") as fh:
+        json.dump(inv, fh, indent=1)
+    print(f"xray_look {VERSION} --inventory: {inv['label']}: {inv['os']}, Python {inv['python']['version']}, "
+          f"{len(inv['apt'])} apt + {len(inv['pip'])} pip packages, {mb(sizes.get('/', 0))} of files -> {a.inventory}")
+
+
+def used_in_run(path, inv):
+    """(apt packages, pip distributions) the X-Ray run in RUNTIME.json loaded"""
+    import json
+    try:
+        with open(path, encoding="utf-8") as fh:
+            o = json.load(fh).get("observations") or {}
+    except (OSError, ValueError):
+        return None
+    apt = {x.get("package") for x in o.get("system_libraries") or [] if x.get("package")}
+    pip = {canon(d) for x in o.get("packages_loaded") or [] for d in x.get("distributions") or []}
+    paths = [str(x.get("path") or "") for x in o.get("system_libraries") or []]
+    for name, e in (inv or {}).get("pip", {}).items():       # libraries loaded from inside a wheel (nvidia/cudnn/lib)
+        if any(re.search(r"/(site|dist)-packages/" + re.escape(t) + "/", p) for t in e.get("tops", []) for p in paths):
+            pip.add(name)
+    return apt, pip
+
+
+def compare(a):
+    """two inventories side by side: sizes, what only one image has (biggest first), the CUDA libraries and where
+    each image gets them, and - with the X-Ray run of an image - whether the run used each thing"""
+    import json
+    A, B = [json.load(open(p, encoding="utf-8")) for p in a.compare]
+    rfiles = [a.runtime_a, a.runtime_b]
+    runs = [used_in_run(p, x) if p else None for p, x in zip(rfiles, (A, B))]
+    tot = lambda d: sum(v["bytes"] for v in d.values())
+    cud = lambda x: sum(c["bytes"] for c in x["cuda"])
+    csrc = lambda x: ", ".join(sorted({c["from"].split(":")[0] for c in x["cuda"]})) or "-"
+    def row(title, va, vb):
+        return f"  {title:<24}{str(va)[:32]:<34}{vb}"
+    L = [f"xray_look {VERSION} --compare", "", row("", "A: " + A["label"], "B: " + B["label"]),
+         row("Linux", A["os"], B["os"]),
+         row("Python", A["python"]["version"] + " " + A["python"]["prefix"],
+             B["python"]["version"] + " " + B["python"]["prefix"]),
+         row("all files", mb(A["dirs"].get("/", 0)), mb(B["dirs"].get("/", 0))),
+         row("apt packages", f"{mb(tot(A['apt']))} ({len(A['apt'])})", f"{mb(tot(B['apt']))} ({len(B['apt'])})"),
+         row("pip packages", f"{mb(tot(A['pip']))} ({len(A['pip'])})", f"{mb(tot(B['pip']))} ({len(B['pip'])})"),
+         row("main CUDA libraries", f"{mb(cud(A))} from {csrc(A)}" if A["cuda"] else "-",
+             f"{mb(cud(B))} from {csrc(B)}" if B["cuda"] else "-"),
+         row("LD_LIBRARY_PATH", A["env"].get("LD_LIBRARY_PATH") or "-", (B["env"].get("LD_LIBRARY_PATH") or "-")[:70])]
+    for p, r, x in zip(rfiles, runs, (A, B)):
+        if p and r is None:
+            L.append(f"  (run file {p} not found or not readable: 'used' is not shown for {x['label']})")
+        elif r:
+            L.append(f"  {x['label']}: 'used' = loaded in the X-Ray run {os.path.basename(p)}")
+    # the folders that differ most
+    keys = set(A["dirs"]) | set(B["dirs"])
+    diff = {k: A["dirs"].get(k, 0) - B["dirs"].get(k, 0) for k in keys if k != "/"}
+    # a folder whose difference is (almost) all in one sub-folder: show only the sub-folder (/opt/venv/lib, not /opt)
+    keys = [k for k in diff if not any(c.startswith(k + "/") and abs(diff[c]) >= 0.95 * abs(diff[k]) > 0 for c in diff)]
+    big = sorted(keys, key=lambda k: -abs(diff[k]))[:8]
+    L += ["", "  FOLDERS THAT DIFFER MOST:"]
+    L += [f"    {k:<40} A {mb(A['dirs'].get(k, 0)) if A['dirs'].get(k) else '-':>9}    B "
+          f"{mb(B['dirs'].get(k, 0)) if B['dirs'].get(k) else '-':>9}" for k in big]
+
+    def mark(kind, name, i):
+        r = runs[i]
+        if not r:
+            return ""
+        return "used in the run" if name in (r[0] if kind == "apt" else r[1]) else "NOT used in the run"
+    rows = []
+    for kind in ("apt", "pip"):
+        for name, e in A[kind].items():
+            if name not in B[kind]:
+                rows.append((e["bytes"], f"only in A  {kind}  {name} {e['version'][:24]}", mark(kind, name, 0)))
+        for name, e in B[kind].items():
+            if name not in A[kind]:
+                rows.append((e["bytes"], f"only in B  {kind}  {name} {e['version'][:24]}", mark(kind, name, 1)))
+    rows.sort(key=lambda r: -r[0])
+    L += ["", f"  WHAT ONLY ONE IMAGE HAS, biggest first ({len(rows)} packages):"]
+    L += [f"    {t:<62}{mb(b):>9}  {m}" for b, t, m in rows[:a.top]]
+    if len(rows) > a.top:
+        L.append(f"    ... {len(rows) - a.top} more, {mb(sum(r[0] for r in rows[a.top:]))} together (--top N shows more)")
+    for side, i in (("A", 0), ("B", 1)):
+        if runs[i]:
+            nu = [r for r in rows if r[1].startswith("only in " + side) and r[2].startswith("NOT")]
+            if nu:
+                L.append(f"    only in {side} and NOT used in its run: {len(nu)} packages, {mb(sum(r[0] for r in nu))}")
+    same_os = A["os"] == B["os"]
+    vers = [(k, n, A[k][n]["version"], B[k][n]["version"]) for k in ("pip", "apt") for n in A[k]
+            if n in B[k] and A[k][n]["version"] != B[k][n]["version"] and (k == "pip" or same_os)]
+    other_os = 0 if same_os else sum(1 for n in A["apt"] if n in B["apt"] and A["apt"][n]["version"] !=
+                                      B["apt"][n]["version"])
+    if vers or other_os:
+        L += ["", f"  IN BOTH, OTHER VERSION ({len(vers) + other_os}):"]
+        L += [f"    {k}  {n:<34} A {va:<24} B {vb}" for k, n, va, vb in vers[:a.top]]
+        if other_os:
+            L.append(f"    + {other_os} apt packages of the Linux itself (two different Linux: {A['os']} / {B['os']})")
+    if A["cuda"] or B["cuda"]:
+        L += ["", "  CUDA LIBRARIES - the same files, from different places:"]
+        libs = sorted({c["lib"] for c in A["cuda"] + B["cuda"]})
+        get = lambda x, l: next((c for c in x["cuda"] if c["lib"] == l), None)
+        for l in libs:
+            ca, cb = get(A, l), get(B, l)
+            fa = f"{ca['from'].replace(':', ' ', 1)} {mb(ca['bytes'])}" if ca else "-"
+            fb = f"{cb['from'].replace(':', ' ', 1)} {mb(cb['bytes'])}" if cb else "-"
+            L.append(f"    {l:<20} A {fa[:40]:<42} B {fb}")
     print("\n".join(L), flush=True)
+
+
+def same_files_installed(sites):
+    """files that two pip packages BOTH installed, with different content (opencv-python + opencv-python-headless both
+    write cv2/): the one installed last overwrote the other's files - a mixed package. From each package's RECORD
+    (path + hash of every file it installed); the file on disk shows which package's version is there now."""
+    import base64
+    import csv
+    import hashlib
+    owners = {}
+    for d in sites:
+        for rec in glob.glob(os.path.join(d, "*.dist-info", "RECORD")):
+            dist = os.path.basename(os.path.dirname(rec))[:-10].replace("-", " ", 1)
+            for row in csv.reader((read(rec) or "").splitlines()):
+                if len(row) < 3 or not row[1] or not row[2] or row[2] == "0":
+                    continue
+                top = row[0].split("/")[0]
+                if top.endswith((".dist-info", ".data")) or top == ".." or "__pycache__" in row[0]:
+                    continue
+                owners.setdefault(os.path.normpath(os.path.join(d, row[0])), []).append((dist, row[1]))
+    groups = {}
+    for path, ds in owners.items():
+        if len({x for x, _h in ds}) > 1 and len({h for _x, h in ds}) > 1:
+            groups.setdefault(tuple(sorted({x for x, _h in ds})), []).append((path, ds))
+    L = ["  PACKAGES THAT INSTALLED THE SAME FILES (the one installed last overwrote the other's: a mixed install):"]
+    if not groups:
+        return L + ["    none"]
+    for dists, items in sorted(groups.items()):
+        now = {}
+        for path, ds in items:
+            try:
+                with open(path, "rb") as fh:
+                    h = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(fh.read()).digest()).rstrip(b"=").decode()
+            except OSError:
+                continue
+            for x, hx in ds:
+                if hx == h:
+                    now[x] = now.get(x, 0) + 1
+        tops = sorted({os.path.relpath(p, next(d for d in sites if p.startswith(d))).split(os.sep)[0] for p, _ in items})
+        L.append(f"    {' + '.join(dists)}: {len(items)} files in {', '.join(t + '/' for t in tops)} differ")
+        L.append("      on disk now: " + (", ".join(f"{n} from {x}" for x, n in sorted(now.items())) or "?") +
+                 "  -> keep ONE of them in the requirements (xray_naive.py does it: --keep NAME)")
+    return L
 
 
 SKIP_DISTS = {"pip", "setuptools", "wheel", "distribute"}
@@ -556,10 +774,20 @@ def main(argv=None):
     ap.add_argument("--pid", type=int, help="only this process")
     ap.add_argument("--all", action="store_true", help="list every library")
     ap.add_argument("--no-imports", action="store_true", help="--image without the import test (it takes a while)")
+    ap.add_argument("--inventory", metavar="FILE.json", help="(inside an image) write what is in it, for --compare")
+    ap.add_argument("--label", help="--inventory: the image's name in the comparison")
+    ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), help="(on your PC) two inventories side by side")
+    ap.add_argument("--runtime-a", metavar="RUNTIME.json", help="--compare: X-Ray's run of image A (marks what it used)")
+    ap.add_argument("--runtime-b", metavar="RUNTIME.json", help="--compare: X-Ray's run of image B (marks what it used)")
+    ap.add_argument("--top", type=int, default=40, help="--compare: how many rows per list (default 40)")
     a = ap.parse_args(argv)
+    if a.compare:          # works anywhere, Windows too: it only reads two files
+        return compare(a)
     if not os.path.isdir("/proc/self"):
         sys.exit("xray_look runs inside a Linux container: docker exec -it NAME python /xray/xray_look.py")
-    if a.image:
+    if a.inventory:
+        inventory(a)
+    elif a.image:
         look_image(a)
     elif a.watch:
         watch(a)

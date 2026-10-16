@@ -100,6 +100,8 @@ The pip packages list: `requirements.txt`, or another name. Look at the Dockerfi
 - Dockerfile `FROM python:3.9-slim` -> 3.9.
 - Dockerfile `FROM nvidia/cuda:...ubuntu24.04` + `apt install python3` -> the Ubuntu one (24.04 = 3.12, 22.04 = 3.10).
 - A PyCharm venv: `.venv/pyvenv.cfg`, line `version`.
+- Give it to xray_naive.py as `--python 3.11` (for example). 3.12 is only the default; versions and wheels depend on
+  the Python, so `naive-check.txt` warns when the PC running the check has another one.
 
 ### 2.5 What does the app need from outside?
 You will confirm this with X-Ray, but write down what you already know:
@@ -232,6 +234,7 @@ minute, without installing anything (pip only reads the package index - it needs
 | INSTALLED IN A SECOND STEP | a line pip refuses to install together with another one: torch `+cu126` pins its own `nvidia-cublas-cu12` version (12.6.x) but your file pins `nvidia-cublas-cu12==12.9.2.10`; `torchaudio 2.11.0 depends on torch==2.11.0` but your file pins torch 2.12.1 | installed **exactly as pinned**, after everything else, with `pip install --no-deps` (Dockerfile.naive section 3c). Nothing is left out, no version is changed |
 | ADDED | what a second-step package needs that is not in your file and nothing else installs (`--no-deps` would skip it) | installed right after it; `-c` keeps every version installed before exactly as it is |
 | LISTED TWICE | the same package on two lines | the line that installs (the newer one if both) is kept, the other is reported |
+| SAME FILES | two DIFFERENT packages that install the same files: `opencv-python` + `opencv-python-headless` (both write `cv2/`), `PyJWT` + `jwt`, `pymongo` + `bson` | found from each wheel's file list (read from the package index, not downloaded): both in one image = the one installed last overwrites the other's files. One is kept - the one with the most files there, or the one you name with `--keep NAME`; the report says which and why |
 | a pin with no Linux file / a local path | `pkg @ file:///C:/...` or a version that has no Linux file at all | installed by name / the nearest version that has a Linux file (the only way it can work on Linux) |
 | CANNOT BE INSTALLED TOGETHER | a clash that none of the above solves | shows pip's reason (the whole file installed at once, like the build) |
 
@@ -469,6 +472,18 @@ docker images | grep -e app-xray -e NAIVE_IMAGE_NAME
 With compose: `docker compose -f docker-compose.yml -f PATH/TO/plans/app/compose.xray.yml build SERVICE`
 (the exact command is written at the top of `compose.xray.yml`).
 
+**What makes the difference - two images side by side.** `runs\NAME\compare-images.bat` (written by xray_runfile.py)
+looks inside both images and writes `runs\NAME\compare\compare.txt`: Linux and Python of each, the sizes of apt and
+pip packages, the folders that differ most, every package only one image has (biggest first) - with "used in the run" /
+"NOT used in the run" from each image's X-Ray run - versions that differ, and where each image gets each CUDA library
+(apt package of the base image, or a pip wheel). Default: NAME-naive against NAME-slim. Any two images:
+```bat
+runs\NAME\compare-images.bat NAME-slim-auto NAME-slim
+```
+That is how you see why one base is smaller for one project and bigger for another: e.g. an nvidia/cuda base brings
+cuSOLVER, cuSPARSE, NCCL, NPP (about 1.4 GB) that onnxruntime never loads; a python base with torch brings torch's own
+CUDA wheels, so adding an nvidia/cuda base under it would be a second copy.
+
 ### 6.3 Verify: same test, new image
 Repeat **exactly** the Step 2 run with `app-xray` instead of the old image and a new folder `trace-app-xray`
 (the slim image runs as a normal user, so `chmod 777 trace-app-xray` first). Then:
@@ -504,6 +519,8 @@ python3 xray_plan.py verify --naive app-runtime.json --planned app-xray-runtime.
 | build log: `ERROR: pip's dependency resolver does not currently take into account ...` / `pip check` lines | expected when naive-check.txt lists INSTALLED IN A SECOND STEP lines: the same warning your PC had, the build goes on |
 | the image builds, the program says `No module named ...` / `undefined symbol` / `numpy.core.multiarray failed to import` | `xray_look.py --image` (section 10a): every package is imported and each failure gets its reason |
 | `ResolutionImpossible` in a naive build | the requirements file changed after the check: run xray_naive.py again and use the new Dockerfile.naive |
+| `cannot open video: /xin/...` after `VIDEOIO(CV_IMAGES) ... icvExtractPattern` | the video is not at that path INSIDE the container (the OpenCV message is misleading: when FFmpeg cannot open the file, OpenCV tries the name as an image-sequence pattern). Check: `docker run --rm -v "D:\your folder:/xin/video_in" --entrypoint "" IMAGE ls -la /xin/video_in` - is the file listed, with exactly that name? Nothing listed: Docker Desktop cannot see that drive / folder (Settings -> Resources -> File sharing), or the folder path is wrong |
+| build log: `debconf: unable to initialize frontend: Dialog` / `delaying package configuration, since apt-utils is not installed` | harmless notes from apt (no screen to ask questions on). The Dockerfiles set `ARG DEBIAN_FRONTEND=noninteractive`, which removes the first one |
 | anything else | send the log; say which step and the exact command you typed |
 
 ## 8. What to send to Claude, and what never to send
@@ -557,8 +574,11 @@ docker run --rm --gpus all -v "%CD%:/x:ro" --entrypoint "" IMAGE python /x/xray_
 the apt package each comes from, MISSING ones with the `apt-get install` that adds them, the CUDA libraries in the
 image, then **DOES EVERY PACKAGE IMPORT?** - every pip package is imported in a separate Python, the way your code
 does, and each failure gets its reason (`built for NumPy 1.x, but NumPy 2.x is installed`, `'six' is missing`,
-`compiled for another version of torch`, `a system library is missing`), and last a GPU test per framework (torch:
-`GPU: True` + the card; onnxruntime: its providers).
+`compiled for another version of torch`, `a system library is missing`), packages that installed the same files
+(two OpenCVs), and last a GPU test per framework (torch: `GPU: True` + the card; onnxruntime: its providers).
+
+**Two images side by side** (the same project on two bases, naive against slim ...): `compare-images.bat`
+(section 6.2). By hand it is `xray_look.py --inventory` inside each image, then `xray_look.py --compare a.json b.json`.
 
 ### 10b. By hand - the same, with standard commands (no X-Ray needed)
 
@@ -796,3 +816,65 @@ With the GPU (`docker run --rm -it --gpus all ...`): `ldconfig -p | grep libcuda
 a folder under `/usr/lib/wsl`). Hide `libcudnn.so.9` the same way and ask onnxruntime for CUDA: it prints
 `Failed to load library ... libcudnn.so.9` and runs on the CPU. That is the silent slowdown X-Ray's
 "requested vs active" line catches.
+
+
+## 14. How it fits together - the words behind the Dockerfile lines
+
+**Image, container, layer.** An image is a set of folders (a small Linux + your program). Every `RUN` / `COPY` line
+adds one layer on top. Docker keeps the layers and reuses one when nothing above it changed - that is why the big,
+rarely changing packages (torch, onnxruntime) get their own `RUN` first: change a small package later and only the
+lines from there on are rebuilt. A container is an image that runs.
+
+**Folders like `/usr/local/cuda/lib64`.** Every path in a Dockerfile or in the run files is a folder INSIDE the
+image / container, never on your PC (except the left side of a `-v` mount). Linux keeps compiled libraries (`.so`
+files, like `.dll` on Windows) in "lib" folders: `/usr/lib/x86_64-linux-gnu` (Debian / Ubuntu's standard place),
+`/usr/local/cuda/lib64` (where the nvidia/cuda base puts CUDA; `lib64` = the 64-bit libraries), `site-packages/`
+(where pip puts Python packages, some with their own `.so` files inside).
+
+**How a library is found.** A program asks for a library by NAME (`libcudnn.so.9`). Linux looks in: the folders
+written into the library that asks (RPATH - torch uses this for its own nvidia-* wheels, so torch needs no setting),
+then `LD_LIBRARY_PATH`, then the standard folders. Nothing is copied from the PC and nothing is compiled when the
+program runs: not found = `ImportError: ... cannot open shared object file` (cv2), or a silent switch to the CPU
+(onnxruntime). The compiler (`gcc`) is only ever used while BUILDING, by pip, for a package that has no ready-made
+Linux wheel. Examples of system libraries packages expect: `libGL.so.1` (opencv-python, apt `libgl1`),
+`libgomp.so.1` (lightgbm, `libgomp1`), `libpq.so.5` (psycopg2, `libpq5`), `libportaudio.so.2` (pyaudio).
+
+**apt and pip are different installers.** apt installs Linux packages from Debian / Ubuntu: libraries (`libgl1`),
+programs (`ffmpeg`), Python itself (`python3`). pip installs Python packages from PyPI (`opencv-python`,
+`onnxruntime-gpu`). `apt-get update` downloads apt's package list (about 40 MB); `rm -rf /var/lib/apt/lists/*` deletes
+that list again in the same `RUN`, so it does not stay in the image. Installed packages are not touched.
+"System libraries" = the `.so` files that came with apt packages (the base image's own, plus the apt line).
+
+**CUDA libraries** (libcudart, cuBLAS, cuDNN, cuFFT ...) are made by NVIDIA. Every GPU framework (torch, onnxruntime,
+tensorflow ...) calls them, and each framework version is built for certain versions of them. They reach an image in
+one of two ways - both INSIDE the image, so it runs on any PC with an NVIDIA GPU: NVIDIA's apt packages (the
+`nvidia/cuda:...-runtime` base image has them in `/usr/local/cuda`), or NVIDIA's pip wheels (`nvidia-cublas-cu12` ...,
+which torch depends on, and onnxruntime-gpu gets with `[cuda,cudnn]`). The same files, packed two ways. The only part
+from your PC is the DRIVER (`libcuda.so`, `nvidia-smi`): `docker run --gpus all` mounts it in.
+
+**Will the GPU work on another PC?** Three things must fit:
+1. the driver on that PC: `nvidia-smi` (top right, "CUDA Version") must be at least the CUDA of the image
+   (CUDA 12.8 needs driver 570 or newer);
+2. the CUDA libraries must know the card: CUDA 12.8 is the first that knows RTX 50xx (Blackwell);
+3. the framework's own GPU code must be built for the card: torch `+cu126` stops at RTX 40xx (so it does not run on
+   an RTX 50xx even on a CUDA 12.8 base); `+cu128` includes RTX 50xx. An RTX 3060 works with all of them.
+`docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi` checks the first one on any PC: an
+NVIDIA GPU, a driver for CUDA 12.8, and Docker that can pass the GPU (Windows: Docker Desktop with WSL 2; Linux: the
+NVIDIA Container Toolkit). Errors: `could not select device driver` = no GPU support in Docker; `unsatisfied
+condition: cuda>=12.8` = driver too old (use an older tag like `12.4.1-base-ubuntu22.04` to test, and an image with
+that CUDA).
+
+**Python in an image.** `python:3.12-slim` = Debian + Python 3.12 + pip. `nvidia/cuda` images have no Python at all
+(a program like any other: it has to be installed). Ubuntu's `python3` (apt) comes without pip, and since Ubuntu 23.04
+pip refuses to install into it (`externally-managed-environment`: apt owns those files). So the Dockerfile makes a
+virtual environment - a folder (`/opt/venv`) with its own `python`, `pip` and `site-packages`, created by Python's
+own `venv` module (like the `.venv` PyCharm makes). `ENV PATH=/opt/venv/bin:$PATH` puts it first, so `python` and
+`pip` mean the venv's in every later line and in the running container; nothing is copied. Other tools do the same
+job (virtualenv, conda, uv); `venv` comes with Python.
+
+**Two packages, the same files.** pip installs every package into one folder. `opencv-python` and
+`opencv-python-headless` both put their files into `cv2/`; with both in the requirements the one installed last
+overwrites the other's files. `xray_naive.py` keeps one (section 3b, SAME FILES); `xray_look.py --image` shows it in
+a built image ("PACKAGES THAT INSTALLED THE SAME FILES"). Note: opencv-python's wheel brings its own FFmpeg
+(`opencv_python.libs/libavcodec...`) - no system FFmpeg is needed to read videos; the non-headless one needs the X11 /
+OpenGL libraries from apt (`libgl1`, `libxcb1` ...) even when no window is ever opened.

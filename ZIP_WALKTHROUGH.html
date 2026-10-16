@@ -369,12 +369,12 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
 python --version
 python -m pip install -U pip
 findstr /b VERSION xray_naive.py xray_static.py xray_trace.py xray_plan.py xray_runfile.py xray_look.py</pre></div>
-  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.1"
+  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.2"
 xray_static.py:VERSION = "0.5.10"
 xray_trace.py:VERSION = "0.2.7"
-xray_plan.py:VERSION = "0.1.9"
-xray_runfile.py:VERSION = "0.2.0"
-xray_look.py:VERSION = "0.1.1"</pre></div>
+xray_plan.py:VERSION = "0.1.10"
+xray_runfile.py:VERSION = "0.2.1"
+xray_look.py:VERSION = "0.1.2"</pre></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; Docker Desktop running</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi</pre></div>
 
@@ -385,7 +385,7 @@ docker image ls</pre></div>
   <div class="notes">
     <div class="why"><h3 class="block-title">Why</h3><ul>
       <li><strong>pip update:</strong> when the Python on your PC is older than 3.12, pip 24.1 and older check package versions against your PC's Python instead of the image's 3.12, and step 2 shows wrong versions. The tool warns about it; updating pip takes a few seconds and avoids it.</li>
-      <li><strong>nvidia-smi in a container</strong> proves three things at once: Docker runs, the GPU reaches containers, and your driver is new enough for CUDA 12.8 images.</li>
+      <li><strong>nvidia-smi in a container</strong> proves three things at once: Docker runs, the GPU reaches containers, and your driver is new enough for CUDA 12.8 images. The same command works on any PC with an NVIDIA GPU, a driver 570 or newer, and Docker that can pass the GPU (Windows: Docker Desktop with WSL 2; Linux: the NVIDIA Container Toolkit). Nothing in it is specific to your RTX 3060.</li>
       <li>That <code>nvidia-smi</code> is not in the image. <code>--gpus all</code> mounts it in from your Windows driver. You will meet this again in step 5.</li>
       <li><strong>Clean start:</strong> results from last time must not mix with today's. "No such image" is fine. Keep any <code>nvidia/cuda</code> image you already have: Docker reuses it and does not download 3 GB again.</li>
     </ul></div>
@@ -459,6 +459,8 @@ notepad runs\zip\naive\Dockerfile.naive</pre></div>
 
   <div class="callout"><p><strong>Lines pip will not install together</strong> (the error the worker's build had). A <code>pip freeze</code> comes from a PC where packages were installed at different times, e.g. torch first, newer <code>nvidia-*</code> later; pip only warned there. A Docker build installs the whole file in ONE <code>pip install</code>, and pip refuses the same combination. naive-check.txt then lists those lines as <code>INSTALLED IN A SECOND STEP, exactly this version - pip says: ...</code>, and Dockerfile.naive installs them in section 3c, after everything else, with <code>--no-deps</code>: the same way your PC got them. Nothing is left out, no version is changed; what they need that is not in your file is added right after (<code>ADDED</code>). The build log then shows pip's warning and <code>pip check</code> lines, the same your PC had; the build goes on. Whether the program works with those versions: <code>run-naive</code> (step 4), <code>xray_look.py --image</code> (step 5) and the runs.</p></div>
 
+  <div class="callout"><p><strong>Two packages that install the same files</strong>, e.g. <code>opencv-python</code> and <code>opencv-python-headless</code> in one file: both write into <code>cv2/</code>, so the one installed last overwrites the other's files. The tool reads each wheel's file list from the package index (a few KB, not the download) and finds such pairs for any packages (<code>PyJWT</code> + <code>jwt</code>, <code>pymongo</code> + <code>bson</code> ...). It keeps one, says which and why under HANDLED, and <code>--keep NAME</code> picks the other. <strong>Python version:</strong> the check runs for <code>--python</code> (default 3.12). If the project runs on another Python on its PC, pass that one; naive-check.txt warns when the PC running the check has a different Python.</p></div>
+
   <div class="prose"><p>For every line of the requirements, the tool asks pip which file it would download for Linux and Python 3.12. Nothing gets installed. From those answers it writes the Dockerfile. Read naive-check.txt first, then the Dockerfile next to the explanations below.</p></div>
 
   <div class="out"><div class="out-bar">Practice run, naive-check.txt</div><pre>OK - a prebuilt Linux wheel exists (4):
@@ -487,11 +489,11 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
       </div>
       <div class="why"><ul>
         <li>onnxruntime-gpu holds onnxruntime's own GPU code, but not NVIDIA's CUDA libraries. When you ask for the GPU, it opens <code>libcudart</code>, <code>libcublas</code>, <code>libcufft</code>, <code>libcurand</code>, <code>libnvrtc</code> and <code>libcudnn</code> by name. No package in the requirements brings them, so the base image has to.</li>
-        <li><strong>12.8.1</strong>: runs on every current RTX card, RTX 50xx included. Needs driver 570+ (step 0 checked that).</li>
+        <li><strong>12.8.1</strong>: these CUDA libraries know every current RTX card, RTX 50xx included (12.8 is the first CUDA that knows Blackwell). Needs driver 570+ (step 0 checked that). A framework must also be built for the card: torch <code>+cu126</code> is not built for RTX 50xx, whatever CUDA the base has; the naive check notes that. Your RTX 3060 works with all of them.</li>
         <li><strong>cudnn</strong>: cuDNN 9 is included; onnxruntime needs <code>libcudnn.so.9</code>.</li>
         <li><strong>runtime</strong>: libraries only. <code>-devel</code> adds the compiler nvcc and headers, about 5 GB more, needed only to compile CUDA code. <code>-base</code> has only libcudart, too little.</li>
         <li><strong>ubuntu24.04</strong>: its Python is 3.12, the version the check ran for.</li>
-        <li><strong>ENV</strong>: prints reach the log at once; no .pyc files; apt never stops to ask a question.</li>
+        <li><strong>ENV</strong>: prints reach the log at once; no .pyc files. <strong>ARG DEBIAN_FRONTEND=noninteractive</strong>: apt never stops to ask a question while building (no "debconf: unable to initialize frontend" lines); ARG exists only during the build.</li>
       </ul></div>
     </div>
 
@@ -677,6 +679,7 @@ zip-naive:latest       9.01GB          3.4GB</pre></div>
       <li>The last lines list zip-naive with a size. Write it down: this is your "before".</li>
       <li class="bad">Nothing listed: the build failed. The reason is at the end of <code>runs\zip\build.log</code>.</li>
       <li><code>ERROR: pip's dependency resolver does not currently take into account ...</code> in build.log, with a build that finished: the second-step warning from step 2. Expected.</li>
+      <li><code>debconf: delaying package configuration, since apt-utils is not installed</code>: a harmless note from apt. Expected.</li>
     </ul></div>
   </div>
 
@@ -1092,6 +1095,34 @@ nvidia-cudnn-cu12 9.27.0.42    nvidia-cublas-cu12 12.9.2.10    onnxruntime-gpu 1
       <li class="bad">Otherwise go back: <code>docker tag zip-slim-auto zip-slim</code>; the plan is in <code>runs\zip\plan-auto</code>.</li>
     </ul></div>
   </div>
+
+  <h3 class="block-title">What exactly is different: the two images side by side</h3>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\compare-images.bat zip-slim-auto zip-slim
+runs\zip\compare-images.bat zip-naive zip-slim</pre></div>
+  <div class="prose"><p>It looks inside both images and writes <code>runs\zip\compare\compare.txt</code>. Without names it compares zip-naive with zip-slim and marks, from each image's X-Ray run, which packages the run used.</p></div>
+  <div class="out"><div class="out-bar">Practice run: the naive image (nvidia/cuda base) against the same program on python:3.12-slim with CUDA from pip (shortened)</div><pre>                          A: zip-naive                      B: zip-pipcuda
+  Linux                   Ubuntu 24.04.1 LTS                Debian GNU/Linux 13 (trixie)
+  all files               5,314 MB                          3,629 MB
+  apt packages            4,515 MB (186)                    122 MB (87)
+  pip packages            709 MB (12)                       3,451 MB (19)
+  main CUDA libraries     1,325 MB from apt                 1,354 MB from pip
+
+  WHAT ONLY ONE IMAGE HAS, biggest first (120 packages):
+    only in B  pip  nvidia-cudnn-cu12 9.27.0.42                    1,168 MB
+    only in A  apt  libcudnn9-cuda-12 9.8.0.87-1                     999 MB  used in the run
+    only in A  apt  libcublas-12-8 12.8.4.1-1                        829 MB  used in the run
+    only in B  pip  nvidia-cublas-cu12 12.9.2.10                     816 MB
+    only in A  apt  libcusolver-12-8 11.7.3.90-1                     384 MB  NOT used in the run
+    only in A  apt  libcusparse-12-8 12.5.8.93-1                     369 MB  NOT used in the run
+    only in A  apt  libnccl2 2.25.1-1+cuda12.8                       366 MB  NOT used in the run
+    only in A  apt  libnpp-12-8 12.3.3.100-1                         305 MB  NOT used in the run
+    ...
+    only in A and NOT used in its run: 91 packages, 1,986 MB
+
+  CUDA LIBRARIES - the same files, from different places:
+    libcublasLt.so.12    A apt libcublas-12-8 717 MB         B pip nvidia_cublas_cu12 715 MB
+    libcudnn.so.9        A apt libcudnn9-cuda-12 122 KB      B pip nvidia_cudnn_cu12 130 KB  ...</pre></div>
+  <div class="prose"><p>Read it like this: both images carry the same CUDA files, packed as apt packages in A and as pip wheels in B. A is bigger because its base image also brings CUDA parts this program never loads (cuSOLVER, cuSPARSE, NCCL, NPP: about 2 GB, "NOT used in the run"). For a project with torch it can go the other way: torch's pip wheels already bring CUDA, so an nvidia/cuda base under it is a second copy. The comparison shows which case you have, with sizes.</p></div>
 </section>
 
 <!-- ============================================================ STEP 11 -->
@@ -1138,7 +1169,7 @@ cd /d "«X»"</pre></div>
     <li><code>runs\zip\step2-needs.txt</code> and <code>step2-cpu-needs.txt</code>, plus the last 15 lines of <code>step2.log</code> and <code>step2-cpu.log</code>.</li>
     <li>Your list from step 7 (the libraries the GPU run loaded), and <code>runs\zip\explore\needs.txt</code>.</li>
     <li><code>step3.txt</code>, <code>step4.txt</code>, and <code>verify.txt</code> from both slim runs.</li>
-    <li>The output of <code>xray_look.py --image</code> (step 5A) for each image you built.</li>
+    <li>The output of <code>xray_look.py --image</code> (step 5A) for each image you built, and <code>runs\zip\compare\compare.txt</code> (step 10).</li>
     <li>Anything that surprised you in step 5. Those questions are the best part of the day.</li>
   </ol>
 </section>
@@ -1165,6 +1196,8 @@ cd /d "«X»"</pre></div>
         <tr><td>inside: <code>ls: cannot access '/proc//fd'</code></td><td><code>PID</code> is empty: run the <code>PID=...</code> line first, or type the number (<code>PID=25</code>).</td></tr>
         <tr><td><code>ResolutionImpossible</code> / <code>Cannot install ... conflicting dependencies</code> in a naive build</td><td>The Dockerfile.naive is from before this version, or the requirements changed after the check: step 2 again, copy the new Dockerfile.naive. The second step (3c) handles these lines.</td></tr>
         <tr><td>The image builds, the program says <code>No module named ...</code>, <code>undefined symbol</code>, <code>numpy.core.multiarray failed to import</code></td><td><code>xray_look.py --image</code> (step 5A): every package is imported and each failure gets its reason.</td></tr>
+        <tr><td><code>VIDEOIO(CV_IMAGES) ... icvExtractPattern</code> then <code>cannot open video: /xin/...</code></td><td>The video is not at that path inside the container. The OpenCV message is misleading: when FFmpeg cannot open the file, OpenCV tries the name as an image-sequence pattern. Check: <code>docker run --rm -v "D:\your folder:/xin/video_in" --entrypoint "" zip-naive ls -la /xin/video_in</code>. Is the file listed with exactly that name? Nothing listed: Docker Desktop cannot see that drive or folder (Settings &rarr; Resources &rarr; File sharing), or the path is wrong.</td></tr>
+        <tr><td>Two OpenCV packages in one image (<code>opencv-python</code> + <code>opencv-python-headless</code>)</td><td>Step 2 keeps one (SAME FILES). In a built image, <code>xray_look.py --image</code> shows "PACKAGES THAT INSTALLED THE SAME FILES". opencv-python's wheel brings its own FFmpeg; no system FFmpeg is needed to read videos.</td></tr>
         <tr><td>A run with <code>RUN_SECONDS</code> wrote no results file</td><td>The program writes it only at its end, and the time limit stopped it first: <code>RUN_SECONDS=0</code>, <code>LOOP=0</code>.</td></tr>
         <tr><td>A Traceback that mentions an <code>xray_*.py</code> file</td><td>An X-Ray bug: send the traceback.</td></tr>
       </tbody>

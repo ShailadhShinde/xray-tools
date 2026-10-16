@@ -51,7 +51,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Linux x86_64 platform tags (pip matches the listed tags exactly; pure-Python "any" wheels always match)
@@ -433,6 +433,117 @@ def sdist_sources(url, size):
     return sorted({lang for pat, lang in SRC_LANG for n in names if re.search(pat, n, re.I)})
 
 
+def wheel_files(url, size=None):
+    """{path: (crc32, size)} of the files in a wheel, read from the zip's table of contents (at the END of the file)
+    with HTTP Range requests - some KB, not the whole wheel (a wheel under 1 MB is read whole). None when the index
+    does not allow it."""
+    import struct
+    import urllib.request
+    small = 1024 * 1024
+
+    def get(rng):
+        req = urllib.request.Request(url, headers={"Range": rng, "User-Agent": "xray-naive"} if rng else
+                                     {"User-Agent": "xray-naive"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            if r.status == 206:
+                total = re.search(r"/(\d+)$", r.headers.get("Content-Range") or "")
+                return r.read(), int(total.group(1)) if total else None
+            data = r.read(small + 1)         # no range: only a small file is read whole, a big one is not downloaded
+            return (data, len(data)) if len(data) <= small else (None, None)
+    try:
+        if size and size <= small:
+            tail, total = get(None)
+        else:
+            try:
+                tail, total = get("bytes=-65558")
+            except urllib.error.HTTPError as e:     # 416: the file is smaller than the range asked for
+                if e.code != 416:
+                    return None
+                tail, total = get(None)
+        if not tail or not total:
+            return None
+        i = tail.rfind(b"PK\x05\x06")           # end of central directory
+        if i < 0:
+            return None
+        _s, _d, _c, _n1, n, cd_size, cd_off, _cl = struct.unpack("<IHHHHIIH", tail[i:i + 22])
+        if 0xFFFFFFFF in (cd_size, cd_off) or n == 0xFFFF:      # zip64
+            j = tail.rfind(b"PK\x06\x06", 0, i)
+            if j < 0:
+                return None
+            n, cd_size, cd_off = struct.unpack("<QQQ", tail[j + 32:j + 56])
+        start = total - len(tail)
+        if cd_off >= start:
+            cd = tail[cd_off - start:cd_off - start + cd_size]
+        else:
+            cd, _t = get(f"bytes={cd_off}-{cd_off + cd_size - 1}")
+            if not cd:
+                return None
+        files, pos = {}, 0
+        while pos + 46 <= len(cd) and cd[pos:pos + 4] == b"PK\x01\x02":
+            crc, _cs, size, ln, lx, lc = struct.unpack("<IIIHHH", cd[pos + 16:pos + 34])
+            name = cd[pos + 46:pos + 46 + ln].decode("utf-8", "replace")
+            pos += 46 + ln + lx + lc
+            if not name.endswith("/"):
+                files[name] = (crc, size)
+        return files or None
+    except Exception:
+        return None
+
+
+def same_files(results, keep_names):
+    """two lines whose wheels contain the SAME file with different content (opencv-python + opencv-python-headless both
+    write cv2/; pymongo + bson both write bson/): pip installs both into one folder, and the one installed last
+    overwrites the other's files - a mixed package that may not work. One of them is kept:
+    the one named with --keep, else the one with the most files in the shared folders (it has what the other has),
+    else the bigger wheel. -> report lines"""
+    live = [r for r in results if r["status"] not in SKIP and r.get("files")]
+    owners = {}
+    for r in live:
+        for path, (crc, size) in r["files"].items():
+            top = path.split("/")[0]
+            if size and not top.endswith((".dist-info", ".data")):
+                owners.setdefault(path, []).append((r, crc))
+    parent = {id(r): id(r) for r in live}
+
+    def root(x):
+        while parent[x] != x:
+            x = parent[x]
+        return x
+    shared = {}
+    for path, rs in owners.items():
+        if len({id(r) for r, _c in rs}) > 1 and len({c for _r, c in rs}) > 1:     # same path, different content
+            ids = sorted({id(r) for r, _c in rs})
+            for x in ids[1:]:
+                parent[root(x)] = root(ids[0])
+            shared.setdefault(ids[0], set()).add(path)
+    groups = {}
+    for r in live:
+        groups.setdefault(root(id(r)), []).append(r)
+    out = []
+    keep_names = {canon(k) for k in keep_names}
+    for g in groups.values():
+        if len(g) < 2:
+            continue
+        paths = set().union(*(shared.get(id(r), set()) for r in g))
+        tops = sorted({x.split("/")[0] for x in paths})
+        inside = lambda r: sum(1 for x in r["files"] if x.split("/")[0] in tops)
+        named = [r for r in g if r["name"] in keep_names]
+        keep = named[0] if named else max(g, key=lambda r: (inside(r), (r.get("k") or {}).get("size") or 0,
+                                                             -r["line"]))
+        how = ("you chose --keep" if named else
+               f"it has the most files there ({inside(keep)} against " +
+               ", ".join(str(inside(r)) for r in g if r is not keep) + ")")
+        for r in g:
+            if r is keep:
+                continue
+            r.update(status="DROPPED", why=f"installs the same files as line {keep['line']} {keep['raw']} "
+                                           f"({len(paths)} files in {', '.join(t + '/' for t in tops)}): both in one image "
+                                           f"= the one installed last overwrites the other; kept line {keep['line']}, "
+                                           f"{how}; to keep this one instead: --keep {r['name']}")
+            out.append(f"line {r['line']}: {r['raw']}  LEFT OUT - {r['why']}")
+    return out
+
+
 def classify(pick, name, raw):
     """what kind of file pip picked: pure wheel / binary wheel / heavy / sdist (+ what building it needs),
     the download size, and where a GPU package gets CUDA from"""
@@ -540,6 +651,9 @@ def check_one(item, py, opts, index=None):
         if want.get("pick"):
             res["k"] = classify(want["pick"], name, raw)
             cuda_size(res["k"], py, opts, cu_index)
+            url = ((want["pick"].get("download_info") or {}).get("url") or "").split("#")[0]
+            if url.startswith("http") and url.endswith(".whl"):
+                res["files"] = wheel_files(url, res["k"].get("size"))
         return res
     if ok is None:
         res.update(status="UNCHECKED", why=f"could not reach the package index: {out[-160:]}")
@@ -627,6 +741,35 @@ def kind_table(results, py, d=None):
     if d and d.get("notes"):
         T += [""] + ["  NOTE " + x for x in d["notes"]]
     return T + [""]
+
+
+def base_ways(d, gpu, py):
+    """comment lines for section 1: the other ways it could be done, and why this one"""
+    L = []
+    if gpu:
+        on_base = d["base"].startswith("nvidia/")
+        L += ["# How CUDA (libcudart, cuBLAS, cuDNN ...) gets into an image - only from INSIDE the image, so it runs on",
+              "# every PC that has an NVIDIA driver:",
+              "#   a) the base image: nvidia/cuda:<CUDA>-cudnn-runtime-<Ubuntu> = NVIDIA's apt packages in /usr/local/cuda"
+              + ("   <- USED HERE" if on_base else ""),
+              "#   b) NVIDIA's pip wheels (nvidia-cublas-cu12, nvidia-cudnn-cu12 ...): torch depends on them; for"
+              " onnxruntime-gpu", "#      write onnxruntime-gpu[cuda,cudnn] on python:X-slim (X-Ray Step 4: --gpu-base pip)"
+              + ("" if on_base else "   <- USED HERE"),
+              "#   c) from your PC: does not work - Windows has .dll files, a Linux container needs .so files, and",
+              "#      another PC has other folders. Only the DRIVER comes from the PC: --gpus all mounts libcuda.so and",
+              "#      nvidia-smi in."]
+        if on_base and not any("-devel" in x for x in d["why_base"]):       # not said above yet
+            L += ["# runtime, not devel: -devel adds the CUDA compiler nvcc + headers (about 5 GB) - needed only to COMPILE",
+                  "# CUDA code (a package with .cu files and no prebuilt wheel). -base has only libcudart (too little)."
+                  if "-devel" not in d["base"] else
+                  "# devel: a package here has CUDA source code (.cu) and no wheel - nvcc compiles it during pip install."]
+    else:
+        L += ["# Other Python bases: python:X (full Debian with compilers, about 1 GB), python:X-alpine (musl: the usual",
+              "# Linux wheels do not install, numpy & co. would be compiled), ubuntu + apt python3 (no pip in it)."]
+    L += [f"# Python {d['pyv']}: " + ("the Python of this Ubuntu (apt python3)" if d.get("venv") else
+                                      f"--python {py} (default 3.12)") +
+          ". Use the version the project runs with on its PC (python --version there)."]
+    return L
 
 
 def gpu_from_static(path):
@@ -736,8 +879,9 @@ def decide(results, py, gpu):
         d["notes"].append(f"the base has Python {d['pyv']}, the check ran for {py}: run xray_naive.py again with "
                           f"--python {d['pyv']} so the versions are checked for the Python that is really in the image")
     if gpu and torch_cuda and vtuple(torch_cuda) < (12, 8):
-        d["notes"].append(f"torch here is built for CUDA {torch_cuda}: it does not run on RTX 50xx (Blackwell, "
-                          "sm_120) cards - those need a cu128 or newer build")
+        d["notes"].append(f"torch here is built for CUDA {torch_cuda}: its own GPU code stops at RTX 40xx, so it "
+                          "does not run on RTX 50xx (Blackwell, sm_120) cards, whatever CUDA the base image has - those "
+                          "need a cu128 or newer torch. RTX 20xx / 30xx / 40xx are fine.")
     if ort_v and ort_v < (1, 19) and torch_cuda and vtuple(torch_cuda) >= (12, 0):
         d["notes"].append("onnxruntime-gpu < 1.19 is built for CUDA 11.8 + cuDNN 8, torch brings CUDA 12 + cuDNN 9: "
                           "onnxruntime falls back to the CPU - use onnxruntime-gpu 1.19 or newer")
@@ -891,20 +1035,40 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
          "when you explore."]
     D += bar("1. BASE IMAGE")
     D += ["# " + x for x in d["why_base"]] + ["# NOTE: " + x for x in d["notes"]]
-    D += [f"FROM {d['base']}", "ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1" +
-          (" DEBIAN_FRONTEND=noninteractive" if d["os"].startswith("ubuntu") else "")]
+    D += base_ways(d, gpu, py)
+    D += [f"FROM {d['base']}", "# prints reach the log at once; Python writes no .pyc files",
+          "ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1",
+          "# apt asks no questions during the build (otherwise: 'debconf: unable to initialize frontend' in the log).",
+          "# ARG, not ENV: it exists only while building, not in the running container.",
+          "ARG DEBIAN_FRONTEND=noninteractive"]
     if d["apt"]:
         D += bar("2. SYSTEM LIBRARIES the packages load when they RUN (apt)")
+        D += ["# A compiled package finds a library it needs in one of three places:",
+              "#   - inside its own wheel (opencv_python.libs/: FFmpeg, Qt ...): nothing to install",
+              "#   - the system folders (/usr/lib/x86_64-linux-gnu): installed with apt-get - the lines below",
+              "#   - folders named in LD_LIBRARY_PATH (section 4)",
+              "# Decided from: the package NAMES in your requirements (what each is known to load). After the X-Ray run",
+              "# the slim plan keeps only what was really loaded; xray_look.py --image lists anything still missing.",
+              "# apt-get update downloads the package list (about 40 MB); rm -rf /var/lib/apt/lists/* deletes it again in",
+              "# the same RUN, so it is not in the image. 'debconf: delaying package configuration, since apt-utils is not",
+              "# installed' in the log is normal."]
         D += [f"#   {' '.join(pk):<40} <- {why}" for pk, why in d["apt"]]
         D += ["RUN apt-get update && apt-get install -y --no-install-recommends \\",
               "        " + " ".join(dict.fromkeys(x for pk, _ in d["apt"] for x in pk)) + " \\",
               " && rm -rf /var/lib/apt/lists/*"]
     if d["venv"]:
-        D += ["# Ubuntu does not allow pip into its own Python: a virtual environment, first on PATH",
+        D += ["# Ubuntu's python3 (installed above with apt) has no pip, and Ubuntu refuses pip installs into it",
+              "# ('externally-managed-environment': apt owns those files). A virtual environment = a folder with its own",
+              "# python, pip and site-packages (/opt/venv/lib/pythonX/site-packages). Its bin folder first on PATH, so",
+              "# 'python' and 'pip' below and in the running container mean the venv's - nothing is copied.",
               "RUN python3 -m venv /opt/venv", "ENV PATH=/opt/venv/bin:$PATH"]
     D += ["", "WORKDIR /app"]
     if d["frameworks"]:
         D += bar("3a. BIG FRAMEWORKS - their own layer, first: Docker reuses it while the lines below change")
+        D += ["# Docker keeps every RUN as a layer and reuses it when the lines above it did not change. Big packages",
+              "# that rarely change go first: editing 3b later rebuilds from 3b on, without downloading these again.",
+              "# Chosen by: a known big framework (torch, tensorflow, onnxruntime ...) or a wheel over "
+              f"{HEAVY_MB} MB - not by what the program uses."]
         D += [f"#   {r['raw']:<{w}} {desc(r)}" for r in d["frameworks"]]
         D += pip_run(d["frameworks"])
     rest = d["rest"]
@@ -917,6 +1081,8 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
             D += [f"#     {n:<{w - 2}} {lang}" for n, lang in c["who"]]
             D += [f"#   compiler: {' '.join(c['tools'])}" +
                   (f";  kept (their runtime part is needed): {' '.join(c['keep'])}" if c["keep"] else "")]
+            D += ["#   Other ways: a version that HAS a wheel for Linux + this Python (best: no compiler at all - "
+                  "naive-check.txt lists them),", "#   or a full / -devel image that keeps the compiler (much bigger)."]
         elif rest:
             D.append(f"#   nothing to compile: every package has a prebuilt wheel for Linux + Python {d['pyv']} - "
                      "no compiler in the image")
@@ -933,7 +1099,7 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
         out = [r for r in results if r["status"] in SKIP]
         D += [f"#   FIXED: {r['raw']}  ({r['fixed']})" for r in results if r.get("fixed") and r["status"] not in SKIP]
         for r in out:
-            D.append(f"#   LEFT OUT ({r['status']}): {r['raw']}" +
+            D.append(f"#   LEFT OUT ({r['status']}): {r['raw']}" + (f"  - {r['why']}" if r["status"] == "DROPPED" else "") +
                      ("   <- change the pin, see naive-check.txt" if r["status"] == "MISSING" else ""))
         if rest:
             if c:
@@ -972,6 +1138,10 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
         D += second
     if d["ld"]:
         D += bar("4. LD_LIBRARY_PATH - where to find the CUDA libraries")
+        D += ["# Linux finds a library a program asks for BY NAME (libcudnn.so.9) in: the folders written into the",
+              "# library that asks (RPATH - torch uses this for its own nvidia-* wheels), then LD_LIBRARY_PATH, then the",
+              "# standard folders (/lib, /usr/lib/x86_64-linux-gnu, those in /etc/ld.so.conf.d). Not found: an import",
+              "# fails ('cannot open shared object file'), or onnxruntime silently runs on the CPU."]
         D += ["# " + x.strip() for x in re.findall(r".{1,110}(?:\s|$)", d["ld_why"])]
         D += ["ENV LD_LIBRARY_PATH=" + ":\\\n".join(d["ld"])]
     elif gpu and d["base"].startswith("nvidia/"):
@@ -1097,6 +1267,9 @@ def main(argv=None):
                          "all = every one). Default: copied when up to 500 MB, else mounted at run time")
     ap.add_argument("--mount", action="append", default=[], metavar="ENV_NAME",
                     help="keep this file outside the image: mounted at run time (repeatable; all = every one)")
+    ap.add_argument("--keep", action="append", default=[], metavar="PACKAGE",
+                    help="two lines install the same files (opencv-python + opencv-python-headless): keep this one "
+                         "(repeatable). Default: the one that has the most files there")
     a = ap.parse_args(argv)
     req_path = a.requirements if os.path.isfile(a.requirements) else os.path.join(a.project, a.requirements)
     if not os.path.isfile(req_path):
@@ -1116,6 +1289,7 @@ def main(argv=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, a.jobs)) as ex:
         results = list(ex.map(lambda it: check_one(it, a.python, opts), reqs))
     fixes = autofix(results, a.python, opts)
+    fixes += same_files(results, a.keep)
     print("  ... and the whole file together, with dependencies, as the build installs it", flush=True)
     got = {}
     together, why_not = resolve_and_split(results, a.python, opts, fixes, got)
@@ -1133,7 +1307,13 @@ def main(argv=None):
     for r in results:
         groups.setdefault(r["status"], []).append(r)
     T = [f"X-Ray naive check {VERSION} - {req_path}", f"for: Linux x86_64, Python {a.python}, "
-         f"{'GPU' if gpu else 'CPU'} image (base {base})", ""]
+         f"{'GPU' if gpu else 'CPU'} image (base {base})"]
+    here = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    if here != a.python:
+        T.append(f"  (Python {a.python} is --python{' (the default)' if '--python' not in ' '.join(sys.argv) else ''}; "
+                 f"this PC runs Python {here}. If the project runs on {here} here, run again with --python {here}: "
+                 "versions and wheels depend on it)")
+    T.append("")
     pv = pip_version()
     if pv and pv < (24, 2) and sys.version_info[:2] < vtuple(a.python):
         T += [f"WARNING: your pip ({'.'.join(map(str, pv))}, running on Python {sys.version_info[0]}.{sys.version_info[1]}) "
@@ -1186,7 +1366,7 @@ def main(argv=None):
         fh.write("\n".join(T) + "\n")
     with open(os.path.join(out_dir, "naive-check.json"), "w", encoding="utf-8") as fh:
         json.dump({"tool": "xray-naive", "version": VERSION, "python": a.python, "gpu": gpu, "base": base,
-                   "requirements": results}, fh, indent=1)
+                   "requirements": [{k: v for k, v in r.items() if k != "files"} for r in results]}, fh, indent=1)
     print("\n".join(T))
     return 1 if groups.get("MISSING") or together is False else 0
 
