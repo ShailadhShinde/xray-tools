@@ -55,7 +55,7 @@ except ImportError:                   # pragma: no cover - xray_needs.py missing
     def const_of(path, consts, outer=False):
         return None
 
-VERSION = "0.2.3"
+VERSION = "0.2.6"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -107,6 +107,30 @@ def workdir_and_cmd(project, dockerfile):
 
 # --------------------------------------------------------------------------- windows (cv2.imshow) and their switch
 OFF_TRY = ["0", "1", "false", "true", "no", "yes", "off", "on", ""]
+# what a program does when it opens a window in a container (no screen), per GUI library: matched against the window
+# calls / GUI imports X-Ray found
+NO_SCREEN = [
+    (r"^cv2\.", "OpenCV: 'Could not load the Qt platform plugin \"xcb\"', then it aborts (exit code 134 or 139)"),
+    (r"^(PyQt\d|PySide\d)", "Qt: 'Could not load the Qt platform plugin \"xcb\"', then it aborts (exit code 134)"),
+    (r"^(tkinter|Tkinter|customtkinter)", "tkinter: '_tkinter.TclError: no display name and no $DISPLAY environment "
+                                           "variable'"),
+    (r"^pygame", "pygame: 'pygame.error: No available video device'"),
+    (r"^wx", "wxPython: 'Unable to access the X Display, is $DISPLAY set properly?'"),
+    (r"^(kivy|pyglet)", "an error at start: there is no display to open a window on"),
+    (r"^matplotlib", "matplotlib: no error - plt.show() shows nothing (at most a 'non-interactive' warning)"),
+]
+
+
+def no_screen(calls):
+    """(what each GUI library does without a screen, does any of them stop the program?) for these window calls"""
+    out = []
+    for c in calls or []:
+        what = c[2] if isinstance(c, (list, tuple)) else str(c)
+        for rx, msg in NO_SCREEN:
+            if re.match(rx, what) and msg not in out:
+                out.append(msg)
+    out = out or ["an error: a container has no screen to open a window on"]
+    return "; ".join(out), not all(m.startswith("matplotlib") for m in out)
 
 
 class _Env:
@@ -176,9 +200,13 @@ def window_switch(st, project):
     each window call, and the env var that condition comes from (SHOW = os.getenv("SHOW", "1") == "1" ... if SHOW:).
     -> {"env", "value", "where", "calls"}; "env" None = a window call with no such switch"""
     import ast
-    calls = [(x.get("file"), x.get("line"), str(f["subject"])) for f in st.get("facts", [])
-             if f.get("category") == "gui_usage" and live(f) for x in (f.get("sites") or [])[:1] if x.get("line")]
-    calls = [c for c in calls if re.search(r"imshow|namedWindow|plt\.show|show\(", c[2])] or calls
+    gui = [f for f in st.get("facts", []) if f.get("category") == "gui_usage" and live(f)]
+    gui = [f for f in gui if f.get("mechanism") != "gui_import"] or gui     # the calls, not the `import tkinter` line
+    calls = [(x.get("file"), x.get("line"), str(f["subject"])) for f in gui for x in (f.get("sites") or [])[:1]
+             if x.get("line")]
+    # the calls that OPEN a window (cv2.imshow, plt.show, tkinter.Tk, pygame.display.set_mode, QApplication ...)
+    calls = [c for c in calls if re.search(r"imshow|namedWindow|\.show$|show\(|\.Tk$|set_mode|QApplication|\.App$|"
+                                           r"mainloop|MainLoop", c[2])] or calls
     if not calls:
         return None
     files = {c[0] for c in calls} | {x.get("file") for f in st.get("facts", []) if f.get("category") == "env_var"
@@ -196,21 +224,25 @@ def window_switch(st, project):
                 if len(e) == 1:
                     assigns[n.targets[0].id] = (e[0], n.value)
     guards = []                        # per window call: the if-conditions it sits in (test, in the if-branch?)
+    iftests = []                       # per window call: the tests of the ifs around it (not loops, not `if True`)
     for rel, line, what in calls:
         tree = trees.get(rel)
         if tree is None:
-            return {"env": None, "calls": calls}
+            return {"env": None, "calls": calls, "no_screen": no_screen(calls)}
         parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
         call = next((n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n, "lineno", 0) == line), None)
-        g, node = [], call
+        g, ifs, node = [], [], call
         while node in parents:
             par = parents[node]
             if isinstance(par, (ast.If, ast.While)) and node in par.body:
                 g.append((par.test, True))
             elif isinstance(par, ast.If) and node in par.orelse:
                 g.append((par.test, False))
+            if isinstance(par, ast.If) and not isinstance(par.test, ast.Constant) and node in par.body + par.orelse:
+                ifs.append((rel, par.test))
             node = par
         guards.append(g)
+        iftests.append(ifs)
     names = set()
     for g in guards:
         for test, _b in g:
@@ -235,8 +267,20 @@ def window_switch(st, project):
                     ok = False
                     break
             if ok:
-                return {"env": env, "value": value, "calls": calls}
-    return {"env": None, "calls": calls}
+                return {"env": env, "value": value, "calls": calls, "no_screen": no_screen(calls)}
+    # no env var switches them: inside an if all the same? A constant in the code (SHOW = True) decides it, or
+    # something X-Ray cannot follow (a command-line flag, a config value)
+    guarded = all(iftests)
+    const = None
+    for ifs in iftests if guarded else []:
+        for rel, test in ifs:
+            for st_ in trees[rel].body:
+                if (isinstance(st_, ast.Assign) and len(st_.targets) == 1 and isinstance(st_.targets[0], ast.Name)
+                        and isinstance(st_.value, ast.Constant) and isinstance(st_.value.value, (bool, int, str))
+                        and st_.targets[0].id in {n.id for n in ast.walk(test) if isinstance(n, ast.Name)}):
+                    const = const or {"name": st_.targets[0].id, "value": st_.value.value, "file": rel,
+                                      "line": st_.lineno}
+    return {"env": None, "calls": calls, "guarded": guarded, "const": const, "no_screen": no_screen(calls)}
 
 
 def video_codec(path):
@@ -557,7 +601,60 @@ def code_changes(st, project):
     return items
 
 
-def write_code_changes(items, name, office_hint=True):
+def window_change(window, project):
+    """SHOW = True written in the code switches the windows: in a container it must be off -> read it from an env var"""
+    k = (window or {}).get("const")
+    if not window or not (window.get("no_screen") or ("", True))[1]:
+        return []                       # no window, or only plots that do not stop the program (matplotlib)
+    if window.get("calls") and window.get("env") is None and window.get("guarded") is False:
+        c = window["calls"][0]
+        lines, text = read_line(project, c[0], c[1])
+        return [{"where": f"{c[0]}:{c[1]}", "now": (text or "").strip() or None, "new": None, "env": "SHOW", "value": "0",
+                 "note": "the code always opens windows here, and a container has no screen (" + window["no_screen"][0]
+                         + "): add a switch -  SHOW = os.getenv(\"SHOW\", \"1\") == \"1\"  at the top of the file, "
+                         "then  if SHOW:  around the window calls (" + ", ".join(x[2] for x in window["calls"][:3])
+                         + "). Your PC keeps showing them; the run files and the compose files set SHOW=0"}]
+    if not k:
+        return []
+    lines, text = read_line(project, k["file"], k["line"])
+    on = "1" if k["value"] not in (False, 0, "0", "") else "0"
+    c = window["calls"][0]
+    return [{"where": f"{k['file']}:{k['line']}", "now": (text or "").strip() or None,
+             "new": f"{k['name']} = os.getenv(\"{k['name']}\", \"{on}\") == \"1\"", "env": k["name"], "value": "0",
+             "note": f"switches the windows ({c[2]} at {c[0]}:{c[1]}); a container has no screen, so it must be off "
+                     f"there ({window['no_screen'][0]}) - the run files and the compose files then set it to 0"
+                     + ("; add  import os  at the top of the file" if lines and not any(
+                         re.match(r"^\s*(import os\b|from os import)", ln) for ln in lines) else "")}]
+
+
+def optional_changes(st, project):
+    """Not needed to run, but the image gets smaller: a package the code imports and then never uses."""
+    by = {}
+    for f in st.get("facts", []):
+        if f.get("category") == "third_party_import" and live(f):
+            by.setdefault(f.get("import_name") or f["subject"], []).append(f)
+    items = []
+    for top, fs in sorted(by.items()):
+        if not all(f.get("never_used") for f in fs):
+            continue
+        for f in fs:
+            for x in (f.get("sites") or [])[:1]:
+                lines, text = read_line(project, x.get("file"), x.get("line") or 0)
+                stmt = re.sub(r"\s*#.*$", "", text or "").strip()
+                simple = re.match(r"^(import|from)\s+" + re.escape(top) + r"\b[^;]*$", stmt)
+                why = ("maybe kept for what importing does: a plugin that registers itself, a patch - or, on Windows, "
+                       "a package that ships CUDA DLLs imported so that another library finds them (e.g. torch before "
+                       "onnxruntime); in the Linux image the loader finds NVIDIA's CUDA wheels without it")
+                items.append({"where": f"{x.get('file')}:{x.get('line')}", "now": (text or "").strip() or None,
+                              "new": (f"if os.name == \"nt\": {stmt}" if simple else None), "env": None,
+                              "note": f"the code never uses {top} - only the import runs ({why}). The image carries "
+                                      f"{top} and every package only it needs for this line (step3.txt / the plan say how "
+                                      "many GB). Windows-only as above keeps your PC as it is; if nothing needs it, delete "
+                                      "the line. Then rebuild the naive image and run steps 2-4 again"})
+    return items
+
+
+def write_code_changes(items, name, office_hint=True, optional=()):
     L = [f"CODE CHANGES for {name} (written by xray_runfile.py {VERSION} from the Step 1 map)", "",
          "Each item: WHERE (file:line), NOW (the line today), CHANGE TO (the suggested line), IN DOCKER (how to set it).",
          "The old value stays the default, so the program keeps running exactly as before on your PC.",
@@ -578,8 +675,15 @@ def write_code_changes(items, name, office_hint=True):
         else:
             L += ["   CHANGE TO: (by hand - see the note)"]
         if it["env"]:
-            L += [f"   IN DOCKER: -e {it['env']}=<value>"]
+            L += [f"   IN DOCKER: -e {it['env']}={it.get('value') or '<value>'}"]
         L += [f"   NOTE:      {it['note']}", ""]
+    if optional:
+        L += ["", "OPTIONAL - it runs without these, the image just gets smaller:", ""]
+        for i, it in enumerate(optional, 1):
+            L += [f"{i}. WHERE:     {it['where']}"]
+            if it["now"]:
+                L += [f"   NOW:       {it['now']}"]
+            L += [f"   CHANGE TO: {it['new'] or '(by hand - see the note)'}", f"   NOTE:      {it['note']}", ""]
     return "\n".join(L) + "\n"
 
 
@@ -620,13 +724,14 @@ def write_step34(p, sh, xdir, out_dir):
     py = python_of(p["dockerfile"])
     L = head(sh, xdir, out_dir, "Step 3 (packages) + Step 4 (plan)")
     if sh.bat:
-        L += ["REM GPUBASE (GPU projects only): auto = the same nvidia/cuda image family as the naive image (it worked on",
-              "REM your GPU); pip = python:X-slim + the CUDA libraries from pip (smaller - check it with run-slim + verify)",
+        L += ["REM GPUBASE (GPU projects only): auto = the same kind of base as the naive image (it worked on your GPU);",
+              "REM nvidia = the nvidia/cuda runtime image (CUDA from NVIDIA's apt packages); pip = python:X-slim + the CUDA",
+              "REM libraries from pip wheels (usually smaller). Build both and see the difference with compare-images.",
               'set "GPUBASE=auto"',
               'if not exist "%RUN%\\' + name + '-runtime.json" (echo Run run-step2 first: ' + name + '-runtime.json is missing & exit /b 1)',
               'mkdir "%RUN%\\pkg" 2>nul']
     else:
-        L += ['GPUBASE=auto   # GPU projects: auto = nvidia/cuda family of the naive image; pip = python:X-slim + pip CUDA',
+        L += ['GPUBASE=auto   # GPU projects: auto = the naive image\'s kind of base; nvidia = nvidia/cuda runtime; pip = python:X-slim + pip CUDA',
               '[ -f "$RUN/' + name + '-runtime.json" ] || { echo "Run run-step2 first"; exit 1; }',
               'mkdir -p "$RUN/pkg"; chmod 777 "$RUN/pkg"']
     pk = R + sep + "pkg"
@@ -853,10 +958,25 @@ def window_lines(p, rem):
         return [rem + f"WINDOWS: the code opens windows ({where}) only when {w['env']} is on. A container has no screen,",
                 rem + f"so this run sets {w['env']}={w['value']} (found in the code's own if-condition). X-Ray's runs switch",
                 rem + "windows off themselves and keep the code as it is."]
+    ns, stops = w.get("no_screen") or no_screen(w.get("calls"))
+    err = [rem + "  without a screen: " + x for x in re.findall(r".{1,100}(?:\s|$)", ns)]
+    if not stops and not w.get("env"):
+        return [rem + f"WINDOWS: the code shows plots ({where}). A container has no screen - nothing to do:"] + err
+    if w.get("const"):
+        k = w["const"]
+        return [rem + f"WINDOWS: the code opens windows ({where}) when {k['name']} is on - and {k['name']} = {k['value']!r} is",
+                rem + f"written in the code ({k['file']}:{k['line']}). A container has no screen:"] + err + [
+                rem + f"Read it from an env var:  {k['name']} = os.getenv(\"{k['name']}\", \"1\") == \"1\"  - then rebuild: "
+                      "run-naive sets it to 0 then.",
+                rem + "X-Ray's runs (run-step2, run-explore, run-load) switch windows off themselves."]
+    if w.get("guarded"):
+        return [rem + f"WINDOWS: the code opens windows ({where}) inside an if that no env var decides (a constant, a",
+                rem + "flag or a config value?). A container has no screen - if that setting is on:"] + err + [
+                rem + "Switch it off. X-Ray's runs (run-step2, run-explore, run-load) switch windows off themselves."]
     return [rem + f"WINDOWS: the code always opens windows ({where}) - no setting switches them off. A container has",
-            rem + "no screen: the program stops at the first window ('Could not load the Qt platform plugin xcb', exit",
-            rem + "code 134 or 139). Watch it with run-explore / run-load instead (X-Ray switches windows off), or make the",
-            rem + "window optional in the code:  if os.getenv(\"SHOW\", \"1\") == \"1\":  around cv2.imshow / waitKey."]
+            rem + "no screen:"] + err + [
+            rem + "Watch it with run-explore / run-load instead (X-Ray switches windows off), or make the window optional",
+            rem + "in the code:  SHOW = os.getenv(\"SHOW\", \"1\") == \"1\"  and  if SHOW:  around the window calls."]
 
 
 def write_naive_run(p, sh, out_dir):
@@ -1099,8 +1219,10 @@ def main(argv=None):
                                                           f"{p['window']['value']} = off (run-naive sets it; a container has "
                                                           "no screen)" if n == sw else ""), "# " + n + "=" + str(d)]
         files["run.env"] = "\n".join(E) + "\n"
-    changes = code_changes(st, os.path.abspath(a.project))
-    files["code-changes.txt"] = write_code_changes(changes, a.name).replace("\n", "\r\n" if sh.bat else "\n")
+    changes = code_changes(st, os.path.abspath(a.project)) + window_change(p.get("window"), os.path.abspath(a.project))
+    optional = optional_changes(st, os.path.abspath(a.project))
+    files["code-changes.txt"] = write_code_changes(changes, a.name, optional=optional).replace(
+        "\n", "\r\n" if sh.bat else "\n")
     for fn, txt in files.items():
         with open(os.path.join(out_dir, fn), "w", encoding="utf-8", newline="") as fh:
             fh.write(txt)
@@ -1112,6 +1234,12 @@ def main(argv=None):
     if p["gui"]:
         w = p.get("window") or {}
         print("  windows: " + (f"{w['env']}={w['value']} switches them off (run-naive sets it)" if w.get("env") else
+                               "plots only - nothing to do in a container (" + w["no_screen"][0] + ")"
+                               if not (w.get("no_screen") or ("", True))[1] else
+                               f"{w['const']['name']} = {w['const']['value']!r} in the code opens them - see run-naive's "
+                               "WINDOWS note" if w.get("const") else
+                               "inside an if no env var decides (a flag?) - see run-naive's WINDOWS note"
+                               if w.get("guarded") else
                                "always opened, no setting switches them off - see run-naive's WINDOWS note"))
     for host, cont, mode, why in p["mounts"]:
         print(f"  mount {host} -> {cont}")
@@ -1126,7 +1254,8 @@ def main(argv=None):
         print(f"  --mac-address {p['mac']}   (licence / machine check)")
     for n in p["notes"]:
         print(f"  CHECK {n}")
-    print(f"  code changes suggested: {len(changes)} (see code-changes.txt)")
+    print(f"  code changes suggested: {len(changes)}" + (f", optional (a smaller image): {len(optional)}" if optional
+                                                         else "") + " (see code-changes.txt)")
     if not p["dockerfile"]:
         print("  NOTE: no Dockerfile.naive / Dockerfile in the project - build the image first (see the guide)")
     print("First read code-changes.txt. Then open the run files in Notepad if you want, and run them in this order: "

@@ -22,7 +22,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.9"
+VERSION = "0.1.11"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -256,7 +256,7 @@ def slim(f, path):
     return {"id": f.get("id"), "category": f["category"], "subject": f.get("subject"),
             "required": f.get("required_at_runtime"), "run": run_state(f), "lines": lines,
             "detail": " ".join(d) if isinstance(d, list) else d, "docker": f.get("docker_implication"),
-            "default": f.get("default"), "bundle": f.get("_bundle")}
+            "default": f.get("default"), "bundle": f.get("_bundle"), "never_used": bool(f.get("never_used"))}
 
 
 def needs(d, facts, show_all):
@@ -306,7 +306,8 @@ def needs(d, facts, show_all):
             run_state(f) == "seen" for f in gui)
         out["screen"] = {"calls": sorted({str(f["subject"]) for f in gui}), "maybe": maybe,
                          "trace": "--gui off (X-Ray saves the shown frames every 5 s to <trace>/gui/)",
-                         "linux_window": "-e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix  (needs a desktop)"}
+                         "linux_window": "-e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix  (needs a desktop)",
+                         "switch": window_switch_of(d)}
     envs = {}
     code_sets = sorted({f["subject"] for f in use if f["category"] == "env_var" and set_by_code(f)})
     for f in use:
@@ -325,6 +326,24 @@ def needs(d, facts, show_all):
                     f"code default {e['default']!r} - pass it only to change it" if has_def else
                     ("read by the code (its default is in the Step 1 report)" if runtime_only else
                      "no default in the code - you must set it") if e["required"] == "yes" else "optional")
+    sw = (out["screen"] or {}).get("switch") or {}
+    err, stops = sw.get("no_screen") or ("a container has no screen", True)   # per GUI library (xray_runfile)
+    if sw.get("env") in envs:
+        e = envs[sw["env"]]
+        e["flag"] = f"-e {e['name']}={sw['value']}"
+        e["why"] = ((f"MUST be {sw['value']} in a container" if stops else f"{sw['value']} in a container") +
+                    f": the code's window switch (its default {e['default']!r} opens windows; without a screen - {err})")
+    elif sw.get("const") and stops:
+        c, k = sw["calls"][0], sw["const"]
+        out["code_changes"].append(
+            f"{k['name']} = {k['value']!r} ({k['file']}:{k['line']}) switches the windows ({c[2]} at {c[0]}:{c[1]}) - "
+            f"without a screen: {err}. Read it from an env var:  {k['name']} = "
+            f"os.getenv(\"{k['name']}\", \"1\") == \"1\"  - then -e {k['name']}=0 in the container")
+    elif sw.get("calls") and sw.get("env") is None and sw.get("guarded") is False and stops:
+        c = sw["calls"][0]
+        out["code_changes"].append(f"{c[2]} ({c[0]}:{c[1]}): the code always opens windows - without a screen: {err}. "
+                                   "Make it optional: SHOW = os.getenv(\"SHOW\", \"1\") == \"1\"  and  if SHOW:  "
+                                   "around the window calls")
     out["env_set_by_code"] = code_sets
     out["_pc_defaults"] = [str(e["default"]) for e in envs.values()
                            if e["default"] and re.match(r"^([A-Za-z]:[\\/]|/(home|Users)/)", str(e["default"]))]
@@ -361,6 +380,7 @@ def needs(d, facts, show_all):
                                "without a GPU onnxruntime usually falls back to the CPU with a warning (Step 2 shows which ran) - "
                                if need else "GPU: used when available (the code falls back to the CPU without one) - "
                               "on a GPU machine build a GPU image and run with --gpus all. ") + f"({len(gpu)} places, e.g. {gpu[0]['subject']})")
+    out["optional_changes"] = never_used(use)
     for k in ("models", "data", "writes", "system", "code_changes"):
         out[k] = sorted(set(out[k]))
     out["data"] = [x for x in out["data"] if x not in out["models"]]
@@ -386,6 +406,38 @@ def needs(d, facts, show_all):
     return out
 
 
+def window_switch_of(d):
+    """The env var in the code that switches its windows off (xray_runfile.window_switch reads the project's code)."""
+    root = d.get("root")
+    if d.get("tool") == "xray-trace" or not root or not os.path.isdir(root):
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from xray_runfile import window_switch
+        return window_switch(d, root)
+    except Exception:
+        return None
+
+
+def never_used(use):
+    """Packages the code imports and then never uses (every live import of it): only the import runs."""
+    by = {}
+    for f in use:
+        if f["category"] == "third_party_import":
+            by.setdefault(f.get("import_name") or f["subject"], []).append(f)
+    out = []
+    for top, fs in sorted(by.items()):
+        if all(f.get("never_used") for f in fs):
+            where = ", ".join(f"{s['file']}:{s['line']}" for f in fs for s in f.get("sites") or [] if s.get("line"))
+            why = ("an import kept for what importing does: a plugin that registers itself, a patch - or, on Windows, a "
+                   "package that ships CUDA DLLs imported so that another library finds them (e.g. torch before "
+                   "onnxruntime); in a Linux image the loader finds NVIDIA's CUDA wheels without it")
+            out.append(f"{where}: imports {top}, but the code never uses it - only the import runs ({why}). The image "
+                       f"carries {top} and every package only it needs for that line (Step 3 says how many GB). If only "
+                       f"Windows needs it: if os.name == \"nt\": import {top}  - else delete the line")
+    return out
+
+
 CAT = {"network_endpoint": "connects to", "listen_port": "listens on", "runtime_download": "downloads",
        "subprocess_binary": "runs program", "system_package_candidate": "Linux package",
        "gpu_usage": "GPU", "ipc_shared_memory": "shared memory"}
@@ -405,7 +457,7 @@ def tag(x):
 
 def fmt_item(x):
     ln = f" (line {', '.join(map(str, x['lines'][:4]))})" if x.get("lines") else ""
-    return f"{x['subject']}{ln}{tag(x)}"
+    return f"{x['subject']}{ln}{tag(x)}" + ("  (imported, never used)" if x.get("never_used") else "")
 
 
 def print_tree(n, pre="", out=print):
@@ -423,7 +475,8 @@ def print_tree(n, pre="", out=print):
             continue
         xs = n["bundles"][v]
         if v in ("packages", "side") and len(xs) > 3:
-            out(f"{ind}{br}{TITLE[v]} ({len(xs)}): " + ", ".join(sorted({str(x['subject']) for x in xs})))
+            out(f"{ind}{br}{TITLE[v]} ({len(xs)}): " + ", ".join(sorted({str(x['subject']) + (
+                " (imported, never used)" if x.get("never_used") else "") for x in xs})))
             continue
         out(f"{ind}{br}{TITLE[v]}")
         sub = ind + ("   " if last else "│  ")
@@ -450,6 +503,21 @@ def print_needs(nd, out=print):
         none = False
         out(f"  screen   {', '.join(nd['screen']['calls'])}"
             + ("   (maybe: only in a code path that did not run / depends on a setting)" if nd["screen"]["maybe"] else ""))
+        sw = nd["screen"].get("switch") or {}
+        if sw.get("env"):
+            out(f"           in a container: -e {sw['env']}={sw['value']} - the code's own switch turns the windows off "
+                "(a container has no screen)")
+        elif not (sw.get("no_screen") or ("", True))[1]:
+            out(f"           in a container: nothing to do - {sw['no_screen'][0]}")
+        elif sw.get("const"):
+            k = sw["const"]
+            out(f"           in a container: off - but {k['name']} = {k['value']!r} ({k['file']}:{k['line']}) is a constant "
+                "in the code: see CODE CHANGES NEEDED")
+        elif sw.get("guarded") is False:
+            out("           in a container: the code always opens them - see CODE CHANGES NEEDED")
+        elif sw.get("guarded"):
+            out("           in a container: switch them off - they sit inside an if no env var decides (a constant in "
+                "the code? a command-line flag? a config value?)")
         out(f"           trace: {nd['screen']['trace']}   |   real window on Linux: {nd['screen']['linux_window']}")
     for e in nd["env"]:
         none = False
@@ -500,6 +568,9 @@ def print_needs(nd, out=print):
         out("  nothing - it runs with no inputs")
     out("\nCODE CHANGES NEEDED")
     out("  " + ("\n  ".join(nd["code_changes"]) if nd["code_changes"] else "none found"))
+    if nd.get("optional_changes"):
+        out("\nOPTIONAL CODE CHANGES (it runs without them - the image gets smaller)")
+        out("  " + "\n  ".join(nd["optional_changes"]))
 
 
 def main():

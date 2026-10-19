@@ -25,8 +25,9 @@ import json
 import os
 import re
 import sys
+import textwrap
 
-VERSION = "0.1.10"
+VERSION = "0.1.13"
 APP_USER, APP_UID = "app", 1000
 APP_HOME = f"/home/{APP_USER}"
 ALWAYS_IGNORE = [".git/", "**/__pycache__/", "**/*.pyc", ".idea/", ".vscode/", "Dockerfile*", "docker-compose*.yml",
@@ -45,8 +46,12 @@ def canon(n):
 # Debian/Ubuntu packages of the CUDA toolkit: an nvidia/cuda base image has them already, pip CUDA wheels replace them
 CUDA_DEB = re.compile(r"^(cuda-|libcu|libnpp|libnv|libcudnn|libnccl)")
 UBUNTU_PY = {"24.04": "3.12", "22.04": "3.10", "20.04": "3.8"}
-# pip CUDA wheels (onnxruntime-gpu[cuda,cudnn]): the folders onnxruntime must find them in
-NV_PIP_LIBS = ("cudnn", "cublas", "cuda_runtime", "cuda_nvrtc", "cufft", "curand")
+# CUDA from NVIDIA's pip wheels: register every folder they put libraries in with the Linux loader, found AFTER the
+# install - CUDA 12 wheels use one folder per library (nvidia/cublas/lib ...), CUDA 13 wheels one shared folder
+# (nvidia/cu13/lib), cuDNN / NCCL / NVSHMEM keep their own. No fixed list: any layout, any version.
+CUDA_REGISTER = ("RUN python3 -c \"import pathlib, site; print('\\n'.join(sorted({str(f.parent) for s in "
+                 "site.getsitepackages() for f in pathlib.Path(s, 'nvidia').rglob('*.so*')})))\" \\\n"
+                 "    > /etc/ld.so.conf.d/cuda-wheels.conf && ldconfig")
 
 
 def deb_base(name):
@@ -220,6 +225,14 @@ class Planner:
     def gpu_used(self):
         return gpu_used(self.rt)
 
+    def cuda_extras(self):
+        """{package: [extras]}: the extras that install NVIDIA's CUDA wheels, read by xray_pkg from each kept package's
+        own metadata (onnxruntime-gpu: cuda, cudnn; tensorflow: and-cuda; cupy: ctk). Older package facts: onnxruntime"""
+        obs = self.pk.get("observations") or {}
+        if "cuda_extras" in obs:
+            return {canon(k): v for k, v in obs["cuda_extras"].items()}
+        return {"onnxruntime-gpu": ["cuda", "cudnn"]} if self.pins_have("onnxruntime-gpu") else {}
+
     def pins_have(self, name):
         return any(canon(re.split(r"[\[=<>!~ ]", k)[0]) == canon(name) for k in (self.pk.get("requirements_plan") or {})
                    .get("keep", []))
@@ -235,9 +248,23 @@ class Planner:
             mode = self.gpu_base
             if mode == "auto":
                 mode = "nvidia" if frm.startswith("nvidia/cuda") else "pip"
+                if mode == "pip":
+                    self.evidence.append("GPU base: auto = pip here - Dockerfile.naive already takes CUDA from pip wheels "
+                                         f"({frm or 'not nvidia/cuda'}), so auto and pip build the same image. The other "
+                                         "variant: --gpu-base nvidia (GPUBASE=nvidia in run-step3-4), then "
+                                         "compare-images.bat")
             if mode == "nvidia":
-                img = frm if frm.startswith("nvidia/cuda") else "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04"
-                why = "the run used the GPU; same nvidia/cuda image family as Dockerfile.naive (it worked on your GPU)"
+                # the CUDA major the image's CUDA wheels are built for (xray_pkg: -cu12 / -cu13 names, cuda-runtime's version)
+                major = (self.pk.get("observations") or {}).get("cuda_major") or 12
+                img = frm if frm.startswith("nvidia/cuda") else (
+                    "nvidia/cuda:13.0.3-cudnn-runtime-ubuntu24.04" if major >= 13 else
+                    "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04")
+                why = ("the run used the GPU; same nvidia/cuda image family as Dockerfile.naive (it worked on your GPU)"
+                       if frm.startswith("nvidia/cuda") else
+                       f"the run used the GPU; --gpu-base nvidia: NVIDIA's CUDA {major} runtime image (the CUDA the "
+                       "packages' own CUDA wheels are built for) instead of pip CUDA wheels"
+                       + ("; CUDA 13 needs NVIDIA driver 580 or newer and an RTX 20xx / GTX 16xx or newer"
+                          if major >= 13 else "; CUDA 12.8 needs NVIDIA driver 570 or newer"))
                 if "-devel" in img:
                     img = img.replace("-devel", "-runtime")
                     why += "; 'runtime' instead of 'devel' (no compilers / headers needed to run)"
@@ -252,10 +279,15 @@ class Planner:
                 self._base = {"choice": img, "kind": "nvidia", "why": why + f"; Python {ub_py or py} from Ubuntu in a venv"}
                 return self._base
             why = ("the run used the GPU; python:" + py + "-slim + the CUDA libraries from pip wheels")
-            if self.pins_have("onnxruntime-gpu"):
-                why += " (onnxruntime-gpu[cuda,cudnn] + LD_LIBRARY_PATH to them)"
-                self.evidence.append("GPU base pip: NOT yet proven on a real GPU - the verify run must show "
-                                     "CUDAExecutionProvider active")
+            ex = self.cuda_extras()
+            by_name = sorted(set((self.pk.get("observations") or {}).get("links_cuda") or []) | set(ex))
+            if ex:
+                why += " (" + ", ".join(f"{n}[{','.join(e)}]" for n, e in sorted(ex.items())) + " installs them)"
+            if by_name:
+                why += "; their folders are registered with the Linux loader for " + ", ".join(by_name)
+                self.evidence.append("GPU base pip: NOT yet proven on a real GPU for " + ", ".join(by_name) + " - the "
+                                     "verify run must show the GPU in use" + (" (onnxruntime: CUDAExecutionProvider "
+                                     "active)" if any(n.startswith("onnxruntime") for n in by_name) else ""))
             self._base = {"choice": f"python:{py}-slim", "kind": "pip-cuda", "why": why}
             return self._base
         self._base = {"choice": f"python:{py}-slim", "kind": "python",
@@ -321,8 +353,16 @@ class Planner:
         if cu and not extra_index:   # torch==2.8.0+cu126 only exists on PyTorch's own index
             extra_index = f"https://download.pytorch.org/whl/cu{cu}"
         if self.base_image().get("kind") == "pip-cuda":
-            # python:X-slim has no CUDA: onnxruntime-gpu brings it with its [cuda,cudnn] extras (torch wheels already do)
-            pins = [re.sub(r"(?i)^onnxruntime[-_]gpu(?=[=<>!~ ]|$)", "onnxruntime-gpu[cuda,cudnn]", k) for k in pins]
+            # python:X-slim has no CUDA: a package with extras that install NVIDIA's CUDA wheels gets them
+            # (onnxruntime-gpu[cuda,cudnn], tensorflow[and-cuda] ...; torch wheels depend on them already)
+            ex = self.cuda_extras()
+
+            def with_extras(k):
+                m = re.match(r"^([A-Za-z0-9._-]+)(\[[^\]]*\])?(.*)$", k, re.S)
+                if not m or m.group(2) or canon(m.group(1)) not in ex:
+                    return k
+                return f"{m.group(1)}[{','.join(ex[canon(m.group(1))])}]{m.group(3)}"
+            pins = [with_extras(k) for k in pins]
         pins = list(dict.fromkeys(pins))          # the same pin twice (kept + re-added) once
         return out, pins, extra_index
 
@@ -501,6 +541,22 @@ class Planner:
                 out.append(f"thread oversubscription (seen at runtime): {str(f.get('detail'))[:200]}")
         return out
 
+    def optional_changes(self):
+        """Not needed to run - but the image gets smaller: a package the code imports and then never uses."""
+        out = []
+        for f in self.pfacts("packaging"):
+            if f.get("mechanism") != "import_never_used":
+                continue
+            top, gb = f.get("import_name") or f["subject"], (f.get("size_bytes") or 0) / 1e9
+            where = ", ".join(f"{s.get('file')}:{s.get('line')}" for s in f.get("sites") or [])
+            msg = (f"{where} imports {top} but never uses it: {top} and the {len(f.get('freed') or []) - 1} "
+                   f"package(s) only it needs are {gb:.1f} GB of this image. If only Windows needs the import (e.g. "
+                   f"to load DLLs): if os.name == \"nt\": import {top} - else delete it; then rebuild the naive image "
+                   "and run steps 2-4 again (verify shows the image still works)")
+            out.append(msg)
+            self.evidence.append("smaller image: " + msg)
+        return out
+
     def plan(self):
         pv = str(self.pk.get("version", "0"))
         if self.pk and tuple(int(x) for x in pv.split(".")) < (0, 1, 1):
@@ -525,6 +581,7 @@ class Planner:
                 "copy": copy, "dockerignore": ignore, "env": env, "secrets": self.secrets(), "volumes": vols,
                 "writable_dirs": dirs, "env_remap": {k: v[1] for k, v in remap.items()},
                 "compose_runtime": self.compose_runtime(), "code_changes_required": self.code_changes(ignore),
+                "code_changes_optional": self.optional_changes(),
                 "user": {"name": APP_USER, "uid": APP_UID, "home": APP_HOME},
                 "cmd": self.naive["cmd"], "workdir": self.naive["workdir"], "python": self.naive["python"],
                 "image_env": {k: v for k, v in self.naive["env"].items() if k == "PYTHONPATH"},
@@ -564,6 +621,8 @@ def dockerfile(p):
     L += ["", f"WORKDIR {p['workdir']}", "", "# Python packages: keep / swap / add from the package analyzer "
           "(removed: " + (", ".join(r["name"] for r in p["requirements"]["remove"]) or "none") + ")",
           "# kept = imported in the run, or needed by one that was; pinned to the version that ran (==)"]
+    for x in p.get("code_changes_optional") or []:
+        L += ["# OPTIONAL (a smaller image):"] + ["#   " + w for w in textwrap.wrap(x, 108)]
     idx = f"--extra-index-url {p['pip_extra_index']} " if p.get("pip_extra_index") else ""
     src = p.get("build_from_source") or []
     tools = ("gcc libc6-dev python3-dev" if kind == "nvidia" else "gcc libc6-dev")
@@ -574,10 +633,13 @@ def dockerfile(p):
                  + f" \\\n && apt-get purge -y --auto-remove {tools} && rm -rf /var/lib/apt/lists/*")
     else:
         L.append(f"RUN pip install --no-cache-dir {idx}\\\n    " + " \\\n    ".join(p["pip_install"]))
-    if kind == "pip-cuda" and any(x.startswith("onnxruntime-gpu[") for x in p["pip_install"]):
-        sp = f"/usr/local/lib/python{p.get('python')}/site-packages/nvidia"
-        L += ["# onnxruntime finds the CUDA / cuDNN libraries of the pip wheels here",
-              "ENV LD_LIBRARY_PATH=" + ":".join(f"{sp}/{x}/lib" for x in NV_PIP_LIBS)]
+    if kind == "pip-cuda":
+        L += ["", "# The CUDA libraries come from NVIDIA's pip wheels. A library that opens them by name (onnxruntime,",
+              "# tensorflow, cupy ...) needs the Linux loader to know their folders. Found here after the install,",
+              "# whatever the layout (CUDA 12 wheels: one folder per library, nvidia/cublas/lib ...; CUDA 13 wheels: one",
+              "# shared folder, nvidia/cu13/lib), written to /etc/ld.so.conf.d and registered with ldconfig = a",
+              "# permanent LD_LIBRARY_PATH for every program in the image. (torch finds its own wheels without it.)",
+              CUDA_REGISTER]
     dirs = [d if d.startswith("/") else f"{p['workdir'].rstrip('/')}/{d}" for d in p["writable_dirs"]]
     vols = [v["container_path"] for v in p["volumes"]]
     mk = sorted(set(dirs + vols))
@@ -610,7 +672,7 @@ def slug(fixture):
     return re.sub(r"[^a-z0-9]+", "-", fixture.lower()).strip("-") or "app"
 
 
-def compose_override(p, services, out_dir, compose_path):
+def compose_override(p, services, out_dir, compose_path, window=None):
     img = slug(p["fixture"]) + "-xray"
     cdir = os.path.dirname(os.path.abspath(compose_path))
     rel = lambda x: os.path.relpath(os.path.abspath(x), cdir).replace(os.sep, "/")
@@ -625,6 +687,8 @@ def compose_override(p, services, out_dir, compose_path):
         L += [f"  {s}:", f"    image: {img}", "    build:", f"      context: {context}",
               f"      dockerfile: {dockerfile_in_ctx}"]
         env = dict(p.get("env_remap") or {})
+        if window and window.get("env"):
+            env[window["env"]] = window["value"]          # the code's own window switch: a container has no screen
         if env:
             L.append("    environment:")
             L += [f"      {k}: {v}" for k, v in env.items()]
@@ -671,7 +735,17 @@ def env_key(path):
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")       # a file / folder of one PC (code default)
 
 
-def compose_new(p, out_dir, mac_needed):
+def window_of(static, project):
+    """the code's own switch for its windows (cv2.imshow): {"env", "value"} from xray_runfile, or None"""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import xray_runfile
+        return xray_runfile.window_switch(static or {}, project)
+    except Exception:
+        return None
+
+
+def compose_new(p, out_dir, mac_needed, window=None):
     """no compose file in the project: a compose.yml for the planned image + .env.example (one place for every
     value that changes per site: env vars, host folders, the licence MAC)"""
     name = slug(p["fixture"])
@@ -733,6 +807,11 @@ def compose_new(p, out_dir, mac_needed):
         E.append("# env vars the code reads")
         for e in env:          # comments on their own line: in an env file "X=1  # c" makes the value "1  # c"
             dv = e.get("default_in_code")
+            if window and window.get("env") == e["name"]:
+                E += [f"# windows: the code opens them (cv2.imshow) only when {e['name']} is on, and a container has no "
+                      f"screen - so off: {window['value']}", f"# (the code's default is {dv}: windows on, only where there "
+                      "is a screen)", f"{e['name']}={window['value']}"]
+                continue
             if e.get("secret"):
                 E += ["# secret: fill it in here only - never in a Dockerfile, compose.yml or a chat", f"{e['name']}="]
             elif e["name"] in value:
@@ -743,6 +822,21 @@ def compose_new(p, out_dir, mac_needed):
                 E.append(f"{e['name']}={dv}")
     else:
         E.append("# (the code reads no env vars yet: its settings are written in the code - see code_changes_required)")
+    if window and window.get("calls") and not window.get("env") and (window.get("no_screen") or ("", True))[1]:
+        where = ", ".join(f"{c[2]} at {c[0]}:{c[1]}" for c in window["calls"][:2])
+        k = window.get("const")
+        if k:
+            E += ["", f"# NOTE: the code opens windows ({where}) when {k['name']} is on, and {k['name']} = {k['value']!r} is",
+                  f"# written in the code ({k['file']}:{k['line']}) - a container has no screen: read it from an env var",
+                  f"# ({k['name']} = os.getenv(\"{k['name']}\", \"1\") == \"1\"), then {k['name']}=0 here."]
+        elif window.get("guarded"):
+            E += ["", f"# NOTE: the code opens windows ({where}) inside an if that no env var decides (a",
+                  "# command-line flag, a config value?) - a container has no screen: switch that setting off."]
+        else:
+            E += ["", "# NOTE: the code always opens windows (" + where + ") - a container has no screen. Make the",
+                  "# window optional in the code (if os.getenv(\"SHOW\", \"1\") == \"1\":)."]
+        E += ["#   without a screen: " + x.strip() for x in re.findall(r".{1,100}(?:\s|$)",
+                                                                       (window.get("no_screen") or ("?",))[0])]
     return "\n".join(L) + "\n", "\n".join(E) + "\n"
 
 
@@ -760,12 +854,13 @@ def cmd_plan(a):
         fh.write(dockerfile(p))
     with open(os.path.join(a.out, "Dockerfile.dockerignore"), "w", encoding="utf-8") as fh:
         fh.write(dockerignore(p))
+    window = window_of(jload(a.static) if a.static else None, a.fixture)
     if p["images"]["services"]:
         with open(os.path.join(a.out, "compose.xray.yml"), "w", encoding="utf-8") as fh:
-            fh.write(compose_override(p, pl.services, a.out, pl.compose_path))
+            fh.write(compose_override(p, pl.services, a.out, pl.compose_path, window))
     else:
         mac = bool(pl.sfacts("hardware_identity"))
-        comp, envx = compose_new(p, a.out, mac)
+        comp, envx = compose_new(p, a.out, mac, window)
         with open(os.path.join(a.out, "compose.yml"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(comp)
         with open(os.path.join(a.out, ".env.example"), "w", encoding="utf-8", newline="\n") as fh:
@@ -773,6 +868,9 @@ def cmd_plan(a):
         print("  no compose file built this folder: wrote compose.yml + .env.example (production: one .env per site)")
     print(f"xray-plan {VERSION}: {name} -> {a.out}/ (plan.json, Dockerfile, Dockerfile.dockerignore, compose.xray.yml)")
     print(f"  base {p['base_image']['choice']} ({p['base_image']['why']})")
+    if window and window.get("env"):
+        print(f"  windows: {window['env']}={window['value']} in the compose files (the code's own switch; a container has "
+              "no screen)")
     print(f"  GPU: {p['compose_runtime']['gpus']}")
     print(f"  apt: {', '.join(x['installed_as'] for x in p['apt_packages']) or 'none'}")
     print(f"  pip: {' '.join(p['pip_install'])}")
@@ -780,7 +878,8 @@ def cmd_plan(a):
           f"writable: {', '.join(p['writable_dirs']) or 'none'}")
     print(f"  code changes needed: {len(p['code_changes_required'])}")
     for e in p["evidence"]:
-        if e.startswith(("cmd:", "python ", "GPU base", "no Dockerfile", "services ", "WARNING", "apt: ", "requirements: kept", "build: ")):
+        if e.startswith(("cmd:", "python ", "GPU base", "no Dockerfile", "services ", "WARNING", "apt: ", "requirements: kept",
+                         "build: ", "smaller image: ")):
             print(f"  NOTE: {e}")
     return 0
 

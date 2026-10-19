@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.2"
+VERSION = "0.1.4"
 CUDA_RE = re.compile(r"lib(cuda|cudart|cublas|cublasLt|cudnn|cufft|curand|cusparse|cusolver|nvrtc|nccl|nvJitLink|"
                      r"nvinfer|onnxruntime_providers_cuda|onnxruntime_providers_tensorrt|torch_cuda|c10_cuda)", re.I)
 DRIVER_RE = re.compile(r"/libcuda\.so|/libnvidia-|/libnvcuvid|/libdxcore|/usr/lib/wsl/")
@@ -317,6 +317,17 @@ def watch(a):
         print("stopped")
 
 
+def loader_dirs():
+    """folders registered with the Linux loader in /etc/ld.so.conf.d (ldconfig) - besides the standard ones"""
+    out = []
+    for f in sorted(glob.glob("/etc/ld.so.conf.d/*.conf")):
+        for ln in (read(f) or "").splitlines():
+            ln = ln.strip()
+            if ln and not ln.startswith(("#", "include")) and ln not in out:
+                out.append(ln)
+    return out
+
+
 # --------------------------------------------------------------------------- the image, no program needed
 def look_image(a):
     src = Sources()
@@ -328,6 +339,11 @@ def look_image(a):
     for d in (os.environ.get("LD_LIBRARY_PATH") or "").split(":"):
         if d:
             L.append(f"    {d}  {'ok' if os.path.isdir(d) else 'MISSING - this folder does not exist'}")
+    reg = loader_dirs()
+    extra = [d for d in reg if not re.match(r"^/(usr/)?(local/)?lib(32|64|x32)?(/[\w.]+-linux-gnu\w*)?/?$", d)]  # not system
+    L.append("  registered with the loader (/etc/ld.so.conf.d, ldconfig): " + ("" if extra else
+                                                                              "only the system's own folders"))
+    L += [f"    {d}  {'ok' if os.path.isdir(d) else 'MISSING - this folder does not exist'}" for d in extra]
     # biggest pip packages (sizes from RECORD)
     sizes = {}
     for d in sites:
@@ -342,8 +358,8 @@ def look_image(a):
     sos = []
     for d in sites:
         for root, _dirs, fs in os.walk(d):
-            sos += [os.path.join(root, f) for f in fs if re.search(r"\.so(\.\d+)*$", f)]
-    need, missing = {}, {}
+            sos += [os.path.join(root, f) for f in fs if re.search(r"\.so(\.[0-9A-Za-z]+)*$", f)]   # .so.1.1.1k too
+    need, missing, at_import = {}, {}, set()
     # ldd on a library a wheel bundles (numpy.libs/libopenblas...) says "not found" for its bundled neighbours: the
     # package's module finds them through its own search path when it loads them - they are not missing
     bundled = {os.path.basename(f) for f in sos}
@@ -366,6 +382,11 @@ def look_image(a):
                     if m.group(1) in bundled:     # a pip package's own copy (numpy.libs/...): found at run time
                         continue
                     missing.setdefault(m.group(1), set()).add(f"{owner} ({os.path.basename(cur)})")
+                    # ldd of a Python module lists everything `import` loads (also through other libraries):
+                    # a library missing there breaks an import. Missing only for other files = parts that are
+                    # loaded on demand (plugins, optional providers, transports)
+                    if re.search(r"\.(cpython-[^/]+|abi3)\.so$", cur):
+                        at_import.add(m.group(1))
                 elif "site-packages" not in m.group(3) and "dist-packages" not in m.group(3):
                     k = src.of(os.path.realpath(m.group(3)))
                     if k.startswith("apt:"):
@@ -378,29 +399,39 @@ def look_image(a):
     if drv:
         L.append("    GPU driver libraries (" + ", ".join(sorted(drv)) + "): not in the image on purpose - "
                  "docker run --gpus all mounts them from your PC")
-    if real:
-        L.append("    MISSING (an import that needs one of these fails with 'cannot open shared object file'):")
-        for k, v in sorted(real.items()):
-            fix = next((p for so, p in APT.items() if k.startswith(so)), None)
-            optional = all(re.search(r"plugin|_tensorrt|tensorrt|openvino|_rocm|migraphx", x, re.I) for x in v)
-            windows = all(re.search(r"qxcb|XcbQpa|libQt5Gui|libQt5Widgets", x) for x in v)
-            L.append(f"      {k:<26} needed by {', '.join(sorted(v))[:110]}" +
-                     ("\n        (a plugin / optional part: matters only if the program uses it)" if optional else
-                      "\n        (only for windows on a screen: cv2.imshow with a display)" if windows else "") +
-                     "\n        -> " +
-                     (f"apt-get install -y {fix}" if fix else "find it: apt-get install -y apt-file && apt-file "
-                      f"update && apt-file search {k}") +
-                     ("  (or a CUDA library: check LD_LIBRARY_PATH above)" if CUDA_RE.search(k) else ""))
+    def fix_of(k):
+        fix = next((p for so, p in APT.items() if k.startswith(so)), None)
+        return (f"apt-get install -y {fix}" if fix else f"find it: apt-file search {k}") + \
+            ("  (or a CUDA library: check LD_LIBRARY_PATH above)" if CUDA_RE.search(k) else "")
+    hard = {k: v for k, v in real.items() if k in at_import}
+    soft = {k: v for k, v in real.items() if k not in at_import}
+    if hard:
+        L.append("    MISSING, needed by an import (that import fails with 'cannot open shared object file'):")
+        for k, v in sorted(hard.items()):
+            L.append(f"      {k:<26} needed by {', '.join(sorted(v))[:110]}\n        -> {fix_of(k)}")
     else:
-        L.append("    MISSING: none - every system library the pip packages ask for is in the image")
+        L.append("    MISSING for an import: none - every library a Python module loads is in the image")
+    if soft:
+        L.append(f"    missing only for parts loaded on demand ({len(soft)}: plugins, optional providers, multi-GPU "
+                 "transports - they matter only")
+        L.append("    if the program uses that part; the X-Ray run shows what it really loads):")
+        for k, v in sorted(soft.items()):
+            what = ("the Qt window plugin (cv2.imshow on a screen)" if all(re.search(r"qxcb|XcbQpa|libQt5", x)
+                                                                          for x in v) else
+                    "TensorRT (onnxruntime's TensorRT provider)" if all(re.search(r"tensorrt", x, re.I) for x in v) else
+                    ", ".join(sorted(v))[:90])
+            L.append(f"      {k:<26} {what}  -> {fix_of(k)}")
     # CUDA libraries in the image, and where they are
     cud = cuda_libs(sites)
     L += ["", "  CUDA LIBRARIES IN THE IMAGE:"]
     L += [f"    {n:<22} {mb(os.path.getsize(p)) if os.path.exists(p) else '?':>8}  {src.of(p).replace(':', ' ', 1):<28} {p}"
           for n, p in sorted(set(cud))] or ["    none (a CPU image, or the CUDA libraries come with a package not listed)"]
-    if any("site-packages" in p for _n, p in cud) and not os.environ.get("LD_LIBRARY_PATH"):
-        L.append("    note: CUDA libraries from pip (site-packages/nvidia) but no LD_LIBRARY_PATH - torch finds them "
-                 "itself; onnxruntime and others that open them by name need LD_LIBRARY_PATH")
+    known = [d for d in (os.environ.get("LD_LIBRARY_PATH") or "").split(":") + reg if d]
+    lost = sorted({os.path.dirname(p) for _n, p in cud if "site-packages" in p} - set(known))
+    if lost:
+        L.append("    note: CUDA libraries from pip in folders the loader does not search (" + ", ".join(lost) + ") - "
+                 "torch finds its own; onnxruntime, tensorflow and others that open them by name need them in "
+                 "LD_LIBRARY_PATH or registered with ldconfig (the X-Ray Dockerfiles do that)")
     L += [""] + same_files_installed(sites)
     if not a.no_imports:
         L += [""] + import_test(sites)
@@ -439,7 +470,8 @@ def inventory(a):
     inv = {"tool": "xray-look-inventory", "version": VERSION, "label": a.label or os.environ.get("HOSTNAME", "?"),
            "os": osr.get("PRETTY_NAME", "?"), "python": {"exe": sys.executable, "version": sys.version.split()[0],
                                                        "prefix": sys.prefix, "sites": sites},
-           "env": {k: os.environ.get(k, "") for k in ("PATH", "LD_LIBRARY_PATH")}, "user": os.environ.get("USER", ""),
+           "env": {k: os.environ.get(k, "") for k in ("PATH", "LD_LIBRARY_PATH")}, "loader_dirs": loader_dirs(),
+           "user": os.environ.get("USER", ""),
            "apt": {}, "pip": {}, "cuda": [], "dirs": {}}
     if shutil.which("dpkg-query"):
         out = subprocess.run(["dpkg-query", "-W", "-f=${Package}\t${Version}\t${Installed-Size}\n"],
@@ -523,7 +555,9 @@ def compare(a):
          row("pip packages", f"{mb(tot(A['pip']))} ({len(A['pip'])})", f"{mb(tot(B['pip']))} ({len(B['pip'])})"),
          row("main CUDA libraries", f"{mb(cud(A))} from {csrc(A)}" if A["cuda"] else "-",
              f"{mb(cud(B))} from {csrc(B)}" if B["cuda"] else "-"),
-         row("LD_LIBRARY_PATH", A["env"].get("LD_LIBRARY_PATH") or "-", (B["env"].get("LD_LIBRARY_PATH") or "-")[:70])]
+         row("LD_LIBRARY_PATH", A["env"].get("LD_LIBRARY_PATH") or "-", (B["env"].get("LD_LIBRARY_PATH") or "-")[:70]),
+         row("loader folders", ", ".join(A.get("loader_dirs") or []) or "-", (", ".join(B.get("loader_dirs") or []) or
+                                                                            "-")[:70])]
     for p, r, x in zip(rfiles, runs, (A, B)):
         if p and r is None:
             L.append(f"  (run file {p} not found or not readable: 'used' is not shown for {x['label']})")
@@ -533,11 +567,13 @@ def compare(a):
     keys = set(A["dirs"]) | set(B["dirs"])
     diff = {k: A["dirs"].get(k, 0) - B["dirs"].get(k, 0) for k in keys if k != "/"}
     # a folder whose difference is (almost) all in one sub-folder: show only the sub-folder (/opt/venv/lib, not /opt)
-    keys = [k for k in diff if not any(c.startswith(k + "/") and abs(diff[c]) >= 0.95 * abs(diff[k]) > 0 for c in diff)]
+    keys = [k for k in diff if abs(diff[k]) >= 1048576 and
+            not any(c.startswith(k + "/") and abs(diff[c]) >= 0.95 * abs(diff[k]) for c in diff)]
     big = sorted(keys, key=lambda k: -abs(diff[k]))[:8]
     L += ["", "  FOLDERS THAT DIFFER MOST:"]
     L += [f"    {k:<40} A {mb(A['dirs'].get(k, 0)) if A['dirs'].get(k) else '-':>9}    B "
-          f"{mb(B['dirs'].get(k, 0)) if B['dirs'].get(k) else '-':>9}" for k in big]
+          f"{mb(B['dirs'].get(k, 0)) if B['dirs'].get(k) else '-':>9}" for k in big] or \
+        ["    none - the same folders with the same sizes (to 1 MB)"]
 
     def mark(kind, name, i):
         r = runs[i]
@@ -553,7 +589,13 @@ def compare(a):
             if name not in A[kind]:
                 rows.append((e["bytes"], f"only in B  {kind}  {name} {e['version'][:24]}", mark(kind, name, 1)))
     rows.sort(key=lambda r: -r[0])
+    same_pk = not rows and all(A[k][n]["version"] == B[k][n]["version"] for k in ("pip", "apt") for n in A[k])
+    if same_pk and not big:
+        L[2:2] = ["  SAME CONTENTS: the same Linux, Python, apt and pip packages (same versions) and folder sizes - the "
+                  "two images", "  were built the same way.", ""]
     L += ["", f"  WHAT ONLY ONE IMAGE HAS, biggest first ({len(rows)} packages):"]
+    if not rows:
+        L.append("    nothing - every apt and pip package is in both")
     L += [f"    {t:<62}{mb(b):>9}  {m}" for b, t, m in rows[:a.top]]
     if len(rows) > a.top:
         L.append(f"    ... {len(rows) - a.top} more, {mb(sum(r[0] for r in rows[a.top:]))} together (--top N shows more)")

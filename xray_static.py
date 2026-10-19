@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-VERSION = "0.5.10"
+VERSION = "0.5.12"
 PLACE = "<var>"
 REQ = {"no": 0, "conditional": 1, "yes": 2}
 
@@ -405,6 +405,86 @@ def unparse(node, limit=80):
     return s if len(s) <= limit else s[: limit - 3] + "..."
 
 
+_UNKNOWN = object()
+PLATFORM_SRC = ("sys.platform", "os.name", "platform.system")
+
+
+def with_platform_names(test, consts):
+    """IS_WIN = os.name == "nt" ... if IS_WIN:  ->  the test with IS_WIN replaced by what it was assigned (module
+    constants only, two levels deep); the test itself when no name stands for a platform test."""
+    import copy
+
+    def sub(node, depth):
+        if isinstance(node, ast.Name) and depth < 3:
+            v = consts.get(node.id)
+            if isinstance(v, ast.AST) and any(k in unparse(v, 200) for k in PLATFORM_SRC + tuple(consts)):
+                inner = sub(copy.deepcopy(v), depth + 1)
+                if any(k in unparse(inner, 200) for k in PLATFORM_SRC):
+                    return inner
+            return node
+        for field, val in ast.iter_fields(node):
+            if isinstance(val, list):
+                setattr(node, field, [sub(x, depth) if isinstance(x, ast.AST) else x for x in val])
+            elif isinstance(val, ast.AST):
+                setattr(node, field, sub(val, depth))
+        return node
+    if not any(isinstance(n, ast.Name) and n.id in consts for n in ast.walk(test)):
+        return test
+    out = sub(copy.deepcopy(test), 0)
+    return out if any(k in unparse(out, 200) for k in PLATFORM_SRC) else test
+
+
+def linux_value(test):
+    """A platform test evaluated for a Linux container: os.name == "nt", sys.platform.startswith("win"),
+    platform.system() == "Windows" -> False; os.name != "nt" -> True. None when it depends on anything else."""
+    def ev(n):
+        if isinstance(n, ast.Constant):
+            return n.value
+        if isinstance(n, (ast.Tuple, ast.List, ast.Set)):
+            vals = [ev(e) for e in n.elts]
+            return _UNKNOWN if any(v is _UNKNOWN for v in vals) else tuple(vals)
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            return {"os.name": "posix", "sys.platform": "linux"}.get(f"{n.value.id}.{n.attr}", _UNKNOWN)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and not n.keywords:
+            f = n.func
+            if not n.args and isinstance(f.value, ast.Name) and f"{f.value.id}.{f.attr}" == "platform.system":
+                return "Linux"
+            base = ev(f.value)
+            if not isinstance(base, str):
+                return _UNKNOWN
+            if not n.args and f.attr in ("lower", "upper", "casefold", "strip"):
+                return getattr(base, f.attr)()
+            if len(n.args) == 1 and f.attr in ("startswith", "endswith"):
+                arg = ev(n.args[0])
+                return getattr(base, f.attr)(arg) if isinstance(arg, (str, tuple)) else _UNKNOWN
+            return _UNKNOWN
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not):
+            v = ev(n.operand)
+            return _UNKNOWN if v is _UNKNOWN else not v
+        if isinstance(n, ast.BoolOp):
+            vals = [ev(v) for v in n.values]
+            known = [bool(v) for v in vals if v is not _UNKNOWN]
+            stop = isinstance(n.op, ast.Or)        # or: one True decides; and: one False decides
+            if stop in known:
+                return stop
+            return _UNKNOWN if len(known) < len(vals) else not stop
+        if isinstance(n, ast.Compare) and len(n.ops) == 1:
+            a, b = ev(n.left), ev(n.comparators[0])
+            if a is _UNKNOWN or b is _UNKNOWN:
+                return _UNKNOWN
+            op = n.ops[0]
+            try:
+                if isinstance(op, (ast.Eq, ast.NotEq)):
+                    return (a == b) == isinstance(op, ast.Eq)
+                if isinstance(op, (ast.In, ast.NotIn)) and isinstance(b, (str, tuple)):
+                    return (a in b) == isinstance(op, ast.In)
+            except TypeError:
+                return _UNKNOWN
+        return _UNKNOWN
+    v = ev(test)
+    return None if v is _UNKNOWN else bool(v)
+
+
 def libname(s):
     b = posixpath.basename(s.replace("\\", "/"))
     b = re.sub(r"\.(so(\.\d+)*|dll|dylib)$", "", b)
@@ -589,6 +669,32 @@ def collect_aliases(tree):
                 full = base + a.name if (not base or base.endswith(".")) else base + "." + a.name
                 al[a.asname or a.name] = full
     return al
+
+
+def import_bindings(tree):
+    """(name the import binds, top-level module, line) for every absolute import; name None for `import *`."""
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                out.append((a.asname or a.name.split(".")[0], a.name.split(".")[0], n.lineno))
+        elif isinstance(n, ast.ImportFrom) and not n.level and n.module:
+            for a in n.names:
+                out.append((None if a.name == "*" else a.asname or a.name, n.module.split(".")[0], n.lineno))
+    return out
+
+
+def names_read(tree):
+    """Every name the code reads (torch in torch.cuda, np in np.zeros(...)), plus the names __all__ re-exports."""
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            out.add(n.id)
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            ts = n.targets if isinstance(n, ast.Assign) else [n.target]
+            if any(isinstance(t, ast.Name) and t.id == "__all__" for t in ts) and n.value is not None:
+                out |= {c.value for c in ast.walk(n.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+    return out
 
 
 def collect_consts(body, out):
@@ -950,7 +1056,7 @@ class ModuleVisitor(ast.NodeVisitor):
         r = "yes"
         for t in self.ctx:
             k = tag_kind(t)
-            if k in ("type_checking", "dead", "unreached"):
+            if k in ("type_checking", "dead", "unreached", "other_os"):
                 return "no"
             if k == "main_guard":
                 if not self.mod.is_entry:
@@ -983,7 +1089,7 @@ class ModuleVisitor(ast.NodeVisitor):
         r = "yes"
         for t in self.ctx:
             k = tag_kind(t)
-            if k in ("type_checking", "dead", "unreached"):
+            if k in ("type_checking", "dead", "unreached", "other_os"):
                 return "no"
             if k == "main_guard":
                 if not self.mod.is_entry:
@@ -1045,7 +1151,13 @@ class ModuleVisitor(ast.NodeVisitor):
                 and test.left.id == "__name__"):
             return "main_guard", "branch"
         src = unparse(test, 60)
-        if "sys.platform" in src or "os.name" in src or "platform.system" in src:
+        exp = with_platform_names(test, self.mod.consts)     # IS_WIN = os.name == "nt" ... if IS_WIN:
+        if exp is not test or any(k in src for k in PLATFORM_SRC):
+            on_linux = linux_value(exp)        # the image is Linux: a Windows-only branch never runs in it
+            if on_linux is False:
+                return "other_os:" + src, None
+            if on_linux is True:
+                return None, "other_os:not " + src
             return "platform:" + src, "platform:not " + src
         return f"branch@{id(test)}:1", f"branch@{id(test)}:0"
 
@@ -2388,7 +2500,7 @@ class CallGraphBuilder(ast.NodeVisitor):
         if isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__":
             return False
         src = unparse(t, 60)
-        return not ("sys.platform" in src or "os.name" in src or "platform.system" in src)
+        return not (any(k in src for k in PLATFORM_SRC) or with_platform_names(t, self.mod.consts) is not t)
 
     def stmts(self, body):
         pushed = 0
@@ -2417,7 +2529,9 @@ class CallGraphBuilder(ast.NodeVisitor):
         elif isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__":
             bt, et = "main_guard", "branch"
         elif not self.general_branch(t):
-            bt, et = "platform", "platform"
+            on_linux = linux_value(with_platform_names(t, self.mod.consts))
+            bt, et = (("other_os", None) if on_linux is False else (None, "other_os") if on_linux is True
+                      else ("platform", "platform"))
         else:
             bt, et = f"branch@{id(t)}:1", f"branch@{id(t)}:0"
         self.block(node.body, bt)
@@ -3258,6 +3372,7 @@ class Mapper:
         self.derive_dangling()
         self.derive_shadowing()
         self.derive_packaging()
+        self.derive_unused_imports()
         self.derive_os_data()
         self.derive_write_roots()
         self.assign_ids()
@@ -3683,7 +3798,7 @@ class Mapper:
         r, fn_seen, cls_seen = "yes", False, False
         for t in tags:
             k = tag_kind(t)
-            if k in ("type_checking", "dead", "unreached"):
+            if k in ("type_checking", "dead", "unreached", "other_os"):
                 return "no"
             if k == "main_guard":
                 if not is_entry:
@@ -4005,6 +4120,8 @@ class Mapper:
                 f["detail"] = (f["detail"] + "; in a file never imported from the entrypoint(s)").strip("; ")
                 continue
             best, dead_fn, pruned = "no", None, False
+            other_os = [next((t.split(":", 1)[1] for t in x.get("_t", []) if t.startswith("other_os:")), None)
+                        for x in f["sites"]]
             for x in f["sites"]:
                 q = x.get("_q")
                 lr = self.eval_lr(x.get("_t", []), m.is_entry, x.get("_imp", False))
@@ -4028,7 +4145,10 @@ class Mapper:
                 best = "no"
                 f["detail"] = (f["detail"] + "; missing and only existence-checked: the code falls back").strip("; ")
             f["required_at_runtime"] = best
-            if best == "no" and dead_fn:
+            if best == "no" and other_os and all(other_os):
+                f["detail"] = (f["detail"] + f"; only on another OS ({other_os[0]}): a Linux container never runs "
+                               "it").strip("; ")
+            elif best == "no" and dead_fn:
                 f["detail"] = (f["detail"] + f"; inside {dead_fn}(), which nothing reachable calls").strip("; ")
             elif best == "no" and pruned:
                 f["detail"] = (f["detail"] + "; in a branch the literal arguments never select").strip("; ")
@@ -4250,6 +4370,38 @@ class Mapper:
                 self.derived("shadowing", r, "shadows_stdlib",
                              f"'{stem}.py' sits on sys.path and hides the standard-library module '{stem}'",
                              required="yes", sites=[{"file": r, "line": None}])
+
+    def derive_unused_imports(self):
+        """`import torch` and then no `torch` anywhere else in that file: the import only runs for what importing
+        does (a plugin that registers itself; on Windows, torch loading the CUDA DLLs onnxruntime-gpu then finds).
+        The image still carries the package - and everything only it needs - for that one line."""
+        from_local = set()     # `from live_video import torch` in another project file reads the name too
+        for mod in self.modules.values():
+            if mod.tree is None:
+                continue
+            for n in ast.walk(mod.tree):
+                if isinstance(n, ast.ImportFrom) and (n.level or (n.module or "").split(".")[0] not in
+                                                      self.third_party_tops | STDLIB):
+                    from_local |= {a.name for a in n.names}
+        for mod in self.modules.values():
+            if mod.tree is None or mod.unreached or mod.is_init:     # __init__.py: imports are often re-exports
+                continue
+            binds = import_bindings(mod.tree)
+            read = names_read(mod.tree) | from_local
+            state = {}
+            for name, top, line in binds:
+                state.setdefault(top, []).append((name, line, name is None or name in read))
+            for f in self.facts:
+                if f["category"] != "third_party_import" or f.get("_mod") != mod.rel:
+                    continue
+                st = state.get(f.get("import_name"))
+                if not st or any(u for _, _, u in st):
+                    continue
+                names = sorted({nm for nm, _, _ in st})
+                f["never_used"] = {"names": names, "lines": sorted({ln for _, ln, _ in st})}
+                piece = (f"imported, but the code never uses {', '.join(names)}: the import only runs for its side "
+                         "effect")
+                f["detail"] = (f["detail"] + "; " + piece) if f["detail"] else piece
 
     def derive_packaging(self):
         needed, sites = {}, {}

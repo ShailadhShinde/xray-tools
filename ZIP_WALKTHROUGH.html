@@ -351,7 +351,7 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
   <div class="rules">
     <div class="rule"><h3>The driver comes from your PC</h3><p>It is the only GPU part that does. <code>--gpus all</code> mounts <code>libcuda.so</code>, <code>libnvidia-ml.so</code> and <code>nvidia-smi</code> into the container. Everything else must be in the image.</p></div>
     <div class="rule"><h3>Wheels bring most of their libraries</h3><p>opencv-python carries its own FFmpeg and Qt. Only a few libraries are expected from the system. Those, and only those, go into the apt line.</p></div>
-    <div class="rule"><h3>Libraries are found by name</h3><p>Linux looks in its standard folders plus <code>LD_LIBRARY_PATH</code>. A library outside those folders is "not found", even if it is in the image.</p></div>
+    <div class="rule"><h3>Libraries are found by name</h3><p>Linux looks in its standard folders, <code>LD_LIBRARY_PATH</code>, and the folders registered with <code>ldconfig</code> (<code>/etc/ld.so.conf.d</code>). A library outside those folders is "not found", even if it is in the image.</p></div>
   </div>
 </section>
 
@@ -368,13 +368,15 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>cd /d "«X»"
 python --version
 python -m pip install -U pip
-findstr /b VERSION xray_naive.py xray_static.py xray_trace.py xray_plan.py xray_runfile.py xray_look.py xray_videos.py</pre></div>
-  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.3"
-xray_static.py:VERSION = "0.5.10"
+findstr /b VERSION xray_naive.py xray_static.py xray_trace.py xray_needs.py xray_pkg.py xray_plan.py xray_runfile.py xray_look.py xray_videos.py</pre></div>
+  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.4"
+xray_static.py:VERSION = "0.5.12"
 xray_trace.py:VERSION = "0.2.7"
-xray_plan.py:VERSION = "0.1.10"
-xray_runfile.py:VERSION = "0.2.3"
-xray_look.py:VERSION = "0.1.2"
+xray_needs.py:VERSION = "0.1.11"
+xray_pkg.py:VERSION = "0.1.4"
+xray_plan.py:VERSION = "0.1.13"
+xray_runfile.py:VERSION = "0.2.6"
+xray_look.py:VERSION = "0.1.4"
 xray_videos.py:VERSION = "0.1.0"</pre></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; Docker Desktop running</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi</pre></div>
@@ -1027,6 +1029,8 @@ NOTE: apt: libcudnn9-cuda-12 left out - the nvidia/cuda base image has it   (and
       <li><strong>Only the files the run used</strong> are copied (practice: live_video.py). <code>plan\Dockerfile.dockerignore</code> lists what stays out and why.</li>
     </ul></div>
   </div>
+
+  <div class="callout"><p><strong>Real ZIP-main: torch is imported and never used.</strong> The <code>live_video.py</code> you showed starts with <code>import torch</code>, and no other line touches torch (the needs report now marks it <code>torch (imported, never used)</code>). On Windows that line has a job: importing torch loads torch's CUDA DLLs, and onnxruntime-gpu then finds them. In the Linux image it has none (<code>LD_LIBRARY_PATH</code> points onnxruntime at the CUDA libraries), yet torch, triton and the CUDA wheels only torch needs are about 3.9 GB of the 7.1 GB slim image. step4.txt says so in <code>NOTE: smaller image: ...</code>, the needs report under OPTIONAL CODE CHANGES, and <code>code-changes.txt</code> gives the line to write: <code>if os.name == "nt": import torch</code>. Your PC keeps working as before; X-Ray reads that branch as "never runs in the image". Then build-naive, run-step2, run-step3-4, build-slim, run-slim: verify must still say PASS, with <code>CUDAExecutionProvider</code> in step2-slim.log.</p></div>
 </section>
 
 <!-- ============================================================ STEP 9 -->
@@ -1067,12 +1071,12 @@ VERDICT: PASS - the planned image did everything the scenario needs</pre></div>
     <label class="done-box"><input type="checkbox" class="done" id="done-step10" data-step="step10"> Done</label>
   </header>
 
-  <div class="prose"><p>Same program, different source for CUDA: <code>python:3.12-slim</code> plus <code>onnxruntime-gpu[cuda,cudnn]</code>, which makes pip install only the CUDA parts onnxruntime needs. Keep the first slim result so you can go back.</p></div>
+  <div class="prose"><p>Same program, different source for CUDA. <code>GPUBASE=auto</code> takes the same kind of base as your naive image: an nvidia/cuda naive image gives an nvidia/cuda slim image; a <code>python:3.12-slim</code> naive image (torch brings CUDA as pip wheels) gives <code>pip</code>. Here you build the OTHER one, so you can compare: <code>pip</code> after an nvidia/cuda naive image, <code>nvidia</code> after a python-slim one (step4.txt says "auto = pip here" in that case). Keep the first slim result so you can go back.</p></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder &middot; keep the auto result</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker tag zip-slim zip-slim-auto
 xcopy /e /i /q runs\zip\plan runs\zip\plan-auto
 notepad runs\zip\run-step3-4.bat</pre></div>
-  <div class="prose"><p>In Notepad change <code>set "GPUBASE=auto"</code> to <code>set "GPUBASE=pip"</code> and save. Then:</p></div>
+  <div class="prose"><p>In Notepad change <code>set "GPUBASE=auto"</code> to <code>set "GPUBASE=pip"</code> (or <code>nvidia</code>, see above) and save. Then:</p></div>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\run-step3-4.bat
 runs\zip\build-slim.bat
 runs\zip\run-slim.bat
@@ -1081,24 +1085,31 @@ docker image ls</pre></div>
   <div class="out"><div class="out-bar">Practice run, the new parts of plan\Dockerfile</div><pre>FROM python:3.12-slim
 RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libx11-6 libxcb1 ...
 RUN pip install --no-cache-dir numpy==2.5.4 opencv-python==5.0.0.93 onnxruntime-gpu[cuda,cudnn]==1.22.0 nvidia-ml-py==13.615.71
-# onnxruntime finds the CUDA / cuDNN libraries of the pip wheels here
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:...cublas/lib:...cuda_runtime/lib:...
+# The CUDA libraries come from NVIDIA's pip wheels. A library that opens them by name (onnxruntime ...) needs the
+# Linux loader to know their folders. Found here after the install, whatever the layout ...
+RUN python3 -c "import pathlib, site; print('\n'.join(sorted({str(f.parent) for s in site.getsitepackages() for f in pathlib.Path(s, 'nvidia').rglob('*.so*')})))" \
+    &gt; /etc/ld.so.conf.d/cuda-wheels.conf &amp;&amp; ldconfig
 
 image                 DISK USAGE   CONTENT SIZE
 zip-naive                 9.01GB          3.4GB
 zip-slim (pip)            6.05GB         2.21GB     (practice build, without the Debian apt layer)</pre></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; look inside the pip image as root</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm -it --user root --entrypoint bash zip-slim</pre></div>
-  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; why the LD_LIBRARY_PATH line exists</span><button class="copy" type="button">Copy</button></div><pre>SP=$(python -c "import site;print(site.getsitepackages()[0])"); echo $SP
+  <div class="cmd"><div class="cmd-bar"><span class="where inside">inside &middot; why the ldconfig line exists</span><button class="copy" type="button">Copy</button></div><pre>SP=$(python3 -c "import site;print(site.getsitepackages()[0])"); echo $SP
+cat /etc/ld.so.conf.d/cuda-wheels.conf
 ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep -E "cu|nvrtc"
-LD_LIBRARY_PATH= ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep "not found"
+mv /etc/ld.so.conf.d/cuda-wheels.conf /tmp/ &amp;&amp; ldconfig
+ldd $SP/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep "not found"
+mv /tmp/cuda-wheels.conf /etc/ld.so.conf.d/ &amp;&amp; ldconfig
 du -sh $SP/nvidia/* | sort -h
 pip list 2&gt;/dev/null | grep -E "nvidia|onnx"
 exit</pre></div>
-  <div class="out"><div class="out-bar">Practice run (shortened)</div><pre>libcublas.so.12 =&gt; .../site-packages/nvidia/cublas/lib/libcublas.so.12
+  <div class="out"><div class="out-bar">Practice run (shortened)</div><pre>/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib        (cat: the folders the RUN registered)
+/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib     ... one per CUDA 12 wheel; CUDA 13: .../nvidia/cu13/lib
+libcublas.so.12 =&gt; .../site-packages/nvidia/cublas/lib/libcublas.so.12
 libcudnn.so.9 =&gt; .../site-packages/nvidia/cudnn/lib/libcudnn.so.9
 libcudart.so.12 =&gt; .../site-packages/nvidia/cuda_runtime/lib/libcudart.so.12
-          (without LD_LIBRARY_PATH:)
+          (without the registered folders:)
 libcublas.so.12 =&gt; not found
 libcudnn.so.9 =&gt; not found
 libcudart.so.12 =&gt; not found                     (all 7 not found)
@@ -1109,7 +1120,7 @@ nvidia-cudnn-cu12 9.27.0.42    nvidia-cublas-cu12 12.9.2.10    onnxruntime-gpu 1
   <div class="notes">
     <div class="why"><h3 class="block-title">Why it is smaller, and the catch</h3><ul>
       <li>The CUDA part shrinks from 4.38 GB to 2.58 GB: cuSOLVER, cuSPARSE, NCCL, NPP and cuda-compat are simply not installed.</li>
-      <li>The libraries now sit in <code>site-packages/nvidia/*/lib</code>, folders Linux does not search. <code>LD_LIBRARY_PATH</code> adds them. Without it, onnxruntime falls back to the CPU, just like your cuDNN experiment in step 5.</li>
+      <li>The libraries now sit in folders under <code>site-packages/nvidia</code> that Linux does not search. The <code>RUN</code> after the pip line finds them after the install and registers them with the loader (<code>ldconfig</code>), whatever the layout: CUDA 12 wheels use one folder per library (<code>nvidia/cublas/lib</code> ...), CUDA 13 wheels one shared <code>nvidia/cu13/lib</code>. Without it, onnxruntime falls back to the CPU, just like your cuDNN experiment in step 5.</li>
       <li>pip takes the newest CUDA 12 / cuDNN 9 (12.9 and 9.27 in practice), not the base image's 12.8 and 9.8. That is allowed within CUDA 12, and your verify run is the proof.</li>
     </ul></div>
     <div class="check"><h3 class="block-title">Decide</h3><ul>
@@ -1166,14 +1177,15 @@ XOUT_DIR=./xout
 &lt;NAME&gt;=/xin/... or /xout/... the paths inside the container
 &lt;NAME&gt;=&lt;code default&gt;        every other setting, as in the code</pre></div>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; in runs\zip\plan</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker compose build
-docker compose run --rm zip-main
-dir xout
+docker compose run --rm zip-main</pre></div>
+  <div class="callout"><p><strong>One block at a time here.</strong> <code>docker compose run</code> connects your keyboard to the program while it runs, so lines pasted after it go to the program, not to CMD (they show up in its output). Paste the next block when it has ended.</p></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; after the run ended</span><button class="copy" type="button">Copy</button></div><pre data-tpl>dir xout
 cd /d "«X»"</pre></div>
 
   <div class="notes">
     <div class="why"><h3 class="block-title">Why</h3><ul>
       <li><code>.env</code> holds everything that changes per PC: folders, settings, later passwords. compose.yml stays the same everywhere. Never put .env on GitHub.</li>
-      <li><strong>Windows</strong>: if your code opens them (step 1, the Screen branch), switch them off the way your code allows before this run. Without X-Ray nothing catches <code>cv2.imshow</code>, and a container has no screen.</li>
+      <li><strong>Windows</strong>: without X-Ray nothing catches <code>cv2.imshow</code>, and a container has no screen (<code>Could not load the Qt platform plugin "xcb"</code>). xray_plan finds the code's own switch and sets it off in <code>.env.example</code> (e.g. <code>SHOW=0</code>, with the reason above it). A <code>.env</code> you copied before that: add the line yourself. No switch in the code: .env.example says so.</li>
       <li><strong><code>run --rm</code>, not <code>up -d</code></strong>: compose.yml has <code>restart: unless-stopped</code>. That suits a camera stream that should run forever. A program that works through one video file and then ends would be started again by <code>up -d</code> every time it finishes.</li>
       <li>The service is called <code>zip-main</code> after the folder name ZIP-main.</li>
     </ul></div>

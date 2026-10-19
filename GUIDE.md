@@ -162,12 +162,30 @@ cameras, screen, env vars, packages, model files, data files, files written, net
 | `model ...` | model files it loads | are they in the project folder? big ones may be better mounted |
 | `writes ...` | folders it writes | these need a volume (`-v`) to keep the files |
 | `camera ...` | webcam / RTSP / file | RTSP on the network: fine. Webcam: `--device /dev/videoN` (Linux). `<unresolved>` = the address comes from a DB/config at runtime |
-| `screen ...` | opens windows (`cv2.imshow`) | a server has no screen: is it switched off by a setting? |
+| `screen ...` | opens windows (`cv2.imshow`) | a container has no screen. The line below says how to switch them off: the code's own env var (`in a container: -e SHOW=0`, and the `env` line for it says `MUST be 0`), or - when the switch is a constant written in the code (`SHOW = True`) or there is none - a change in CODE CHANGES NEEDED |
 | `system GPU: ...` | "required" = no CPU fallback, "optional" = falls back to CPU | does the machine have an NVIDIA GPU + the NVIDIA container toolkit? |
 
 **c) CODE CHANGES NEEDED** - things Docker settings cannot fix (hardcoded passwords, `127.0.0.1` servers,
 hardcoded Windows paths, key files). You may not be allowed to change code: then this is the list you give to
 the code owner, with file and line.
+
+**c2) OPTIONAL CODE CHANGES (it runs without them - the image gets smaller)** - a package the code imports and
+then never uses (the tree marks it `(imported, never used)`): only the `import` line runs. The image still carries
+that package and every package only it needs. The classic case: `import torch` at the top of a program that runs its
+model with onnxruntime-gpu. On Windows that line has a job - importing torch loads torch's CUDA DLLs, and
+onnxruntime-gpu then finds them. In a Linux image it has none: the loader finds NVIDIA's CUDA wheels (their folders are
+registered in the image - section 3b, line 4) or the nvidia/cuda base image has them - and torch with its own CUDA
+wheels is 3-4 GB. X-Ray does not decide this from the names "torch" / "onnxruntime": step 3 reads it from the image
+(the unused package depends on CUDA wheels; a package the code uses links CUDA libraries by name). The change keeps
+your PC as it is:
+```python
+if os.name == "nt": import torch      # Windows only: loads the CUDA DLLs onnxruntime-gpu uses
+```
+X-Ray reads code under `if os.name == "nt":` / `if sys.platform == "win32":` / `if platform.system() == "Windows":`
+as "never runs in the image" (an image is Linux), so after the change - rebuild the naive image, run Steps 2-4 again -
+the plan leaves the package out, and the verify run shows whether the image still works without it.
+`code-changes.txt` (from xray_runfile.py) lists the same items under OPTIONAL, with the line as it is now and the line
+to write; `step3.txt` and the plan's `NOTE: smaller image:` say how many GB it is.
 
 **d) NOT USED BY THIS ENTRY POINT** - files, folders, models the entry point never touches. They will be left
 out of the slim image. Check: is anything here actually used (e.g. started by another script)? If yes, that
@@ -292,19 +310,23 @@ above every line (also good to know when you write a Dockerfile by hand):
 
 | Section | Decided from | Rule |
 |---|---|---|
-| 1. base image | the GPU table | CPU: `python:3.X-slim`. GPU + torch: `python:3.X-slim` too (torch brings CUDA as pip packages; an nvidia/cuda base would be a second copy). GPU with only onnxruntime-gpu: `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` (+ Python in a venv); onnxruntime-gpu < 1.19: CUDA 11.8 + cuDNN 8 base. A source package with CUDA code (`.cu`) needs nvcc: the `-devel` image. |
+| 1. base image | the GPU table | CPU: `python:3.X-slim`. GPU + a package that brings CUDA as pip wheels (torch; or `onnxruntime-gpu[cuda,cudnn]`, `tensorflow[and-cuda]` - an extra whose dependencies are NVIDIA's CUDA wheels, read from the package's own metadata): `python:3.X-slim` too (an nvidia/cuda base would be a second copy). GPU with a package that needs CUDA from the system: `nvidia/cuda:<CUDA>-cudnn-runtime` (+ Python in a venv) - CUDA 12.8.1, or 13.0.3 when the package's own requirements ask for CUDA 13 (`nvidia-cuda-runtime~=13.0`, `-cu13` names); onnxruntime-gpu < 1.19: CUDA 11.8 + cuDNN 8. A source package with CUDA code (`.cu`) needs nvcc: the `-devel` image. |
 | 2. system libraries (apt) | the package names | the libraries a package loads when it RUNS: opencv-python -> `libgl1` glib `libx11-6` `libxcb1`, lightgbm -> `libgomp1`, psycopg2 -> `libpq5` ... |
 | 3a. big frameworks | kind = HEAVY / torch, onnxruntime ... | their own `pip install` first: Docker reuses that layer while the rest changes |
 | 3b. the other packages | kind | if any is an sdist with C / C++ / Cython code: `gcc libc6-dev` (+ `g++`, + the `-dev` library) installed and purged **in the same RUN**, so the compiler is not in the image |
-| 4. LD_LIBRARY_PATH | GPU table | only when onnxruntime-gpu (loads CUDA by name) sits on a slim base next to torch's nvidia-* packages: points at `site-packages/nvidia/*/lib` - folders INSIDE the image. With an nvidia/cuda base the file says why nothing is added: the base sets `LD_LIBRARY_PATH=/usr/local/cuda/lib64` and keeps cuDNN in a standard folder |
+| 4. the CUDA library folders | GPU table | only when a package that loads CUDA by name (onnxruntime-gpu, tensorflow, cupy ...) sits on a slim base with NVIDIA's CUDA wheels: one `RUN` finds, AFTER the install, every folder under `site-packages/nvidia` that holds libraries and registers it with the Linux loader (`/etc/ld.so.conf.d` + `ldconfig` = a permanent `LD_LIBRARY_PATH`). No fixed list, because the layout changes: CUDA 12 wheels use one folder per library (`nvidia/cublas/lib` ...), CUDA 13 wheels one shared folder (`nvidia/cu13/lib`), cuDNN / NCCL their own. With an nvidia/cuda base the file says why nothing is added: the base sets `LD_LIBRARY_PATH=/usr/local/cuda/lib64` and keeps cuDNN in a standard folder |
 | 5. code | - | `COPY . .` - everything; X-Ray finds out what is used |
 
-LD_LIBRARY_PATH, seen with your own eyes (in a container of such an image):
+The registration, seen with your own eyes (in a container of such an image):
 ```bash
-P=$(python -c "import onnxruntime,os;print(os.path.dirname(onnxruntime.__file__))")/capi/libonnxruntime_providers_cuda.so
+cat /etc/ld.so.conf.d/cuda-wheels.conf               # the folders the Dockerfile registered
+P=$(python3 -c "import onnxruntime,os;print(os.path.dirname(onnxruntime.__file__))")/capi/libonnxruntime_providers_cuda.so
 ldd $P | grep -E "nvidia|not found"                  # found: .../site-packages/nvidia/cudnn/lib/libcudnn.so.9 ...
-LD_LIBRARY_PATH= ldd $P | grep "not found"           # without it: libcudart, libcublas, libcudnn ... not found
 ```
+Tested both layouts (python:3.12-slim, no GPU needed for this check): onnxruntime-gpu 1.23.2 (CUDA 12 wheels) - without
+the registration 6 libraries "not found" (libcudart, libcublas, libcublasLt, libcufft, libcurand, libcudnn), with it
+none; onnxruntime-gpu 1.31.0 (CUDA 13 wheels in `nvidia/cu13/lib`) - the same. What stays "not found" is `libcuda.so.1`,
+the driver, which `--gpus all` brings from the host.
 The only GPU part that comes from the host is the driver (`libcuda.so`): `--gpus all` mounts it in.
 
 ## 4. Step 2 - Watch it run (needs Docker and an image that runs the app)
@@ -458,12 +480,19 @@ python3 xray_plan.py plan --project PROJECT_FOLDER --dockerfile PROJECT_FOLDER/D
 - The compose services that build this folder are found automatically; `--service NAME` picks one.
 - No compose file: `--compose none`.
 - Read every `NOTE:` line. Example: "the Dockerfile CMD runs api.py, which is not in the project".
+  `NOTE: smaller image: live_video.py:4 imports torch but never uses it: torch and the 16 package(s) only it needs are
+  3.9 GB of this image` = an optional code change (section 3.3 c2); the Dockerfile repeats it above the pip line.
 - **GPU apps** (the run really used the GPU), `--gpu-base`:
   - `auto` (default): the same `nvidia/cuda` image family as your naive Dockerfile (`-runtime`, never `-devel`),
     with Ubuntu's python3 in a venv. It is the family that already worked on your GPU.
-  - `pip`: `python:X.Y-slim`, with the CUDA libraries coming from pip (`onnxruntime-gpu[cuda,cudnn]`, plus an
-    `LD_LIBRARY_PATH` pointing at them). It is about 1.5-2 GB smaller. Use it only if the verify run says PASS: verify
-    checks that the GPU was really used.
+  - `pip`: `python:X.Y-slim`, with the CUDA libraries coming from NVIDIA's pip wheels: a package with an extra that
+    installs them gets it (read from its own metadata: `onnxruntime-gpu[cuda,cudnn]`, `tensorflow[and-cuda]` ...), and
+    their folders are registered with the loader (section 3b, line 4). It is about 1.5-2 GB smaller. Use it only if the
+    verify run says PASS: verify checks that the GPU was really used.
+  - `nvidia`: the nvidia/cuda runtime image even when the naive image was python-slim (torch brought CUDA as pip
+    wheels: then `auto` = `pip`, and step4.txt says so) - CUDA 12.8.1, or 13.0.3 when the image's CUDA wheels are CUDA
+    13 ones (CUDA 13 needs driver 580+). Build the other variant and compare the two with `compare-images.bat`
+    (section 6.2).
 
 You get `plans/app/Dockerfile` (every line has a comment why), `Dockerfile.dockerignore`, `compose.xray.yml`,
 `plan.json`. Read the Dockerfile before building.
@@ -530,8 +559,12 @@ python3 xray_plan.py verify --naive app-runtime.json --planned app-xray-runtime.
 | inside: `ls: cannot access '/proc//fd'` | `PID` is empty: run the `PID=...` line of section 10b first, or type the number (`PID=25`) |
 | build log: `ERROR: pip's dependency resolver does not currently take into account ...` / `pip check` lines | expected when naive-check.txt lists INSTALLED IN A SECOND STEP lines: the same warning your PC had, the build goes on |
 | the image builds, the program says `No module named ...` / `undefined symbol` / `numpy.core.multiarray failed to import` | `xray_look.py --image` (section 10a): every package is imported and each failure gets its reason |
+| `docker compose run`: lines you pasted after it appear in the program's output | `compose run` connects your keyboard to the program while it runs: paste the next commands only after it ended |
+| `docker compose run` (no X-Ray): `Could not load the Qt platform plugin "xcb"` | the window: `.env.example` from xray_plan sets the code's own window switch off (e.g. `SHOW=0`); a `.env` copied before that needs the line added |
+| onnxruntime runs on the CPU in a python-slim GPU image (`CUDAExecutionProvider` missing, `Failed to load library libonnxruntime_providers_cuda.so ... cannot open shared object file`) | the CUDA wheels' folders are not known to the loader. `xray_look.py --image`: "registered with the loader" must list the `site-packages/nvidia/...` folders; a note names the folders nobody searches. The X-Ray Dockerfiles register them (section 3b, line 4); a hand-written one needs the same `RUN` (or `LD_LIBRARY_PATH` with exactly those folders - CUDA 13 wheels use `nvidia/cu13/lib`) |
+| the slim image is still big, and most of it is torch (or another big package) the code hardly touches | the needs report's OPTIONAL CODE CHANGES / the plan's `NOTE: smaller image:`: a package imported and never used (section 3.3 c2). `xray_look.py --image` lists the biggest packages of any image |
 | `ResolutionImpossible` in a naive build | the requirements file changed after the check: run xray_naive.py again and use the new Dockerfile.naive |
-| `Could not load the Qt platform plugin "xcb" ... even though it was found`, exit code 134 or 139 | the program opened a window (`cv2.imshow`) and a container has no screen. `run-naive` finds the code's own switch (e.g. `if SHOW:` with `SHOW = os.getenv("SHOW", "1") == "1"`) and sets it off - its WINDOWS note at the top says which. No switch in the code: use run-explore / run-load (X-Ray switches windows off), or make the window optional in the code |
+| `Could not load the Qt platform plugin "xcb" ... even though it was found`, exit code 134 or 139 | the program opened a window (`cv2.imshow`) and a container has no screen. `run-naive` finds the code's own switch (e.g. `if SHOW:` with `SHOW = os.getenv("SHOW", "1") == "1"`) and sets it off - its WINDOWS note at the top says which. A switch written as a constant (`SHOW = True`) or no switch at all: `code-changes.txt` has the line to change (`SHOW = os.getenv("SHOW", "1") == "1"`); until then use run-explore / run-load (X-Ray switches windows off) |
 | `[av1 @ ...] Your platform doesn't support hardware accelerated AV1 decoding`, `Failed to get pixel format`, no frames | the video is AV1. OpenCV's Linux wheel has no software AV1 decoder (its own AV1 decoder needs hardware decoding, which a container does not have) - same in OpenCV 4.13 and 5.0. Run `runs\NAME\videos.bat "D:\your folder"`: it checks every video with the image's own OpenCV and converts the ones it cannot read to H.264 (section 4, "Videos"). `naive-check.txt` and `run.env` show each video's codec; with `VIDEOS` an unreadable video is skipped with a message |
 | run-naive: `The program ended with exit code N` | the line below it says what N means (1 = a Python error, 134 / 139 = usually a window without a screen, 137 = stopped after 30 s or out of memory) |
 | `cannot open video: /xin/...` after `VIDEOIO(CV_IMAGES) ... icvExtractPattern` | the video is not at that path INSIDE the container (the OpenCV message is misleading: when FFmpeg cannot open the file, OpenCV tries the name as an image-sequence pattern). Check: `docker run --rm -v "D:\your folder:/xin/video_in" --entrypoint "" IMAGE ls -la /xin/video_in` - is the file listed, with exactly that name? Nothing listed: Docker Desktop cannot see that drive / folder (Settings -> Resources -> File sharing), or the folder path is wrong |
@@ -848,7 +881,8 @@ files, like `.dll` on Windows) in "lib" folders: `/usr/lib/x86_64-linux-gnu` (De
 
 **How a library is found.** A program asks for a library by NAME (`libcudnn.so.9`). Linux looks in: the folders
 written into the library that asks (RPATH - torch uses this for its own nvidia-* wheels, so torch needs no setting),
-then `LD_LIBRARY_PATH`, then the standard folders. Nothing is copied from the PC and nothing is compiled when the
+then `LD_LIBRARY_PATH`, then the folders registered in `/etc/ld.so.conf.d` (`ldconfig`; the X-Ray Dockerfiles register
+the CUDA wheels' folders there), then the standard folders. Nothing is copied from the PC and nothing is compiled when the
 program runs: not found = `ImportError: ... cannot open shared object file` (cv2), or a silent switch to the CPU
 (onnxruntime). The compiler (`gcc`) is only ever used while BUILDING, by pip, for a package that has no ready-made
 Linux wheel. Examples of system libraries packages expect: `libGL.so.1` (opencv-python, apt `libgl1`),
@@ -869,8 +903,9 @@ from your PC is the DRIVER (`libcuda.so`, `nvidia-smi`): `docker run --gpus all`
 
 **Will the GPU work on another PC?** Three things must fit:
 1. the driver on that PC: `nvidia-smi` (top right, "CUDA Version") must be at least the CUDA of the image
-   (CUDA 12.8 needs driver 570 or newer);
-2. the CUDA libraries must know the card: CUDA 12.8 is the first that knows RTX 50xx (Blackwell);
+   (CUDA 12.8 needs driver 570 or newer, CUDA 13 driver 580 or newer);
+2. the CUDA libraries must know the card: CUDA 12.8 is the first that knows RTX 50xx (Blackwell); CUDA 13 no longer
+   supports cards older than RTX 20xx / GTX 16xx;
 3. the framework's own GPU code must be built for the card: torch `+cu126` stops at RTX 40xx (so it does not run on
    an RTX 50xx even on a CUDA 12.8 base); `+cu128` includes RTX 50xx. An RTX 3060 works with all of them.
 `docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi` checks the first one on any PC: an
@@ -893,3 +928,36 @@ overwrites the other's files. `xray_naive.py` keeps one (section 3b, SAME FILES)
 a built image ("PACKAGES THAT INSTALLED THE SAME FILES"). Note: opencv-python's wheel brings its own FFmpeg
 (`opencv_python.libs/libavcodec...`) - no system FFmpeg is needed to read videos; the non-headless one needs the X11 /
 OpenGL libraries from apt (`libgl1`, `libxcb1` ...) even when no window is ever opened.
+
+## 15. What X-Ray reads, and what it knows - so anyone can extend it
+
+**Read from your files, for any project.** Almost every decision comes from data: the code (imports and whether their
+names are ever used, env vars and their defaults, the `if` around a window call, `if os.name == "nt":` and variables
+that hold such a test, paths, hosts), the run (what really loaded, which GPU provider ran, which files were opened),
+the image (the installed files, which libraries each compiled file needs - `ldd`, where the CUDA wheels put their
+libraries), and each package's own metadata (dependencies, extras that install NVIDIA's CUDA wheels, the CUDA major a
+wheel is built for). No project's paths, names or packages are written into the tools.
+
+**Known from lists.** Some facts are not in any file - e.g. which call opens a window, or what tkinter prints without
+a screen. They sit in a few lists; a library that is in none of them is not recognized by that rule, and one added line
+extends the rule for every project:
+
+| Knowledge | List | File |
+|---|---|---|
+| calls / imports that open a window | `GUI_CALLS`, `GUI_IMPORTS` | xray_static.py |
+| what each GUI library does without a screen | `NO_SCREEN` | xray_runfile.py |
+| system libraries a package needs when it runs, before any image exists | `RUNTIME_APT` | xray_naive.py |
+| ... and from a library / program name to its apt package | `LIB_TO_APT`, `BIN_TO_APT`, `APT_BY_DIST` | xray_static.py |
+| packages that load CUDA by name although their metadata does not say so | `SYSTEM_CUDA` | xray_naive.py |
+| CPU / GPU / headless variants, binary swaps | `VARIANTS`, `GUI_TO_HEADLESS`, `BINARY_SWAP` | xray_static.py |
+| Windows-only packages | `WINDOWS_ONLY` | xray_naive.py |
+| headers a compiled package needs (`-dev`) | `DEV_LIBS` | xray_naive.py |
+| model / config / key file types | `MODEL_EXT`, `CONFIG_EXT`, `KEY_EXT` | xray_static.py |
+| file, network, process calls it follows | `IO_CALLS`, `NET_CALLS`, `SUBPROC` ... | xray_static.py |
+| import errors explained | `HINTS` | xray_look.py |
+| video formats OpenCV cannot read | `CODEC_NOTE` | xray_runfile.py |
+
+**The safety net for anything a list does not know.** Once an image exists X-Ray stops guessing: the traced run
+records what really loaded, `xray_look.py --image` imports every package and lists every library that is missing
+(whatever the library), and verify compares the slim image's run with the naive one's. A new library the lists do not
+know still shows up there - as a failed import, a missing `.so`, or a difference in verify.

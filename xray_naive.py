@@ -22,7 +22,8 @@ Then it writes into runs/NAME/naive/:
   requirements.docker.txt      the requirements as the build installs them (Windows-only out, PyTorch index in,
                                each handled line with a comment)
   Dockerfile.naive             sections (base, apt libraries, frameworks, other packages + a compiler only where
-                               needed, LD_LIBRARY_PATH, code), each line with its reason - decided from the tables
+                               needed, the CUDA wheels' library folders, code), each line with its reason - decided
+                               from the tables
   Dockerfile.naive.dockerignore
 
 The whole file is also checked TOGETHER, the way the build installs it (one pip install). A pip freeze comes from a PC
@@ -51,7 +52,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Linux x86_64 platform tags (pip matches the listed tags exactly; pure-Python "any" wheels always match)
@@ -395,8 +396,35 @@ HEAVY_MB = 100     # a wheel bigger than this (download size) is listed as HEAVY
 SRC_LANG = [(r"\.pyx$|\.pxd$", "Cython -> C"), (r"\.(c|h)$", "C"), (r"\.(cpp|cc|cxx|hpp|hh)$", "C++"),
             (r"(^|/)Cargo\.toml$", "Rust (needs cargo)"), (r"\.(f|f90|f95|for)$", "Fortran (needs gfortran)"),
             (r"(^|/)CMakeLists\.txt$", "CMake"), (r"\.(cu|cuh)$", "CUDA (needs nvcc)")]
-# GPU packages that load CUDA / cuDNN from the SYSTEM (base image or LD_LIBRARY_PATH), not from their own pip deps
-SYSTEM_CUDA = {"onnxruntime-gpu", "cupy-cuda11x", "cupy-cuda12x", "tensorrt", "paddlepaddle-gpu", "faiss-gpu"}
+# GPU packages that load CUDA / cuDNN BY NAME from outside their own wheel (the base image, or NVIDIA's pip wheels the
+# loader must find). Most are also recognized from their metadata (extras that install CUDA wheels); this list covers
+# the ones whose metadata does not say it.
+SYSTEM_CUDA = {"onnxruntime-gpu", "cupy-cuda11x", "cupy-cuda12x", "cupy-cuda13x", "tensorrt", "paddlepaddle-gpu",
+               "faiss-gpu"}
+# NVIDIA's CUDA libraries as pip wheels: nvidia-cublas-cu12, nvidia-cuda-runtime (CUDA 13 names have no -cuNN), and the
+# cuda-toolkit meta package; nvidia-ml-py is the NVML Python binding, not a CUDA library
+CUDA_WHEEL = re.compile(r"^(nvidia-(?!ml-py)|cuda-toolkit$)")
+# after the install: every folder NVIDIA's wheels put libraries in, registered with the Linux loader (any layout)
+CUDA_REGISTER = ("RUN python3 -c \"import pathlib, site; print('\\n'.join(sorted({str(f.parent) for s in "
+                 "site.getsitepackages() for f in pathlib.Path(s, 'nvidia').rglob('*.so*')})))\" \\\n"
+                 "    > /etc/ld.so.conf.d/cuda-wheels.conf && ldconfig")
+
+
+def cuda_major_of(reqs):
+    """The CUDA major version NVIDIA's wheels in these requirement lines are built for: the -cu12 / -cu13 in a name,
+    or the version of the wheels that follow CUDA's own numbering (nvidia-cuda-runtime~=13.0, cuda-toolkit==13.0.3).
+    Others (nvidia-cufft 12.x, nvidia-curand 10.x) carry their library's own version - not CUDA's."""
+    best = None
+    for r in reqs:
+        name = canon(re.split(r"[ ;<>=~!\[(]", r)[0])
+        m = re.search(r"-cu(1\d)$", name)
+        v = int(m.group(1)) if m else None
+        if v is None and re.match(r"^(nvidia-cuda-runtime|nvidia-cuda-nvrtc|nvidia-nvjitlink|cuda-toolkit)$", name):
+            m = re.search(r"(?:==|~=|>=)\s*(\d+)", r)
+            v = int(m.group(1)) if m else None
+        if v and (best is None or v > best):
+            best = v
+    return best
 
 
 def url_size(url):
@@ -576,7 +604,7 @@ def classify(pick, name, raw):
             k["compiler"], k["what"] = "probably", "source: could not look inside - assume it needs a compiler"
     # GPU: does it bring CUDA itself (nvidia-* pip packages), offer it as an extra, or need it from the system?
     deps = meta.get("requires_dist") or []
-    nv = [d for d in deps if canon(d).startswith("nvidia-")]
+    nv = [d for d in deps if CUDA_WHEEL.match(canon(re.split(r"[ ;<>=~!\[(]", d)[0]))]
     hard = [re.split(r"[ ;<>=~!\[]", d)[0] for d in nv if "extra" not in d]
     k["nv_reqs"] = [d.split(";")[0].strip() for d in nv if "extra" not in d]
     k["nv_pkgs"] = sorted({canon(h) for h in hard})
@@ -584,10 +612,16 @@ def classify(pick, name, raw):
     m = re.search(r"nvidia-cuda-runtime-cu1\d\s*==\s*(\d+)\.(\d+)", rt)
     if m:
         k["cuda_ver"] = f"{m.group(1)}.{m.group(2)}"
+    m = re.search(r"cuda-toolkit(?:\[[^\]]*\])?\s*==\s*(\d+)\.(\d+)", rt)       # CUDA 13 era: cuda-toolkit[...]==13.0.3
+    if m and not k.get("cuda_ver"):
+        k["cuda_ver"] = f"{m.group(1)}.{m.group(2)}"
     m = re.search(r"\+cu(\d+)(\d)$", meta.get("version", ""))
     if m and not k.get("cuda_ver"):
         k["cuda_ver"] = f"{m.group(1)}.{m.group(2)}"
     extra = sorted({m for d in nv for m in re.findall(r'extra\s*==\s*["\']([^"\']+)', d)})
+    if extra:
+        k["cuda_extras"] = extra
+    k["cuda_major"] = cuda_major_of(nv) or (int(k["cuda_ver"].split(".")[0]) if k.get("cuda_ver") else None)
     asked = re.match(r"^[A-Za-z0-9._-]+\[([^\]]*)\]", raw)
     asked = [canon(e.strip()) for e in asked.group(1).split(",") if e.strip()] if asked else []
     have = {canon(e) for e in (meta.get("provides_extra") or [])}
@@ -610,7 +644,7 @@ def classify(pick, name, raw):
             "] and pip installs the CUDA libraries too"
     elif name in SYSTEM_CUDA:
         k["cuda"] = "system"
-        k["gpu"] = "needs CUDA + cuDNN from the SYSTEM: the base image, or nvidia-* pip packages via LD_LIBRARY_PATH" + \
+        k["gpu"] = "needs CUDA + cuDNN from the SYSTEM: the base image, or NVIDIA's pip wheels registered with the loader" + \
             (" (this version has no [cuda,cudnn] extra)" if name == "onnxruntime-gpu" else "")
     return k
 
@@ -752,8 +786,9 @@ def base_ways(d, gpu, py):
               "# every PC that has an NVIDIA driver:",
               "#   a) the base image: nvidia/cuda:<CUDA>-cudnn-runtime-<Ubuntu> = NVIDIA's apt packages in /usr/local/cuda"
               + ("   <- USED HERE" if on_base else ""),
-              "#   b) NVIDIA's pip wheels (nvidia-cublas-cu12, nvidia-cudnn-cu12 ...): torch depends on them; for"
-              " onnxruntime-gpu", "#      write onnxruntime-gpu[cuda,cudnn] on python:X-slim (X-Ray Step 4: --gpu-base pip)"
+              "#   b) NVIDIA's pip wheels (CUDA 12: nvidia-cublas-cu12 ...; CUDA 13: nvidia-cublas ...): torch depends on",
+              "#      them; a package with an extra that installs them gets them through it on python:X-slim -",
+              "#      onnxruntime-gpu[cuda,cudnn], tensorflow[and-cuda] (X-Ray Step 4: --gpu-base pip)"
               + ("" if on_base else "   <- USED HERE"),
               "#   c) from your PC: does not work - Windows has .dll files, a Linux container needs .so files, and",
               "#      another PC has other folders. Only the DRIVER comes from the PC: --gpus all mounts libcuda.so and",
@@ -802,10 +837,6 @@ RUNTIME_APT = {
 FRAMEWORKS = {"torch", "torchvision", "torchaudio", "tensorflow", "tensorflow-cpu", "onnxruntime", "onnxruntime-gpu",
               "jax", "jaxlib", "paddlepaddle", "paddlepaddle-gpu", "tensorrt"}
 # nvidia-* pip package -> its folder in site-packages/nvidia/ (what onnxruntime & co. load by name)
-NV_DIR = {"cudnn": "cudnn", "cublas": "cublas", "cuda-runtime": "cuda_runtime", "cuda-nvrtc": "cuda_nvrtc",
-          "cufft": "cufft", "curand": "curand"}
-
-
 def vtuple(v):
     return tuple(int(x) for x in re.findall(r"\d+", v or "")[:2]) or (0,)
 
@@ -818,7 +849,8 @@ def decide(results, py, gpu):
     known = [r for r in live if r.get("k")]
     own = [r for r in known if r["k"].get("cuda") == "own"]
     system = [r for r in known if r["k"].get("cuda") == "system"]
-    loads_system = [r for r in known if r["name"] in SYSTEM_CUDA]     # load CUDA by name (LD_LIBRARY_PATH)
+    # load CUDA by name: extras that install CUDA wheels (read from the metadata), or the SYSTEM_CUDA list
+    loads_system = [r for r in known if r["name"] in SYSTEM_CUDA or r["k"].get("cuda_extras")]
     comp = [r for r in live if r["status"] == "COMPILED"]
     langs = set()
     for r in comp:
@@ -827,7 +859,7 @@ def decide(results, py, gpu):
     ort = next((r for r in live if r["name"] == "onnxruntime-gpu"), None)
     ort_v = vtuple((ort.get("k") or {}).get("version") or ort["spec"]) if ort else None
     torch_cuda = next((r["k"]["cuda_ver"] for r in own if r["k"].get("cuda_ver")), None)
-    d = {"why_base": [], "notes": [], "apt": [], "ld": [], "venv": False}
+    d = {"why_base": [], "notes": [], "apt": [], "ld": False, "venv": False}
     if not gpu:
         d.update(base=f"python:{py}-slim", os="debian", pyv=py)
         d["why_base"].append(f"CPU image: python:{py}-slim = Debian + Python {py} only (about 120 MB). Every library "
@@ -846,8 +878,14 @@ def decide(results, py, gpu):
                           f"So the base needs no CUDA: python:{py}-slim. An nvidia/cuda base would be a SECOND copy "
                           "of the same libraries (about 3 GB more, no speed gain)."]
     elif system or not known:
+        # the CUDA major the packages' own metadata asks for (onnxruntime-gpu 1.31: nvidia-cuda-runtime~=13.0)
+        major = max([r["k"]["cuda_major"] for r in system if r["k"].get("cuda_major")] or [12])
         if ort_v and ort_v < (1, 19):
             d.update(base="nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04", os="ubuntu22.04", pyv="3.10", venv=True)
+        elif major >= 13:
+            ub = "22.04" if py == "3.10" else "24.04"
+            d.update(base=f"nvidia/cuda:13.0.3-cudnn-runtime-ubuntu{ub}", os=f"ubuntu{ub}",
+                     pyv="3.10" if py == "3.10" else "3.12", venv=True)
         elif py == "3.10":
             d.update(base="nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04", os="ubuntu22.04", pyv="3.10", venv=True)
         else:
@@ -863,10 +901,18 @@ def decide(results, py, gpu):
                               "compiling CUDA code; -base has only libcudart); " + d["os"].replace("ubuntu", "Ubuntu ") +
                               f" = its Python is {d['pyv']}." + (" CUDA 12.8 runs on every current RTX card, RTX 50xx "
                                                                  "too; it needs NVIDIA driver 570 or newer." if
-                                                                 d["base"].startswith("nvidia/cuda:12.8") else "")]
-            if ort_v and ort_v >= (1, 21):
-                d["why_base"].append("Smaller alternative: python-slim + onnxruntime-gpu[cuda,cudnn] (pip installs "
-                                     "only the CUDA parts onnxruntime needs) + LD_LIBRARY_PATH.")
+                                                                 d["base"].startswith("nvidia/cuda:12.8") else
+                                                                 " CUDA 13: " + ", ".join(r["name"] for r in system
+                                                                 if (r["k"].get("cuda_major") or 0) >= 13) +
+                                                                 " is built for it (its own requirements say so); "
+                                                                 "it needs NVIDIA driver 580 or newer, and runs on "
+                                                                 "RTX 20xx / GTX 16xx and newer (CUDA 13 dropped older "
+                                                                 "GPUs)." if d["base"].startswith("nvidia/cuda:13")
+                                                                 else "")]
+            alt = [f"{r['name']}[{','.join(r['k']['cuda_extras'])}]" for r in system if r["k"].get("cuda_extras")]
+            if alt:       # extras that install NVIDIA's CUDA wheels, read from the package's own metadata
+                d["why_base"].append("Smaller alternative: python-slim + " + ", ".join(alt) + " (pip installs only the "
+                                     "CUDA parts these need) + their folders registered with the loader.")
         else:
             d["why_base"].append("GPU image, package kinds unknown (pip could not report them): nvidia/cuda "
                                  "cudnn-runtime is the safe base.")
@@ -910,17 +956,14 @@ def decide(results, py, gpu):
         d["compile"] = {"tools": tools, "keep": keep + dev, "langs": sorted(langs),
                         "who": [(r["name"], ", ".join((r.get("k") or {}).get("langs") or ["C (could not look inside)"]))
                                 for r in comp]}
-    # LD_LIBRARY_PATH: a package that loads CUDA by name + nvidia-* pip packages present + no CUDA in the base
+    # the CUDA wheels' folders: a package that loads CUDA by name + CUDA pip wheels installed + no CUDA in the base
     nv = sorted({p for r in own for p in r["k"].get("nv_pkgs", [])})
     if loads_system and nv and not d["base"].startswith("nvidia/"):
-        for p in nv:
-            key = re.sub(r"^nvidia-|-cu1\d$", "", p)
-            if key in NV_DIR:
-                d["ld"].append(f"{d['site']}/nvidia/{NV_DIR[key]}/lib")
-        d["ld_why"] = (", ".join(r["name"] for r in loads_system) + " opens libcudart / libcublas / libcudnn by NAME: "
-                       "Linux looks in the system folders and in LD_LIBRARY_PATH. These folders are INSIDE the image - "
-                       "the nvidia-* pip packages (from " + ", ".join(r["name"] for r in own) + ") put the libraries "
-                       "there. Nothing comes from the host except the driver (libcuda.so), which --gpus all mounts in.")
+        d["ld"] = True
+        d["ld_why"] = (", ".join(r["name"] for r in loads_system) + " opens libcudart / libcublas / libcudnn by NAME. "
+                       "NVIDIA's pip wheels (from " + ", ".join(r["name"] for r in own) + ") put the libraries INSIDE "
+                       "the image, in folders the loader does not search by itself. Nothing comes from the host except "
+                       "the driver (libcuda.so), which --gpus all mounts in.")
     # pip groups
     first = [r for r in live if not r.get("later")]
     d["frameworks"] = [r for r in first if r["name"] in FRAMEWORKS or
@@ -1046,7 +1089,7 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
         D += ["# A compiled package finds a library it needs in one of three places:",
               "#   - inside its own wheel (opencv_python.libs/: FFmpeg, Qt ...): nothing to install",
               "#   - the system folders (/usr/lib/x86_64-linux-gnu): installed with apt-get - the lines below",
-              "#   - folders named in LD_LIBRARY_PATH (section 4)",
+              "#   - folders registered with the loader (section 4: NVIDIA's CUDA wheels) or named in LD_LIBRARY_PATH",
               "# Decided from: the package NAMES in your requirements (what each is known to load). After the X-Ray run",
               "# the slim plan keeps only what was really loaded; xray_look.py --image lists anything still missing.",
               "# apt-get update downloads the package list (about 40 MB); rm -rf /var/lib/apt/lists/* deletes it again in",
@@ -1137,13 +1180,16 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
         second[0] = second[0].replace("pip install --no-cache-dir", "pip install --no-cache-dir --no-deps", 1)
         D += second
     if d["ld"]:
-        D += bar("4. LD_LIBRARY_PATH - where to find the CUDA libraries")
+        D += bar("4. THE CUDA LIBRARY FOLDERS - tell the Linux loader where the pip wheels put them")
         D += ["# Linux finds a library a program asks for BY NAME (libcudnn.so.9) in: the folders written into the",
               "# library that asks (RPATH - torch uses this for its own nvidia-* wheels), then LD_LIBRARY_PATH, then the",
-              "# standard folders (/lib, /usr/lib/x86_64-linux-gnu, those in /etc/ld.so.conf.d). Not found: an import",
-              "# fails ('cannot open shared object file'), or onnxruntime silently runs on the CPU."]
+              "# folders registered in /etc/ld.so.conf.d (ldconfig), then the standard folders (/lib, /usr/lib/...).",
+              "# Not found: an import fails ('cannot open shared object file'), or onnxruntime silently runs on the CPU."]
         D += ["# " + x.strip() for x in re.findall(r".{1,110}(?:\s|$)", d["ld_why"])]
-        D += ["ENV LD_LIBRARY_PATH=" + ":\\\n".join(d["ld"])]
+        D += ["# The folders are found AFTER the install, whatever the layout: CUDA 12 wheels use one folder per",
+              "# library (nvidia/cublas/lib ...), CUDA 13 wheels one shared folder (nvidia/cu13/lib), cuDNN / NCCL their",
+              "# own. Written to /etc/ld.so.conf.d and registered with ldconfig = a permanent LD_LIBRARY_PATH.",
+              CUDA_REGISTER]
     elif gpu and d["base"].startswith("nvidia/"):
         D += bar("4. LD_LIBRARY_PATH - nothing to add")
         D += ["# The nvidia/cuda base already sets LD_LIBRARY_PATH=/usr/local/cuda/lib64 (libcudart, libcublas, libcufft ...)",

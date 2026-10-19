@@ -13,7 +13,7 @@ Python standard library only (Python 3.8+). Nothing to install.
 | Step | Tool | Runs where | What it does |
 |---|---|---|---|
 | 0 | `xray_naive.py` | your machine (needs internet) | before the first build: checks every requirement for Linux (prebuilt / compiled / missing / Windows-only), checks the whole file together the way the build installs it (lines pip will not install together go into a second `--no-deps` step, exactly as pinned - nothing left out; two packages that install the same files are found and one is kept), and writes a naive Dockerfile that builds. With `--static`: every env var with its value in your code and its path in the container, the code changes needed for Windows paths, files from your PC copied into the image or mounted (`--copy` / `--mount`) |
-| 1 | `xray_static.py` + `xray_needs.py` | your machine | reads the code (runs nothing): packages, files, models, env vars, network, GPU, cameras |
+| 1 | `xray_static.py` + `xray_needs.py` | your machine | reads the code (runs nothing): packages, files, models, env vars, network, GPU, cameras; the env var that switches the windows off in a container; packages imported and never used (OPTIONAL CODE CHANGES: a smaller image) |
 | 2 | `xray_runfile.py` writes the run files (+ `run.env`: every env var in one file); they run `xray_trace.py run` / `facts` / `merge` | inside the app's container / your machine | runs the app and records what it really did |
 |   | `run-naive.bat`: the naive image on its own, no X-Ray - does it start and do its work? | | |
 |   | top of every run file: `RUN_SECONDS` (how long, then Ctrl+C), `LOOP=1` (a video file starts again), `VIDEOS` (a folder of videos played one after the other) - GUIDE section 4 | | |
@@ -26,6 +26,8 @@ Python standard library only (Python 3.8+). Nothing to install.
 | 5 | `xray_compare.py` | your machine | several projects: one shared base image |
 
 See results in the browser: `python3 xray_view.py app.json` (writes and opens `app.view.html` with the file built in).
+
+What X-Ray reads from your files (most of it) and what it knows from lists - and which list to extend for a library it does not know yet: GUIDE.md section 15.
 
 ## Step 1 (safe: reads files only)
 ```

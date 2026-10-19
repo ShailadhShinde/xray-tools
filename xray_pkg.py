@@ -25,7 +25,7 @@ import subprocess
 import sys
 from collections import defaultdict
 
-VERSION = "0.1.2"
+VERSION = "0.1.4"
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache"}
 DEPLOY_FILES = re.compile(r"(^|/)(Dockerfile[^/]*|docker-compose[^/]*\.ya?ml|compose[^/]*\.ya?ml|\.dockerignore|"
                           r"requirements[^/]*\.txt|README[^/]*|SCENARIO\.md|answer_key\.json|\.gitattributes|"
@@ -336,6 +336,13 @@ def give_back(d):
 
 
 # ============================================================================ facts (host)
+# NVIDIA's CUDA libraries as pip wheels (nvidia-cublas-cu12, nvidia-cuda-runtime, ... and the cuda-toolkit meta package);
+# nvidia-ml-py is the NVML Python binding, not a CUDA library
+CUDA_WHEEL = re.compile(r"^(nvidia-(?!ml-py)|cuda-toolkit$)")
+# a compiled file that links one of these loads CUDA libraries BY NAME (the loader must find them)
+CUDA_SONAME = re.compile(r"^lib(cudart|cublas|cublasLt|cudnn|cufft|curand|nvrtc|cusparse|cusolver|nccl|nvinfer)\.so")
+
+
 def req_names(spec):
     """'nvidia-cudnn-cu12 (==9.1.0.70) ; platform_system == "Linux"' -> ('nvidia-cudnn-cu12', marker text)"""
     m = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)", spec)
@@ -410,6 +417,10 @@ class PkgFacts:
             for n in self.top2dists.get(top, []):
                 if n not in losers:
                     roots.add(n)
+        return roots, self.closure(roots)
+
+    def closure(self, roots):
+        """roots + everything they depend on (installed metadata, extras left out)."""
         seen, stack = set(), list(roots)
         while stack:
             n = stack.pop()
@@ -417,7 +428,83 @@ class PkgFacts:
                 continue
             seen.add(n)
             stack.extend(self.graph.get(n, []))
-        return roots, seen
+        return seen
+
+    def cuda_extras(self, n):
+        """the extras of a package that install NVIDIA's CUDA wheels, read from its own metadata:
+        onnxruntime-gpu -> cuda, cudnn; tensorflow -> and-cuda; cupy -> ctk"""
+        out = set()
+        for r in self.d.get(n, {}).get("requires", []):
+            name, marker = req_names(r)
+            m = re.search(r"extra\s*==\s*['\"]([^'\"]+)['\"]", marker)
+            if m and name and CUDA_WHEEL.match(name):
+                out.add(m.group(1))
+        return sorted(out)
+
+    def gpu_extras(self, roots):
+        """CUDA wheels a package keeps installing through those extras (on a python:X-slim GPU base): they stay even
+        when the package that pulls them in today goes."""
+        keep = set()
+        for n in roots:
+            ex = set(self.cuda_extras(n))
+            for r in self.d.get(n, {}).get("requires", []) if ex else []:
+                name, marker = req_names(r)
+                m = re.search(r"extra\s*==\s*['\"]([^'\"]+)['\"]", marker)
+                if m and m.group(1) in ex and name in self.d:
+                    keep.add(name)
+        return keep
+
+    def cuda_major(self, names):
+        """the CUDA major these packages are built for: -cu12 / -cu13 in a CUDA wheel's name, the version of the wheels
+        that follow CUDA's numbering (nvidia-cuda-runtime 13.0.96), or a +cu126 build. Others (nvidia-cufft 12.x,
+        nvidia-curand 10.x) carry their library's own version, not CUDA's."""
+        best = None
+        for n in names:
+            ver = str(self.d.get(n, {}).get("version") or "")
+            m = re.search(r"-cu(1\d)$", n) if CUDA_WHEEL.match(n) else None
+            v = int(m.group(1)) if m else None
+            if v is None and re.match(r"^(nvidia-cuda-runtime|nvidia-cuda-nvrtc|nvidia-nvjitlink|cuda-toolkit)$", n):
+                m = re.match(r"(\d+)\.", ver)
+                v = int(m.group(1)) if m else None
+            if v is None:
+                m = re.search(r"\+cu(1\d)\d$", ver)
+                v = int(m.group(1)) if m else None
+            if v and (best is None or v > best):
+                best = v
+        return best
+
+    def links_cuda(self, n):
+        """its compiled files link CUDA libraries by name (libcudart.so.12 ...) - found in the image's own files"""
+        nd = self.s.get("needed_direct") or {}
+        return not CUDA_WHEEL.match(n) and any(CUDA_SONAME.match(x) for so in self.d.get(n, {}).get("so_files", [])
+                                                for x in nd.get(so, []))
+
+    def brings_cuda(self, n):
+        """it installs CUDA libraries itself: NVIDIA CUDA wheels among its dependencies, or a +cuXXX build"""
+        i = self.d.get(n, {})
+        return "+cu" in str(i.get("version")) or any(CUDA_WHEEL.match(req_names(r)[0] or "") and not
+                                                     extra_only(req_names(r)[1]) for r in i.get("requires", []))
+
+    def never_used(self):
+        """{import name: sites} - packages the code imports and then never uses (every live import site of it in
+        the static map says so), unless the run shows the code importing it somewhere else as well."""
+        sites = defaultdict(list)
+        live = defaultdict(list)
+        for f in self.st.get("facts", []):
+            if f.get("category") == "third_party_import" and f.get("required_at_runtime") in ("yes", "conditional"):
+                live[f.get("import_name")].append(f)
+        for top, fs in live.items():
+            if top and all(f.get("never_used") for f in fs):
+                sites[top] = [{"file": s.get("file"), "line": s.get("line")} for f in fs for s in f.get("sites", [])
+                              if s.get("file")]
+        for f in self.rt.get("facts", []):        # imported in the run from a place the static map did not see
+            top = f.get("import_name")
+            if top in sites and f.get("category") == "third_party_import" and f.get("mechanism") != \
+                    "loaded_by_dependency":
+                known = {(s["file"], s["line"]) for s in sites[top]}
+                if any((s.get("file"), s.get("line")) not in known for s in f.get("sites", []) if s.get("file")):
+                    del sites[top]
+        return dict(sites)
 
     def req_site(self, name):
         r = self.reqs.get(name)
@@ -512,6 +599,34 @@ class PkgFacts:
                          f"{mb(size)} installed" + ("" if gpu_used else "; this run never used a GPU (CPU fallback) -> "
                                                     "install the CPU build: --index-url https://download.pytorch.org/whl/cpu"),
                          self.req_site(n), cuda_packages=cuda, size_bytes=size, version=i["version"])
+        # 4b. imported, but the code never uses the name: only the import runs (for a side effect - e.g. on Windows a
+        #     package that ships CUDA DLLs, imported so that another library finds them). The image carries the
+        #     package and every package only it needs for that one line.
+        for top, sites in self.never_used().items():
+            dists = [n for n in self.top2dists.get(top, []) if n in roots]
+            if not dists:
+                continue
+            rest = roots - set(dists)
+            freed = needed - self.closure(rest | self.gpu_extras(rest))
+            if not set(dists) & freed:
+                continue                    # a package the code does use depends on it: it stays anyway
+            size = sum(self.d[n]["size_bytes"] for n in freed)
+            big = sorted(freed, key=lambda n: -self.d[n]["size_bytes"])
+            where = ", ".join(f"{s['file']}:{s['line']}" for s in sites[:3])
+            users = sorted(n for n in rest if self.links_cuda(n)) if any(self.brings_cuda(x) for x in dists) else []
+            why = (f"{dists[0]} brings CUDA libraries and {', '.join(users)} load(s) CUDA libraries by name: on "
+                   f"Windows, importing {top} first makes its CUDA DLLs findable for them; in the image the loader "
+                   "finds the CUDA wheels' folders (or the CUDA base image) without it" if users else
+                   "an import kept for what importing does: a plugin that registers itself, a patch, DLLs")
+            self.add("packaging", dists[0], "import_never_used", "yes",
+                     f"{where} imports {top}, but the code never uses it - only the import runs ({why}). "
+                     f"{top} and the {len(freed) - 1} package(s) only it needs are {mb(size)} of the image: "
+                     + ", ".join(f"{n} {mb(self.d[n]['size_bytes'])}" for n in big[:6])
+                     + (" ..." if len(big) > 6 else "")
+                     + f". Not needed in the image: make it Windows-only (if os.name == \"nt\": import {top}) or "
+                       "delete the line; rebuild the naive image and run steps 2-4 again: the plan leaves it out, "
+                       "and verify shows whether the image still works without it",
+                     sites[:3], import_name=top, size_bytes=size, freed=sorted(freed))
         # 5. numpy ABI pin
         np_ = self.d.get("numpy")
         if np_ and ("numpy" in needed or "numpy" in self.reqs):
@@ -801,6 +916,7 @@ class PkgFacts:
 
     # ---------------------------------------------------------------- output
     def output(self):
+        _roots, needed = self.needed_dists()
         facts = sorted(self.facts.values(), key=lambda f: (f["category"], str(f["subject"])))
         for n, f in enumerate(facts, 1):
             f["id"] = f"P-{n:04d}"
@@ -821,6 +937,9 @@ class PkgFacts:
                 "facts": facts, "requirements_plan": self.req_plan(),
                 "observations": {"largest_python_packages": [{"name": n, "mb": round(s / 1e6, 1)} for n, s in sizes[:15]],
                                  "apt_packages_not_in_slim": [{"name": p, "mb": round(k / 1e3, 1)} for p, k in extra_apt[:40]],
+                                 "cuda_extras": {n: self.cuda_extras(n) for n in sorted(needed) if self.cuda_extras(n)},
+                                 "links_cuda": sorted(n for n in needed if self.links_cuda(n) and not self.brings_cuda(n)),
+                                 "cuda_major": self.cuda_major(needed | self.closure(self.gpu_extras(needed))),
                                  "notes": list(dict.fromkeys(self.notes))[:60]}}
 
     def req_plan(self):
