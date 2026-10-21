@@ -597,6 +597,23 @@ def _install():
             _k, _v = _line.split("=", 1)
             CAMERA[_k.strip()] = _v.strip()
     GUI_OFF = (os.environ.get("XRAY_GUI") or "").strip().lower() == "off"
+    # XRAY_LOOP_VIDEO=1: a video FILE the app opens starts again from the first frame when it ends (explore runs:
+    # the app keeps working while you look inside the container). Streams and cameras are not touched.
+    LOOP_VIDEO = (os.environ.get("XRAY_LOOP_VIDEO") or "").strip() in ("1", "yes", "on", "true")
+    LOOPS = set()
+    # XRAY_PLAYLIST: a folder of videos (or "a.mp4;b.mp4"): a video FILE the app opens plays these one after the other
+    # instead; after the last one the app sees the end of the video - or, with XRAY_LOOP_VIDEO=1, the list starts again.
+    PLAYLIST = []
+    for _p in (os.environ.get("XRAY_PLAYLIST") or "").split(";"):
+        _p = _p.strip()
+        if _p and os.path.isdir(_p):
+            PLAYLIST += sorted(os.path.join(_p, f) for f in os.listdir(_p) if os.path.splitext(f)[1].lower() in
+                               (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".mpg", ".mpeg", ".wmv", ".webm", ".ts", ".flv"))
+        elif _p:
+            PLAYLIST.append(_p)
+    PL = {}     # id(VideoCapture) -> index of the playlist video it plays now
+    PLN = {}    # id(VideoCapture) -> frames read from that video so far
+    PL_BAD = set()   # playlist videos that gave no frame at all (a codec OpenCV cannot read here, e.g. AV1)
     try:
         GUI_SAVE = float(os.environ.get("XRAY_GUI_SAVE", "5"))
     except ValueError:
@@ -688,22 +705,42 @@ def _install():
             if src is None:
                 return None
             return ("video_open", {"source": src if isinstance(src, int) else pathish(src),
-                                   "substituted_by": cam_sub(src),
+                                   "substituted_by": cam_sub(src) or (f"playlist of {len(PLAYLIST)} videos" if PLAYLIST
+                                                                      and isinstance(src, str) and "://" not in src
+                                                                      else None),
                                    "opened": bool(self.isOpened()) if e is None and self is not None and
                                    hasattr(self, "isOpened") else None, "error": err(e)}, (str(src),))
+
+        def playlist(self, a2, kw2, new):
+            """a video FILE (not a stream / camera / substitute): play the playlist instead"""
+            src = a2[0] if a2 else kw2.get("filename")
+            LOOPS.discard(id(self))       # ids are reused after an object is freed: forget the old object's state
+            PL.pop(id(self), None)
+            if PLAYLIST and new is None and isinstance(src, str) and "://" not in src:
+                PL[id(self)], PLN[id(self)] = 0, 0
+                return (PLAYLIST[0],) + tuple(a2[1:]), {k: v for k, v in kw2.items() if k != "filename"}
+            return a2, kw2
 
         def vc_pre(self, a, kw):
             a2, kw2, new = cam_args(a, kw)
             SUBS[id(self)] = new
+            a2, kw2 = playlist(self, a2, kw2, new)
+            src = a2[0] if a2 else kw2.get("filename")
+            if LOOP_VIDEO and isinstance(src, str) and "://" not in src and id(self) not in PL:
+                LOOPS.add(id(self))
             return a2, kw2
 
         def vc_extra(base):
-            if not CAMERA:
+            if not CAMERA and not LOOP_VIDEO and not PLAYLIST:
                 return {}
 
             def open(self, *a, **kw):
                 a2, kw2, new = cam_args(a, kw)
                 SUBS[id(self)] = new
+                a2, kw2 = playlist(self, a2, kw2, new)
+                src = a2[0] if a2 else kw2.get("filename")
+                if LOOP_VIDEO and isinstance(src, str) and "://" not in src and id(self) not in PL:
+                    LOOPS.add(id(self))
                 return base.open(self, *a2, **kw2)
 
             def read(self, *a, **kw):
@@ -718,12 +755,35 @@ def _install():
                             time.sleep(nxt - now)
                         PACE[id(self)] = max(now, nxt or 0) + 1.0 / fps
                 r = base.read(self, *a, **kw)
-                if sub and "://" not in sub and not r[0]:
+                k = id(self)
+                if k in PL:
+                    tries = 0
+                    while not r[0] and tries <= len(PLAYLIST):  # end of a playlist video: the next one
+                        tries += 1
+                        if not PLN.get(k) and PL[k] not in PL_BAD:
+                            PL_BAD.add(PL[k])
+                            sys.stderr.write(f"[xray-trace] VIDEOS: no frame at all from {PLAYLIST[PL[k]]} - OpenCV "
+                                             "cannot read this file here (AV1? see the guide); next video\n")
+                        i = PL[k] + 1
+                        if i >= len(PLAYLIST):
+                            if not LOOP_VIDEO or len(PL_BAD) >= len(PLAYLIST):
+                                break
+                            i = 0
+                        PL[k], PLN[k] = i, 0
+                        if i in PL_BAD:
+                            continue
+                        base.open(self, PLAYLIST[i])
+                        r = base.read(self, *a, **kw)
+                    if r[0]:
+                        PLN[k] = PLN.get(k, 0) + 1
+                    return r
+                if not r[0] and ((sub and "://" not in sub) or id(self) in LOOPS):
                     base.set(self, 1, 0)          # CAP_PROP_POS_FRAMES = 0: replay the file from the start
                     r = base.read(self, *a, **kw)
                 return r
             return {"open": open, "read": read}
-        subclass_ctor(m, "VideoCapture", vc, pre=vc_pre if CAMERA else None, extra=vc_extra)
+        subclass_ctor(m, "VideoCapture", vc, pre=vc_pre if (CAMERA or LOOP_VIDEO or PLAYLIST) else None,
+                      extra=vc_extra)
         cls = getattr(m, "VideoCapture", None)
         if cls is not None and getattr(cls, "_xray_wrapped", False) and isinstance(cls, type):
             wrap(cls, "open", lambda a, kw, r, e: ("video_open", {"source": pathish(arg(a, kw, 1, "filename")),
@@ -1076,6 +1136,53 @@ def _install():
         ent[0].add(frame.f_lineno)
         return ltrace
 
+    # ------------------------------------------------------------------ resources
+    def _res_sample():
+        """peak RAM (VmHWM), CPU seconds, wall seconds and torch GPU memory of this process, right now"""
+        info = {}
+        try:
+            with open("/proc/self/status") as fh:
+                for line in fh:
+                    if line.startswith("VmHWM:"):
+                        info["peak_rss_mb"] = round(int(line.split()[1]) / 1024, 1)
+            t = os.times()
+            info["cpu_s"] = round(t.user + t.system, 2)
+            info["wall_s"] = round(time.time() - T0, 2)
+        except Exception:
+            pass
+        tc = getattr(sys.modules.get("torch"), "cuda", None)
+        if tc is not None:
+            try:
+                if tc.is_initialized():
+                    info["gpu_peak_mb"] = round(tc.max_memory_reserved() / 2 ** 20, 1)
+            except Exception:
+                pass
+        return info
+
+    try:
+        RES_EVERY = float(os.environ.get("XRAY_RES_EVERY", "5"))
+    except ValueError:
+        RES_EVERY = 5.0
+
+    def _sampler():
+        """a process that is killed (stop-after, docker stop) never runs atexit: sample every few seconds"""
+        TLS.busy = True                     # this thread's own file reads are not the app's
+        while True:
+            time.sleep(RES_EVERY)
+            try:
+                rec = _res_sample()
+                rec["k"] = "res"
+                _write(rec)
+            except Exception:
+                pass
+
+    def _start_sampler():
+        if RES_EVERY > 0:
+            try:
+                threading.Thread(target=_sampler, name="xray-res", daemon=True).start()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------ exit
     def at_exit():
         TLS.busy = True
@@ -1093,6 +1200,7 @@ def _install():
             except OSError:
                 pass
             info = {"k": "exit", "libs": libs, "cpu_count": os.cpu_count()}
+            info.update(_res_sample())     # resources used by this process
             try:
                 info["affinity"] = len(os.sched_getaffinity(0))
             except Exception:
@@ -1191,6 +1299,9 @@ def _install():
             apply_patch(name, sys.modules[name])
     sys.meta_path.insert(0, _XRayPostImport())
     atexit.register(at_exit)
+    _start_sampler()                        # before settrace: the sampler thread is not traced
+    if hasattr(os, "register_at_fork"):
+        os.register_at_fork(after_in_child=_start_sampler)   # threads do not survive fork()
     if COVERAGE:
         sys.settrace(gtrace)
         threading.settrace(gtrace)
