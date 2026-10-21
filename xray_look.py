@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 CUDA_RE = re.compile(r"lib(cuda|cudart|cublas|cublasLt|cudnn|cufft|curand|cusparse|cusolver|nvrtc|nccl|nvJitLink|"
                      r"nvinfer|onnxruntime_providers_cuda|onnxruntime_providers_tensorrt|torch_cuda|c10_cuda)", re.I)
 DRIVER_RE = re.compile(r"/libcuda\.so|/libnvidia-|/libnvcuvid|/libdxcore|/usr/lib/wsl/")
@@ -55,6 +55,36 @@ APT = {"libGL.so.1": "libgl1", "libEGL.so.1": "libegl1", "libGLX.so.0": "libglx0
        "libz.so.1": "zlib1g", "libbz2.so.1.0": "libbz2-1.0", "liblzma.so.5": "liblzma5", "libxml2.so.2": "libxml2",
        "libmariadb.so.3": "libmariadb3", "libodbc.so.2": "libodbc2", "libgdal.so": "libgdal-dev",
        "libcairo.so.2": "libcairo2", "libpango-1.0.so.0": "libpango-1.0-0", "libusb-1.0.so.0": "libusb-1.0-0"}
+
+
+# the same look BY HAND, inside the container (bash): each report section prints its line. Python is asked where its
+# packages are, so the commands fit any image (system Python, a venv in /opt/venv ...)
+SITE = '$(python3 -c "import site; print(site.getsitepackages()[0])")'
+BY_HAND = {
+    "ps": ["for p in /proc/[0-9]*; do echo \"${p#/proc/}  $(tr '\\0' ' ' < $p/cmdline)\"; done",
+           "grep -E 'VmRSS|VmHWM|Threads' /proc/PID/status     (RAM now, RAM peak, threads)"],
+    "files": ["ls -l /proc/PID/fd | grep -v -E 'pipe:|socket:|anon_inode:|/dev/'"],
+    "net": ["python3 -c \"import socket,struct;[print(socket.inet_ntoa(struct.pack('<I',int(r[2][:8],16))),"
+            "int(r[2][9:],16)) for r in (l.split() for l in open('/proc/PID/net/tcp').readlines()[1:]) "
+            "if r[3]=='01']\"     (IPv4 connections: address port)"],
+    "libs": ["grep -o '/[^ ]*\\.so[^ ]*' /proc/PID/maps | sort -u",
+             "dpkg -S /path/of/lib.so    pip show -f PACKAGE     (which package installed a file)"],
+    "gpu": ["nvidia-smi"],
+    "pipsize": ["pip list", "du -sh " + SITE + "/* | sort -h | tail -15"],
+    "ldd": ["find " + SITE + " -name '*.so*' -exec ldd {} + 2>/dev/null | grep 'not found' | sort -u"],
+    "cuda": ["cat /etc/ld.so.conf.d/*.conf; echo $LD_LIBRARY_PATH", "ldconfig -p | grep -E 'libcudnn|libcublas|libcudart'",
+             "find / -xdev -name 'libcudnn*.so*' 2>/dev/null"],
+    "import": ["python3 -c \"import cv2, numpy\"     (the import names your code uses)"],
+    "gputest": ["python3 -c \"import torch; print(torch.cuda.is_available())\"",
+                "python3 -c \"import onnxruntime as o; print(o.get_available_providers())\""],
+    "samefiles": ["pip list | grep -i opencv     pip show -f PACKAGE | head     (two packages, one folder)"],
+}
+
+
+def hand(key, pid=None):
+    """'    by hand: ...' lines for a report section (PID filled in when known)"""
+    cmds = [re.sub(r"\bPID\b", str(pid), c) if pid else c for c in BY_HAND[key]]
+    return ["    by hand: " + cmds[0]] + ["             " + c for c in cmds[1:]]
 
 
 def read(path, mode="r"):
@@ -223,11 +253,11 @@ def file_note(path, writing, src):
     return f"{path}" + (f"   [{', '.join(tags)}]" if tags else "")
 
 
-def lib_summary(libs, src, show_all):
+def lib_summary(libs, src, show_all, pid=None):
     groups = {}
     for p in sorted(libs):
         groups.setdefault(src.of(p), []).append(p)
-    L = [f"  LIBRARIES LOADED ({len(libs)}), by where they come from:"]
+    L = [f"  LIBRARIES LOADED ({len(libs)}), by where they come from:"] + hand("libs", pid)
     order = sorted(groups, key=lambda k: ({"pip": 0, "apt": 1, "driver": 2, "mounted": 3, "image": 4, "python": 5,
                                            "base": 6}.get(k.split(":")[0], 7), k))
     label = {"driver": "the GPU driver of your PC (mounted by --gpus all, never in the image)",
@@ -256,7 +286,7 @@ def gpu_lines():
                               "--format=csv,noheader"], capture_output=True, text=True, timeout=20).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         out = ""
-    return ["  GPU (whole card): " + (out or "nvidia-smi gave no answer")]
+    return ["  GPU (whole card): " + (out or "nvidia-smi gave no answer")] + hand("gpu")
 
 
 def one_look(a):
@@ -266,7 +296,7 @@ def one_look(a):
     ps2 = procs()
     net = net_table()
     L = [f"xray_look {VERSION} - {time.strftime('%H:%M:%S')} - {len(ps)} processes in this container", "",
-         "  PID   PPID  CPU%   RAM now  RAM peak  threads  command"]
+         *hand("ps"), "  PID   PPID  CPU%   RAM now  RAM peak  threads  command"]
     for p in sorted(ps):
         x = ps[p]
         cpu = (ps2.get(p, x)["cpu"] - x["cpu"]) / os.sysconf("SC_CLK_TCK") * 100
@@ -274,13 +304,13 @@ def one_look(a):
                  f"{x['cmd'][:110]}")
     for p in pids:
         files, libs, socks = look_pid(p, src)
-        L += ["", f"=== PID {p}: {ps[p]['cmd'][:120]}", f"  FILES OPEN NOW ({len(files)}):"]
+        L += ["", f"=== PID {p}: {ps[p]['cmd'][:120]}", f"  FILES OPEN NOW ({len(files)}):", *hand("files", p)]
         L += ["    " + file_note(f, w, src) for f, w in sorted(files.items())] or ["    (none)"]
         conns = [net[i] for i in socks if i in net]
-        L.append(f"  NETWORK ({len(conns)}):")
+        L += [f"  NETWORK ({len(conns)}):", *hand("net", p)]
         L += [f"    {pr:<5} {('listening on ' + lo) if st == 'LISTEN' else (lo + '  ->  ' + re_)}  {st}"
               for pr, lo, re_, st in conns] or ["    (none)"]
-        L += lib_summary(libs, src, a.all)
+        L += lib_summary(libs, src, a.all, p)
     L += ["", *gpu_lines(),
           "  Which Python code runs right now: pip install py-spy  then  py-spy dump --pid PID   (needs --cap-add "
           "SYS_PTRACE, X-Ray's explore run has it)"]
@@ -352,7 +382,7 @@ def look_image(a):
             sizes[dist] = sum(int(x.split(",")[2]) for x in (read(rec) or "").splitlines()
                               if x.count(",") >= 2 and x.split(",")[2].isdigit())
     top = sorted(sizes.items(), key=lambda kv: -kv[1])
-    L += ["", f"  PIP PACKAGES: {len(sizes)}, {mb(sum(sizes.values()))} in all; the biggest:"]
+    L += ["", f"  PIP PACKAGES: {len(sizes)}, {mb(sum(sizes.values()))} in all; the biggest:", *hand("pipsize")]
     L += [f"    {n:<34} {mb(s):>9}" for n, s in top[:15]]
     # system libraries the compiled parts of the pip packages need
     sos = []
@@ -391,7 +421,7 @@ def look_image(a):
                     k = src.of(os.path.realpath(m.group(3)))
                     if k.startswith("apt:"):
                         need.setdefault(k[4:], set()).add(owner)
-    L += ["", f"  SYSTEM LIBRARIES YOUR PIP PACKAGES NEED (ldd on {len(sos)} compiled files):"]
+    L += ["", f"  SYSTEM LIBRARIES YOUR PIP PACKAGES NEED (ldd on {len(sos)} compiled files):", *hand("ldd")]
     L += [f"    apt package {k:<28} used by {', '.join(sorted(v))}" for k, v in sorted(need.items())
           if not re.match(r"^(libc6|libgcc-s1|libstdc\+\+6|zlib1g)$", k)] or ["    (only the C / C++ runtime)"]
     drv = {k: v for k, v in missing.items() if re.match(r"lib(cuda|nvidia-)", k)}
@@ -401,7 +431,8 @@ def look_image(a):
                  "docker run --gpus all mounts them from your PC")
     def fix_of(k):
         fix = next((p for so, p in APT.items() if k.startswith(so)), None)
-        return (f"apt-get install -y {fix}" if fix else f"find it: apt-file search {k}") + \
+        return (f"apt-get install -y {fix}" if fix else f"find its package: apt-get update && apt-get install -y "
+                f"apt-file && apt-file update && apt-file search {k}") + \
             ("  (or a CUDA library: check LD_LIBRARY_PATH above)" if CUDA_RE.search(k) else "")
     hard = {k: v for k, v in real.items() if k in at_import}
     soft = {k: v for k, v in real.items() if k not in at_import}
@@ -423,7 +454,7 @@ def look_image(a):
             L.append(f"      {k:<26} {what}  -> {fix_of(k)}")
     # CUDA libraries in the image, and where they are
     cud = cuda_libs(sites)
-    L += ["", "  CUDA LIBRARIES IN THE IMAGE:"]
+    L += ["", "  CUDA LIBRARIES IN THE IMAGE:", *hand("cuda")]
     L += [f"    {n:<22} {mb(os.path.getsize(p)) if os.path.exists(p) else '?':>8}  {src.of(p).replace(':', ' ', 1):<28} {p}"
           for n, p in sorted(set(cud))] or ["    none (a CPU image, or the CUDA libraries come with a package not listed)"]
     known = [d for d in (os.environ.get("LD_LIBRARY_PATH") or "").split(":") + reg if d]
@@ -648,7 +679,8 @@ def same_files_installed(sites):
     for path, ds in owners.items():
         if len({x for x, _h in ds}) > 1 and len({h for _x, h in ds}) > 1:
             groups.setdefault(tuple(sorted({x for x, _h in ds})), []).append((path, ds))
-    L = ["  PACKAGES THAT INSTALLED THE SAME FILES (the one installed last overwrote the other's: a mixed install):"]
+    L = ["  PACKAGES THAT INSTALLED THE SAME FILES (the one installed last overwrote the other's: a mixed install):",
+         *hand("samefiles")]
     if not groups:
         return L + ["    none"]
     for dists, items in sorted(groups.items()):
@@ -759,7 +791,7 @@ def import_test(sites):
     bad = sorted((m for m in res if res[m][0] == "FAIL"), key=str.lower)
     good = sorted((m for m in res if res[m][0] == "OK"), key=str.lower)
     L = [f"  DOES EVERY PACKAGE IMPORT? ({len(res)} modules of {len(set(mods.values()))} pip packages, each imported "
-         f"the way your code does - {time.time() - t0:.0f} s)"]
+         f"the way your code does - {time.time() - t0:.0f} s)", *hand("import")]
     if bad:
         L.append(f"    FAILED ({len(bad)}) - the program fails only if it imports one of these:")
         for m in bad:
@@ -788,7 +820,7 @@ def gpu_test():
                            "tf.config.list_physical_devices('GPU'))",
              "cupy": "import cupy; print('cupy', cupy.__version__, '- GPUs:', cupy.cuda.runtime.getDeviceCount())",
              "paddle": "import paddle; print('paddle', paddle.__version__, '- GPU:', paddle.device.is_compiled_with_cuda())"}
-    L = ["  GPU TEST (each framework that is installed, in its own process):"]
+    L = ["  GPU TEST (each framework that is installed, in its own process):", *hand("gputest")]
     if not shutil.which("nvidia-smi"):
         L.append("    no nvidia-smi: this container has no GPU (start it with --gpus all to test the GPU)")
     import importlib.util

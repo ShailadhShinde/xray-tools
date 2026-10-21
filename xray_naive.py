@@ -52,12 +52,21 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Linux x86_64 platform tags (pip matches the listed tags exactly; pure-Python "any" wheels always match)
-PLATFORMS = ["linux_x86_64", "manylinux1_x86_64", "manylinux2010_x86_64", "manylinux2014_x86_64"] + \
-    [f"manylinux_2_{n}_x86_64" for n in range(5, 40)]
+# Linux platform tags of the CPU the image runs on (pip matches the listed tags exactly; pure-Python "any" wheels
+# always match). x86_64 = Intel / AMD PCs and servers; aarch64 = ARM: Jetson, Raspberry Pi, ARM cloud servers
+
+
+def platforms(arch):
+    return ([f"linux_{arch}"] + ([f"manylinux1_{arch}", f"manylinux2010_{arch}"] if arch == "x86_64" else []) +
+            [f"manylinux2014_{arch}"] + [f"manylinux_2_{n}_{arch}" for n in range(5, 40)])
+
+
+ARCH = {"name": "x86_64"}
+PLATFORMS = platforms("x86_64")
+PY_KNOWN = ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]     # the Pythons a pin is also checked for when it fails
 WINDOWS_ONLY = {"pywin32", "pypiwin32", "pywinpty", "pyreadline3", "pyreadline", "wmi", "comtypes",
                 "windows-curses", "pywinauto", "winshell", "pywin32-ctypes", "win10toast", "pythonnet-win"}
 # big C/Fortran packages: if only their source exists for this Python, compiling usually fails (or takes an hour)
@@ -236,9 +245,12 @@ def set_req(r, raw, why, py, opts, index=None):
     new = check_one((r["line"], raw, r["name"], m.group(3).strip() if m else ""), py, opts, index)
     if index and not new.get("index"):
         new["index"] = index
+    wp = r.get("wheel_pythons")
     r.clear()
     r.update(new)
     r["fixed"] = f"was {old}: {why}"
+    if wp is not None:              # what the ORIGINAL pin has wheels for (other_pythons) stays in the report
+        r["wheel_pythons"], r["orig_raw"] = wp, old
 
 
 def autofix(results, py, opts):
@@ -322,7 +334,7 @@ def dep_applies(dep, py, extras=()):
     except Exception:
         return "extra" not in marker
     env = {"python_version": py, "python_full_version": py + ".0", "implementation_version": py + ".0",
-           "sys_platform": "linux", "platform_system": "Linux", "platform_machine": "x86_64", "os_name": "posix",
+           "sys_platform": "linux", "platform_system": "Linux", "platform_machine": ARCH["name"], "os_name": "posix",
            "implementation_name": "cpython", "platform_python_implementation": "CPython"}
     try:
         return any(m.evaluate(dict(env, extra=e)) for e in [""] + list(extras))
@@ -359,6 +371,103 @@ def later_needs(results, py, step1):
     for e in need.values():
         e["req"] = e["name"] + e["extras"] + ",".join(e["specs"])
     return need
+
+
+# pip found a source file but running its setup on this PC failed / pip found no file at all
+PREP_FAILED = re.compile(r"metadata-generation-failed|subprocess-exited-with-error|Getting requirements to build|"
+                         r"Preparing metadata|egg_info")
+NO_MATCH = re.compile(r"No matching distribution found|Could not find a version that satisfies")
+
+
+def prep_error(out):
+    """the package's own error line from a failed metadata step ('Error: pg_config executable not found.')"""
+    for line in (out or "").splitlines():
+        m = re.match(r"\s*(?:[A-Za-z]*Error|ERROR):\s*(.+)", line)
+        if m and not re.search(r"metadata-generation-failed|subprocess-exited-with-error|Command errored",
+                               m.group(1)):
+            return line.strip()[:160]
+    return ""
+
+
+def project_python(project):
+    """the Python version the project itself names -> ('3.10', where it was found) or (None, None). A virtual
+    environment inside the project comes first: it is what the code really runs on (PyCharm makes venv/ or .venv/)"""
+    def rd(*parts):
+        try:
+            with open(os.path.join(project, *parts), encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+    for d in ("venv", ".venv", "env", ".env", "virtualenv"):
+        m = re.search(r"^\s*version(?:_info)?\s*=\s*(\d+)\.(\d+)", rd(d, "pyvenv.cfg"), re.M)
+        if m:
+            return f"{m.group(1)}.{m.group(2)}", f"{d}/pyvenv.cfg (the virtual environment in the project)"
+    checks = [(".python-version", r"^\s*(?:python-|cpython-)?(\d+)\.(\d+)", ".python-version (pyenv)"),
+              ("runtime.txt", r"^\s*python-(\d+)\.(\d+)", "runtime.txt"),
+              ("Pipfile", r"python_(?:full_)?version\s*=\s*[\"'](\d+)\.(\d+)", "Pipfile"),
+              ("environment.yml", r"^\s*-\s*python\s*[=<>~]*\s*(\d+)\.(\d+)", "environment.yml (conda)"),
+              ("environment.yaml", r"^\s*-\s*python\s*[=<>~]*\s*(\d+)\.(\d+)", "environment.yaml (conda)"),
+              ("Dockerfile", r"^\s*FROM\s+(?:\S+/)?python:(\d+)\.(\d+)", "the project's Dockerfile (FROM python:X.Y)")]
+    for f, rx, where in checks:
+        m = re.search(rx, rd(f), re.M | re.I)
+        if m:
+            return f"{m.group(1)}.{m.group(2)}", where
+    for f, rx in (("pyproject.toml", r"requires-python\s*=\s*[\"']([^\"']+)"),
+                  ("setup.py", r"python_requires\s*=\s*[\"']([^\"']+)"),
+                  ("setup.cfg", r"python_requires\s*=\s*(\S+)")):
+        m = re.search(rx, rd(f))
+        if m:
+            try:
+                from pip._vendor.packaging.specifiers import SpecifierSet
+                ok = [v for v in PY_KNOWN if SpecifierSet(m.group(1)).contains(v + ".0")]
+            except Exception:       # pip's packaging missing or an odd spec: not evidence
+                ok = []
+            if ok:
+                return ok[-1], f"{f} ({m.group(1).strip()}: the newest Python it allows)"
+    return None, None
+
+
+def other_pythons(results, py, opts, jobs=8):
+    """the pins that have no Linux wheel for py: which other Python versions DO have a Linux wheel for that exact
+    line (-> r['wheel_pythons'])"""
+    bad = [r for r in results if r["status"] in ("MISSING", "COMPILED")]
+    todo = [(r, v) for r in bad for v in PY_KNOWN if v != py]
+    if not todo:
+        return
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+        oks = list(ex.map(lambda rv: pip_dry(rv[0]["raw"].split(";")[0].strip(), rv[1], True, opts,
+                                             rv[0].get("index"))[0], todo))
+    for r in bad:
+        r["wheel_pythons"] = []
+    for (r, v), ok in zip(todo, oks):
+        if ok:
+            r["wheel_pythons"].append(v)
+
+
+def python_lines(results, py):
+    """report lines: for each pin without a Linux wheel for py, the Pythons that have one; a Python that covers all"""
+    bad = [r for r in results if "wheel_pythons" in r]
+    if not bad:
+        return []
+    T = [f"OTHER PYTHON VERSIONS - the lines above with no Linux wheel for Python {py}, checked for "
+         f"{', '.join(v for v in PY_KNOWN if v != py)}:"]
+    for r in bad:
+        T.append(f"  line {r['line']}: {r.get('orig_raw') or r['raw']:<34} " + (("Linux wheels for Python " +
+                                                                            ", ".join(r["wheel_pythons"]) +
+                                                                            (f" (the build uses {r['raw']})"
+                                                                             if r.get("orig_raw") else ""))
+                                                          if r["wheel_pythons"] else
+                                                          "no Linux wheel for any of them (source only: compiled in "
+                                                          "the build, or change the pin)"))
+    some = [r for r in bad if r["wheel_pythons"]]
+    common = [v for v in PY_KNOWN if v != py and some and all(v in r["wheel_pythons"] for r in some)]
+    if common:
+        T.append(f"  -> Python {common[-1]} has a Linux wheel for every line above that has one anywhere. It is a "
+                 f"choice, not a fix: the "
+                 f"project must run on {common[-1]} (its venv on your PC), and every other line must have one too - "
+                 f"run again with --python {common[-1]} to check them all.")
+    T.append("")
+    return T
 
 
 def available_versions(name, py, opts, cu_index):
@@ -719,6 +828,24 @@ def check_one(item, py, opts, index=None):
         if vs:
             res["why"] += f"; versions WITH a wheel (no compiler needed): {', '.join(nearest(vs, spec))}"
         return res
+    if PREP_FAILED.search(out2 or "") and not NO_MATCH.search(out2 or ""):
+        # pip FOUND the source, but preparing it ran its setup.py on THIS PC, which lacks what it asks for
+        # (psycopg2: pg_config of PostgreSQL). The file exists: the image build compiles it, with the -dev library
+        lib = DEV_LIBS.get(name)
+        err = prep_error(out2)
+        mod = re.search(r"No module named '([\w.]+)'", err or "")
+        res.update(status="COMPILED", dev=(lib[0] if lib else ""),
+                   why=f"no prebuilt Linux wheel for Python {py}, only the source - and pip could not prepare it on "
+                       f"this PC" + (f" ({err})" if err else "") + ": that is a check on your PC; inside the image the "
+                       "build compiles it (gcc + Python headers" + (f" + {lib[0]}" if lib else "") + ")" +
+                       (f"; {lib[1]}" if lib and lib[1] else "") +
+                       (f"; its setup.py imports {mod.group(1)} before pip installs anything - if the build fails the "
+                        f"same way: install {mod.group(1).split('.')[0]} first, then this line with "
+                        "--no-build-isolation" if mod else ""))
+        vs = available_versions(name, py, opts, cu_index)
+        if vs:
+            res["why"] += f"; versions WITH a wheel (no compiler needed): {', '.join(nearest(vs, spec))}"
+        return res
     vs = available_versions(name, py, opts, cu_index)
     res["alts"] = nearest(vs, spec) if vs else []
     res.update(status="MISSING", why=f"no file for Linux / Python {py} at all" +
@@ -973,6 +1100,33 @@ def decide(results, py, gpu):
     return d
 
 
+def check_by_hand(d, gpu, bar):
+    """comments: each choice of this Dockerfile, checked by hand inside the built image. Python is asked where
+    things are, so the lines fit this image's layout (venv or not)"""
+    L = bar("CHECK BY HAND - inside the built image:  docker run --rm -it --entrypoint bash IMAGE" +
+            ("   (+ --gpus all)" if gpu else ""))
+    L += ["# each line shows one choice above at work" + (" (Python is the venv's, /opt/venv)" if d["venv"] else ""),
+          '#   python -c "import sys, site; print(sys.executable, sys.version.split()[0], site.getsitepackages())"',
+          "#   pip list                                    the packages of step 3"]
+    apt = list(dict.fromkeys(x for pk, _w in d["apt"] for x in pk))
+    if apt:
+        L.append("#   dpkg -l " + " ".join(apt) + "    the system libraries (ii = installed)")
+    if d.get("compile"):
+        L.append("#   which gcc || echo no compiler               removed again in the same RUN as pip")
+    if d["ld"]:
+        L += ["#   cat /etc/ld.so.conf.d/cuda-wheels.conf     the CUDA wheel folders of step 4",
+              "#   ldconfig -p | grep -E 'libcudnn|libcublas'  the loader finds them by name"]
+    elif gpu and d["base"].startswith("nvidia/"):
+        L.append("#   echo $LD_LIBRARY_PATH; ldconfig -p | grep -E 'libcudnn|libcublas'    CUDA from the base image")
+    if gpu:
+        L.append("#   nvidia-smi                                  the GPU (only with docker run --gpus all)")
+    L += ["#   ls -la /app                                 the code of step 5",
+          "#   env | sort                                  the env vars the container starts with",
+          '#   all at once, from your PC:  docker run --rm' + (" --gpus all" if gpu else "") +
+          ' -v "TOOLS_FOLDER:/x:ro" --entrypoint "" IMAGE python /x/xray_look.py --image']
+    return L
+
+
 COPY_MAX_MB = 500      # a file from the PC up to this size is copied into the image by default; bigger: mounted
 
 
@@ -1088,7 +1242,7 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
         D += bar("2. SYSTEM LIBRARIES the packages load when they RUN (apt)")
         D += ["# A compiled package finds a library it needs in one of three places:",
               "#   - inside its own wheel (opencv_python.libs/: FFmpeg, Qt ...): nothing to install",
-              "#   - the system folders (/usr/lib/x86_64-linux-gnu): installed with apt-get - the lines below",
+              f"#   - the system folders (/usr/lib/{ARCH['name']}-linux-gnu): installed with apt-get - the lines below",
               "#   - folders registered with the loader (section 4: NVIDIA's CUDA wheels) or named in LD_LIBRARY_PATH",
               "# Decided from: the package NAMES in your requirements (what each is known to load). After the X-Ray run",
               "# the slim plan keeps only what was really loaded; xray_look.py --image lists anything still missing.",
@@ -1193,7 +1347,7 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
     elif gpu and d["base"].startswith("nvidia/"):
         D += bar("4. LD_LIBRARY_PATH - nothing to add")
         D += ["# The nvidia/cuda base already sets LD_LIBRARY_PATH=/usr/local/cuda/lib64 (libcudart, libcublas, libcufft ...)",
-              "# and has cuDNN in /usr/lib/x86_64-linux-gnu, a folder Linux always searches. The driver (libcuda.so)",
+              f"# and has cuDNN in /usr/lib/{ARCH['name']}-linux-gnu, a folder Linux always searches. The driver (libcuda.so)",
               "# comes from the host: --gpus all mounts it in."]
     D += bar("5. THE CODE (all of it - X-Ray finds out what is really used)")
     D += ["COPY . ."]
@@ -1227,6 +1381,7 @@ def write_files(out_dir, results, opts, py, gpu, entry, reqname, d, o=None):
             D += [f"#   {i}. {c['where']}", f"#      now:       {c['now'] or ''}",
                   f"#      change to: {c['new'] or '(by hand: ' + c['note'] + ')'}"]
         D.append("#   then run xray_static.py + xray_naive.py again: the new env var gets its container path here")
+    D += check_by_hand(d, gpu, bar)
     D += [f'CMD ["python", "{entry}"]']
     with open(os.path.join(out_dir, "Dockerfile.naive"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(D) + "\n")
@@ -1308,7 +1463,11 @@ def main(argv=None):
     ap.add_argument("--requirements", required=True, help="requirements file (name inside the project, or a path)")
     ap.add_argument("--entry", default="main.py", help="the file the container starts (CMD)")
     ap.add_argument("--name", required=True, help="short name: files go to runs/NAME/naive/")
-    ap.add_argument("--python", default="3.12", help="Python version of the image (default 3.12)")
+    ap.add_argument("--python", help="Python version of the image (default: the one the project names - its venv, "
+                                     ".python-version, pyproject.toml ... - else 3.12)")
+    ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64",
+                    help="the CPU of the machine the image runs on: x86_64 = Intel / AMD (default), aarch64 = ARM "
+                         "(Jetson, Raspberry Pi, ARM cloud servers)")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--gpu", action="store_true", help="GPU image (nvidia/cuda base)")
     g.add_argument("--cpu", action="store_true", help="CPU image (python:X base)")
@@ -1323,6 +1482,16 @@ def main(argv=None):
                     help="two lines install the same files (opencv-python + opencv-python-headless): keep this one "
                          "(repeatable). Default: the one that has the most files there")
     a = ap.parse_args(argv)
+    global PLATFORMS
+    ARCH["name"], PLATFORMS = a.arch, platforms(a.arch)
+    found_py, found_where = project_python(a.project)
+    if a.python:
+        py_from = "--python" + (f"; the project's {found_where} says {found_py}" if found_py and found_py != a.python
+                                else "")
+    else:
+        a.python = found_py or "3.12"
+        py_from = (f"from {found_where}" if found_py else
+                   "the default - the project names no Python version (no venv, .python-version, pyproject.toml ...)")
     req_path = a.requirements if os.path.isfile(a.requirements) else os.path.join(a.project, a.requirements)
     if not os.path.isfile(req_path):
         sys.exit(f"requirements file not found: {req_path}")
@@ -1336,10 +1505,11 @@ def main(argv=None):
         if name in seen:
             pass        # handled by autofix: one line is kept, the other left out (listed in the report)
         seen.setdefault(name, no)
-    print(f"xray_naive {VERSION}: checking {len(reqs)} requirements for Linux x86_64, Python {a.python} "
+    print(f"xray_naive {VERSION}: checking {len(reqs)} requirements for Linux {a.arch}, Python {a.python} "
           f"(pip dry run, nothing is installed) ...", flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, a.jobs)) as ex:
         results = list(ex.map(lambda it: check_one(it, a.python, opts), reqs))
+    other_pythons(results, a.python, opts, a.jobs)
     fixes = autofix(results, a.python, opts)
     fixes += same_files(results, a.keep)
     print("  ... and the whole file together, with dependencies, as the build installs it", flush=True)
@@ -1358,20 +1528,23 @@ def main(argv=None):
     groups = {}
     for r in results:
         groups.setdefault(r["status"], []).append(r)
-    T = [f"X-Ray naive check {VERSION} - {req_path}", f"for: Linux x86_64, Python {a.python}, "
+    T = [f"X-Ray naive check {VERSION} - {req_path}", f"for: Linux {a.arch}, Python {a.python} ({py_from}), "
          f"{'GPU' if gpu else 'CPU'} image (base {base})"]
     here = f"{sys.version_info[0]}.{sys.version_info[1]}"
-    if here != a.python:
-        T.append(f"  (Python {a.python} is --python{' (the default)' if '--python' not in ' '.join(sys.argv) else ''}; "
-                 f"this PC runs Python {here}. If the project runs on {here} here, run again with --python {here}: "
+    if not found_py and here != a.python:
+        T.append(f"  (this PC runs xray_naive with Python {here}. The project's own Python is the one its venv uses "
+                 f"(PyCharm: Settings > Python Interpreter). If that is not {a.python}, run again with --python X.Y: "
                  "versions and wheels depend on it)")
+    if a.arch == "aarch64" and gpu:
+        T.append("  (ARM + GPU: a Jetson needs one of NVIDIA's L4T base images (nvcr.io/nvidia/l4t-...), not the "
+                 "nvidia/cuda base this file names - change the FROM line)")
     T.append("")
     pv = pip_version()
-    if pv and pv < (24, 2) and sys.version_info[:2] < vtuple(a.python):
+    if pv and pv < (24, 2) and sys.version_info[:2] != vtuple(a.python):
         T += [f"WARNING: your pip ({'.'.join(map(str, pv))}, running on Python {sys.version_info[0]}.{sys.version_info[1]}) "
               f"checks 'Requires-Python' against Python {sys.version_info[0]}.{sys.version_info[1]}, not {a.python}:",
-              f"  packages that need Python {a.python} may show up as MISSING, or with an older version than the build "
-              "installs.", "  Fix: python -m pip install -U pip   then run xray_naive.py again.", ""]
+              f"  packages made only for some Python versions may show up as MISSING, or with another version than the "
+              "build installs.", "  Fix: python -m pip install -U pip   then run xray_naive.py again.", ""]
     if fixes:
         T += ["HANDLED SO THE BUILD WORKS (requirements.docker.txt and Dockerfile.naive; your own file is unchanged) - "
               "read them once:"]
@@ -1406,6 +1579,7 @@ def main(argv=None):
         else:
             T += [f"  line {r['line']}: {r['raw']}\n      {r['why']}" for r in rs]
         T.append("")
+    T += python_lines(results, a.python)
     T += kind_table(results, a.python, d)
     idx = sorted({r["index"] for r in results if r.get("index")})
     if idx:
@@ -1417,7 +1591,8 @@ def main(argv=None):
     with open(os.path.join(out_dir, "naive-check.txt"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(T) + "\n")
     with open(os.path.join(out_dir, "naive-check.json"), "w", encoding="utf-8") as fh:
-        json.dump({"tool": "xray-naive", "version": VERSION, "python": a.python, "gpu": gpu, "base": base,
+        json.dump({"tool": "xray-naive", "version": VERSION, "python": a.python, "python_from": py_from, "arch": a.arch,
+                   "gpu": gpu, "base": base,
                    "requirements": [{k: v for k, v in r.items() if k != "files"} for r in results]}, fh, indent=1)
     print("\n".join(T))
     return 1 if groups.get("MISSING") or together is False else 0

@@ -55,7 +55,7 @@ except ImportError:                   # pragma: no cover - xray_needs.py missing
     def const_of(path, consts, outer=False):
         return None
 
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -103,6 +103,32 @@ def workdir_and_cmd(project, dockerfile):
                 wd = m[-1]
             return wd, cand
     return wd, None
+
+
+def image_pythonpath(dockerfile):
+    """the PYTHONPATH the image sets itself (ENV in its Dockerfile): kept when a run puts a folder in front"""
+    try:
+        txt = open(dockerfile, encoding="utf-8", errors="replace").read() if dockerfile else ""
+    except OSError:
+        return ""
+    m = re.findall(r"^\s*ENV\s+(?:.*\s)?PYTHONPATH[=\s]\s*\"?([^\"\s]+)", txt, re.M | re.I)
+    return re.sub(r":?\$\{?PYTHONPATH\}?", "", m[-1]) if m else ""
+
+
+NW_DIR = "/opt/xray-no-windows"       # where the tools' xray_no_windows folder is mounted
+
+
+def no_windows(w):
+    """OpenCV windows, and no env var of the program switches them: X-Ray's no_windows turns them off without a code
+    change (NO_WINDOWS=1 + the folder on PYTHONPATH). Only for cv2 - other GUI libraries need the code's own switch"""
+    calls = (w or {}).get("calls") or []
+    return bool(calls) and not w.get("env") and (w.get("no_screen") or no_screen(calls))[1] and \
+        all(str(c[2]).startswith("cv2.") for c in calls)
+
+
+def nw_flags(p, X, sep):
+    pp = NW_DIR + (":" + p["pythonpath"] if p.get("pythonpath") else "")
+    return '  -v "' + X + sep + 'xray_no_windows:' + NW_DIR + ':ro" -e PYTHONPATH=' + pp + " -e NO_WINDOWS=1"
 
 
 # --------------------------------------------------------------------------- windows (cv2.imshow) and their switch
@@ -378,6 +404,7 @@ def plan(st, project, name, image, dockerfile, stop_after):
     entries = st.get("entrypoints") or []
     wd, dfile = workdir_and_cmd(project, dockerfile)
     p = {"name": name, "image": image or f"{name}-naive", "project": project, "workdir": wd, "dockerfile": dfile,
+         "pythonpath": image_pythonpath(dfile),
          "entries": entries, "mounts": [], "env": [], "env_cpu": [], "env_optional": [], "notes": [], "ports": [],
          "gpu": False, "gui": False, "shm": False, "stop_after": stop_after, "out_mount": False,
          "file_mounts": [], "mac": None, "app_dirs": []}
@@ -678,7 +705,7 @@ def write_code_changes(items, name, office_hint=True, optional=()):
             L += [f"   IN DOCKER: -e {it['env']}={it.get('value') or '<value>'}"]
         L += [f"   NOTE:      {it['note']}", ""]
     if optional:
-        L += ["", "OPTIONAL - it runs without these, the image just gets smaller:", ""]
+        L += ["", "OPTIONAL - it runs without these (each NOTE says what it gains):", ""]
         for i, it in enumerate(optional, 1):
             L += [f"{i}. WHERE:     {it['where']}"]
             if it["now"]:
@@ -962,6 +989,13 @@ def window_lines(p, rem):
     err = [rem + "  without a screen: " + x for x in re.findall(r".{1,100}(?:\s|$)", ns)]
     if not stops and not w.get("env"):
         return [rem + f"WINDOWS: the code shows plots ({where}). A container has no screen - nothing to do:"] + err
+    if no_windows(w):
+        how = (f"when {w['const']['name']} = {w['const']['value']!r} is on ({w['const']['file']}:{w['const']['line']})"
+               if w.get("const") else "inside an if no env var decides" if w.get("guarded") else "always")
+        return [rem + f"WINDOWS: the code opens OpenCV windows ({where}) - {how}. A container has no screen:"] + err + [
+                rem + "So this run switches them off WITHOUT a code change: NO_WINDOWS=1, with the tools' xray_no_windows",
+                rem + "folder on PYTHONPATH - cv2.imshow / waitKey / namedWindow ... then do nothing, the rest runs as is.",
+                rem + "The same is in the compose file of the plan. To SEE the windows on your screen: run-window."]
     if w.get("const"):
         k = w["const"]
         return [rem + f"WINDOWS: the code opens windows ({where}) when {k['name']} is on - and {k['name']} = {k['value']!r} is",
@@ -979,11 +1013,12 @@ def window_lines(p, rem):
             rem + "in the code:  SHOW = os.getenv(\"SHOW\", \"1\") == \"1\"  and  if SHOW:  around the window calls."]
 
 
-def write_naive_run(p, sh, out_dir):
-    """the naive image ON ITS OWN, without X-Ray: does it start and do its work? Stopped after RUN_SECONDS"""
-    name, R = p["name"], ("%RUN%" if sh.bat else "$RUN")
+def write_naive_run(p, sh, out_dir, xdir, window=False):
+    """the naive image ON ITS OWN, without X-Ray: does it start and do its work? Stopped after RUN_SECONDS.
+    window=True: the same with the program's windows on this PC's screen (run-window)"""
+    name, R, X = p["name"], ("%RUN%" if sh.bat else "$RUN"), ("%X%" if sh.bat else "$X")
     sep = "\\" if sh.bat else "/"
-    cn = name + "-run"
+    cn = name + ("-window" if window else "-run")
     w = p.get("window") or {}
     a = ["docker run --rm --name " + cn + (" --gpus all" if p["gpu"] else "") + (" --shm-size 2g" if p["shm"] else "")
          + (" --mac-address " + p["mac"] if p["mac"] else "") + "".join(" -p " + str(x) + ":" + str(x) for x in p["ports"])]
@@ -992,15 +1027,24 @@ def write_naive_run(p, sh, out_dir):
         a.append('  -v "' + R + sep + 'out-naive:/xout"')
     if p["env"] or p["env_optional"]:
         a.append('  --env-file "' + R + sep + 'run.env"')
-    if p["gui"] and w.get("env"):
+    if p["gui"] and w.get("env") and not window:
         a.append("  -e " + w["env"] + "=" + w["value"])        # after --env-file: this value wins
-    a.append("  " + p["image"])
+    if p["gui"] and no_windows(w) and not window:
+        a.append(nw_flags(p, X, sep))
+    if window:
+        a += (["  -e DISPLAY=:0 -e WAYLAND_DISPLAY=wayland-0 -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir "
+               "-e PULSE_SERVER=/mnt/wslg/PulseServer -e QT_X11_NO_MITSHM=1",
+               "  -v /run/desktop/mnt/host/wslg/.X11-unix:/tmp/.X11-unix -v /run/desktop/mnt/host/wslg:/mnt/wslg"]
+              if sh.bat else ['  -e DISPLAY="$DISPLAY" -e QT_X11_NO_MITSHM=1 -v /tmp/.X11-unix:/tmp/.X11-unix'])
+    img = p["image"] + ("-window" if window else "")
+    a.append("  " + (("%WIMG%" if sh.bat else '"$WIMG"') if window else p["image"]))
     if sh.bat:
-        L = ["@echo off", "REM Generated by xray_runfile.py " + VERSION + ": run the naive image ON ITS OWN (no X-Ray) - "
-             "does it start and do its work?", "setlocal", 'set "RUN=' + out_dir + '"', "",
+        L = ["@echo off", "REM Generated by xray_runfile.py " + VERSION + ": run the naive image ON ITS OWN (no X-Ray) - " +
+             ("its windows on THIS PC's screen" if window else "does it start and do its work?"), "setlocal",
+             'set "RUN=' + out_dir + '"', 'set "X=' + xdir + '"', "",
              "REM RUN_SECONDS: stop it after this many seconds (0 = until it ends by itself or you press Ctrl+C)",
              'set "RUN_SECONDS=120"', ""]
-        L += window_lines(p, "REM ")
+        L += window_run_lines(p, sh, img) if window else window_lines(p, "REM ")
         L += [sh.rem + "  " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
         L += ["docker rm -f " + cn + " >nul 2>&1", 'mkdir "%RUN%\\out-naive" 2>nul' if p["out_mount"] else "",
               "REM the stop: Ctrl+C for the program (SIGINT, as on your PC), then docker stop (30 s to end, then killed)",
@@ -1016,10 +1060,11 @@ def write_naive_run(p, sh, out_dir):
             L.append("echo What it wrote is in runs\\" + name + "\\out-naive")
         L += ["endlocal"]
         return "\r\n".join(L) + "\r\n"
-    L = ["#!/usr/bin/env bash", "# Generated by xray_runfile.py " + VERSION + ": run the naive image on its own (no X-Ray) - "
-         "does it start and do its work?", 'RUN="' + out_dir + '"',
+    L = ["#!/usr/bin/env bash", "# Generated by xray_runfile.py " + VERSION + ": run the naive image on its own (no X-Ray) - " +
+         ("its windows on this machine's screen" if window else "does it start and do its work?"),
+         'RUN="' + out_dir + '"', 'X="' + xdir + '"',
          "RUN_SECONDS=120   # stop it after this many seconds (0 = until it ends / Ctrl+C)", ""]
-    L += window_lines(p, "# ")
+    L += window_run_lines(p, sh, img) if window else window_lines(p, "# ")
     L += ["#   " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
     L += ["docker rm -f " + cn + " >/dev/null 2>&1"]
     if p["out_mount"]:
@@ -1035,6 +1080,47 @@ def write_naive_run(p, sh, out_dir):
     if p["out_mount"]:
         L.append("echo 'What it wrote is in runs/" + name + "/out-naive'")
     return "\n".join(L) + "\n"
+
+
+def window_run_lines(p, sh, img):
+    """run-window: what it needs (a display from the PC, the window plugin's libraries in the image) + the test image"""
+    r = sh.rem
+    w = p.get("window") or {}
+    where = ", ".join(f"{c[2]} at {c[0]}:{c[1]}" for c in (w.get("calls") or [])[:3])
+    cv2 = all(str(c[2]).startswith("cv2.") for c in (w.get("calls") or [])) and w.get("calls")
+    L = [r + f"WINDOWS ON YOUR SCREEN: the program's own windows ({where}), no X-Ray, nothing switched off.",
+         r + "Two things are needed:",
+         r + "1. A screen the container can reach." + (" Windows 11: Docker Desktop shares WSLg (Windows' own Linux display) -" if sh.bat else
+                                                      " Linux desktop: the X server's socket (/tmp/.X11-unix) and DISPLAY."),
+         ]
+    if sh.bat:
+        L += [r + "   the -v /run/desktop/mnt/host/wslg lines below. Windows 10 (no WSLg): start an X server (VcXsrv, tick",
+              r + "   'Disable access control'), then replace the two display lines by:  -e DISPLAY=host.docker.internal:0.0"]
+    L += [r + "2. The window libraries in the image. A server image usually lacks them, and then even WITH a screen it",
+          r + "   prints 'Could not load the Qt platform plugin \"xcb\" even though it was found' (the same words as without",
+          r + "   a screen). xray_look.py --image names them: 'the Qt window plugin ... -> apt-get install -y ...'.",
+          r + "   WINDOW_APT: those packages - they are added in a small test image " + img + " (FROM the naive image,",
+          r + "   one extra layer, built once; the naive image itself stays as it is). Empty = run the naive image as it is."]
+    if cv2:
+        L += [r + "   opencv-python's window plugin needed libsm6 libice6 in X-Ray's test (Ubuntu 24.04) - the default below.",
+              r + "   opencv-python-HEADLESS has no windows at all: then no screen helps (it has no window code)."]
+    if sh.bat:
+        L += ['set "WINDOW_APT=' + ("libsm6 libice6" if cv2 else "") + '"',
+              'set "WIMG=' + p["image"] + '"',
+              'if "%WINDOW_APT%"=="" goto window_run',
+              'set "WIMG=' + img + '"',
+              '> "%RUN%\\Dockerfile.window" echo FROM ' + p["image"],
+              '>> "%RUN%\\Dockerfile.window" echo USER root',
+              '>> "%RUN%\\Dockerfile.window" echo RUN apt-get update ^&^& apt-get install -y --no-install-recommends '
+              '%WINDOW_APT% ^&^& rm -rf /var/lib/apt/lists/*',
+              'docker build -t ' + img + ' - < "%RUN%\\Dockerfile.window"', ":window_run", ""]
+    else:
+        L += ['WINDOW_APT="' + ("libsm6 libice6" if cv2 else "") + '"', 'WIMG="' + p["image"] + '"',
+              'if [ -n "$WINDOW_APT" ]; then WIMG="' + img + '"; printf \'FROM %s\\nUSER root\\nRUN apt-get update && '
+              'apt-get install -y --no-install-recommends %s && rm -rf /var/lib/apt/lists/*\\n\' "' + p["image"] +
+              '" "$WINDOW_APT" | docker build -t "$WIMG" -; fi',
+              "xhost +local: >/dev/null 2>&1 || true   # let containers use this X server (if xhost is installed)", ""]
+    return L
 
 
 def write_videos(p, sh, xdir, out_dir):
@@ -1060,16 +1146,30 @@ def write_videos(p, sh, xdir, out_dir):
              'set "IMG=' + p["image"] + '"',
              "REM CONVERT: 1 = convert the videos the image cannot read, 0 = only check",
              'set "CONVERT=1"',
+             "REM GPU: 1 = convert on NVIDIA's GPU encoder when Docker can give the container the GPU (much faster for",
+             "REM      big videos; without it the CPU does it), 0 = CPU only",
+             'set "GPU=1"',
              'mkdir "%RUN%\\videos" 2>nul', 'del "%RUN%\\videos\\unreadable.txt" 2>nul',
              "echo Checking the videos in %DIR% with the OpenCV inside %IMG% ...",
              'docker run --rm --entrypoint "" -v "%X%:/xray:ro" -v "%DIR%:/v:ro" -v "%RUN%\\videos:/out" %IMG% python3 '
              "/xray/xray_videos.py check /v --out /out",
              'if not exist "%RUN%\\videos\\unreadable.txt" goto done', 'if "%CONVERT%"=="0" goto done', "echo.",
-             "REM ffmpeg comes from a small image, built the first time only: python:3.12-slim + imageio-ffmpeg",
-             'docker image inspect xray-ffmpeg >nul 2>&1 || docker build -t xray-ffmpeg - < "%X%\\xray_ffmpeg.Dockerfile"',
-             'docker run --rm -v "%X%:/xray:ro" -v "%DIR%:/v" -v "%RUN%\\videos:/out" xray-ffmpeg python '
+             "REM ffmpeg comes from an image built the first time only (xray_ffmpeg.Dockerfile): ffmpeg with the CPU",
+             "REM encoder libx264 and NVIDIA's GPU encoder h264_nvenc, + Python for xray_videos.py",
+             'docker image inspect xray-ffmpeg:2 >nul 2>&1 || docker build -t xray-ffmpeg:2 - < "%X%\\xray_ffmpeg.Dockerfile"',
+             "REM the GPU with its video part (the driver's encoder): --gpus all alone gives only compute + utility",
+             'set "GPUFLAGS="',
+             'if "%GPU%"=="1" set "GPUFLAGS=--gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility"',
+             'docker run --rm %GPUFLAGS% -v "%X%:/xray:ro" -v "%DIR%:/v" -v "%RUN%\\videos:/out" xray-ffmpeg:2 python '
              "/xray/xray_videos.py convert /v --list /out/unreadable.txt" +
-             (' --hint "' + vid[0] + "=" + cont_dir + '"' if vid else ""), "echo.",
+             (' --hint "' + vid[0] + "=" + cont_dir + '"' if vid else ""),
+             "REM exit code 125 = Docker itself could not start the container - with GPU=1: no GPU for Docker here",
+             "if not errorlevel 125 goto converted", 'if "%GPUFLAGS%"=="" goto converted',
+             "echo Docker cannot give this container the GPU - converting on the CPU instead",
+             'docker run --rm -v "%X%:/xray:ro" -v "%DIR%:/v" -v "%RUN%\\videos:/out" xray-ffmpeg:2 python '
+             "/xray/xray_videos.py convert /v --list /out/unreadable.txt --gpu no" +
+             (' --hint "' + vid[0] + "=" + cont_dir + '"' if vid else ""),
+             ":converted", "echo.",
              "echo Checking the copies with the same OpenCV ...",
              'docker run --rm --entrypoint "" -v "%X%:/xray:ro" -v "%DIR%\\h264:/v:ro" %IMG% python3 '
              "/xray/xray_videos.py check /v", "echo.",
@@ -1081,13 +1181,22 @@ def write_videos(p, sh, xdir, out_dir):
          "Usage: bash videos.sh [FOLDER]", 'X="' + xdir + '"', 'RUN="' + out_dir + '"',
          'DIR="${1:-' + host + '}"', '[ -n "$DIR" ] || { echo "Give a folder: bash videos.sh /path/to/videos"; exit 1; }',
          'IMG="' + p["image"] + '"   # the image whose OpenCV decides', "CONVERT=1          # 0 = only check",
+         "GPU=1              # 1 = NVIDIA's GPU encoder when Docker can give the container the GPU, 0 = CPU only",
          'mkdir -p "$RUN/videos"; chmod 777 "$RUN/videos"; rm -f "$RUN/videos/unreadable.txt"',
          'docker run --rm --entrypoint "" -v "$X:/xray:ro" -v "$DIR:/v:ro" -v "$RUN/videos:/out" "$IMG" python3 '
          "/xray/xray_videos.py check /v --out /out",
          '[ -f "$RUN/videos/unreadable.txt" ] && [ "$CONVERT" = "1" ] || exit 0',
-         'docker image inspect xray-ffmpeg >/dev/null 2>&1 || docker build -t xray-ffmpeg - < "$X/xray_ffmpeg.Dockerfile"',
-         'docker run --rm -v "$X:/xray:ro" -v "$DIR:/v" -v "$RUN/videos:/out" xray-ffmpeg python /xray/xray_videos.py '
-         "convert /v --list /out/unreadable.txt" + (' --hint "' + vid[0] + "=" + cont_dir + '"' if vid else ""),
+         'docker image inspect xray-ffmpeg:2 >/dev/null 2>&1 || docker build -t xray-ffmpeg:2 - < "$X/xray_ffmpeg.Dockerfile"',
+         '# the GPU with its video part (the driver\'s encoder): --gpus all alone gives only compute + utility',
+         'GPUFLAGS=(); [ "$GPU" = "1" ] && GPUFLAGS=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility)',
+         'docker run --rm "${GPUFLAGS[@]}" -v "$X:/xray:ro" -v "$DIR:/v" -v "$RUN/videos:/out" xray-ffmpeg:2 python '
+         "/xray/xray_videos.py convert /v --list /out/unreadable.txt" + (' --hint "' + vid[0] + "=" + cont_dir + '"' if vid else "")
+         + "; rc=$?",
+         '# exit code 125 = Docker itself could not start the container - with GPU=1: no GPU for Docker here',
+         'if [ "$rc" -ge 125 ] && [ "${#GPUFLAGS[@]}" -gt 0 ]; then echo "Docker cannot give this container the GPU - '
+         'converting on the CPU instead"; docker run --rm -v "$X:/xray:ro" -v "$DIR:/v" -v "$RUN/videos:/out" '
+         'xray-ffmpeg:2 python /xray/xray_videos.py convert /v --list /out/unreadable.txt --gpu no' +
+         (' --hint "' + vid[0] + "=" + cont_dir + '"' if vid else "") + '; fi',
          'echo "Checking the copies with the same OpenCV ..."',
          'docker run --rm --entrypoint "" -v "$X:/xray:ro" -v "$DIR/h264:/v:ro" "$IMG" python3 /xray/xray_videos.py check /v',
          'echo "Use the copies: VIDEOS=$DIR/h264 - or the run.env line shown above"']
@@ -1190,7 +1299,10 @@ def main(argv=None):
     b = write_build(p, sh, out_dir)
     if b:
         files["build-naive" + ext] = b
-    files["run-naive" + ext] = write_naive_run(p, sh, out_dir)
+    files["run-naive" + ext] = write_naive_run(p, sh, out_dir, HERE)
+    if p["gui"] and (p["window"] or {}).get("calls") and ((p["window"] or {}).get("no_screen") or
+                                                         no_screen(p["window"]["calls"]))[1]:
+        files["run-window" + ext] = write_naive_run(p, sh, out_dir, HERE, window=True)
     files["run-step2" + ext] = write_run(p, sh, HERE, out_dir, cpu=False)
     if p["gpu"]:
         files["run-step2-cpu" + ext] = write_run(p, sh, HERE, out_dir, cpu=True)
@@ -1219,8 +1331,15 @@ def main(argv=None):
                                                           f"{p['window']['value']} = off (run-naive sets it; a container has "
                                                           "no screen)" if n == sw else ""), "# " + n + "=" + str(d)]
         files["run.env"] = "\n".join(E) + "\n"
-    changes = code_changes(st, os.path.abspath(a.project)) + window_change(p.get("window"), os.path.abspath(a.project))
+    wch = window_change(p.get("window"), os.path.abspath(a.project))
     optional = optional_changes(st, os.path.abspath(a.project))
+    if no_windows(p.get("window")):       # NO_WINDOWS=1 runs it as it is: the code's switch is nicer, not needed
+        for it in wch:
+            it["note"] = ("NOT NEEDED TO RUN: NO_WINDOWS=1 (the tools' xray_no_windows, used by run-naive and the plan's "
+                          "compose file) switches OpenCV's windows off without a code change. Cleaner in the code: "
+                          + it["note"])
+        optional, wch = wch + optional, []
+    changes = code_changes(st, os.path.abspath(a.project)) + wch
     files["code-changes.txt"] = write_code_changes(changes, a.name, optional=optional).replace(
         "\n", "\r\n" if sh.bat else "\n")
     for fn, txt in files.items():
@@ -1234,6 +1353,8 @@ def main(argv=None):
     if p["gui"]:
         w = p.get("window") or {}
         print("  windows: " + (f"{w['env']}={w['value']} switches them off (run-naive sets it)" if w.get("env") else
+                               "OpenCV windows - run-naive and the plan's compose switch them off with NO_WINDOWS=1 (no "
+                               "code change); run-window shows them on your screen" if no_windows(w) else
                                "plots only - nothing to do in a container (" + w["no_screen"][0] + ")"
                                if not (w.get("no_screen") or ("", True))[1] else
                                f"{w['const']['name']} = {w['const']['value']!r} in the code opens them - see run-naive's "
@@ -1254,7 +1375,7 @@ def main(argv=None):
         print(f"  --mac-address {p['mac']}   (licence / machine check)")
     for n in p["notes"]:
         print(f"  CHECK {n}")
-    print(f"  code changes suggested: {len(changes)}" + (f", optional (a smaller image): {len(optional)}" if optional
+    print(f"  code changes suggested: {len(changes)}" + (f", optional: {len(optional)}" if optional
                                                          else "") + " (see code-changes.txt)")
     if not p["dockerfile"]:
         print("  NOTE: no Dockerfile.naive / Dockerfile in the project - build the image first (see the guide)")

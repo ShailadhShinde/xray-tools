@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>X-Ray Project Walkthrough</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a field manual. A sticky step rail on the left, numbered step sheets on the right; on phones the rail becomes a strip of step chips. */
+:root {
+  --bg: #eef1f6;
+  --sheet: #ffffff;
+  --ink: #17201e;
+  --muted: #56645f;
+  --rule: #d3dcd8;
+  --accent: #2c4f9e;
+  --accent-soft: #dfe7f6;
+  --term: #111918;
+  --term-ink: #d8e5e1;
+  --term-dim: #86a098;
+  --out: #f3f6f4;
+  --out-ink: #26312e;
+  --k-os: #6b7f99;
+  --k-cuda: #2f5d86;
+  --k-apt: #2c7a52;
+  --k-pip: #8a4f9e;
+  --k-code: #a0661c;
+  --k-host: #b0452f;
+  --good: #2c7a4d;
+  --warn: #93600e;
+  --bad: #ad3632;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Segoe UI", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  --step: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1018; --sheet: #151a24; --ink: #e1eae7; --muted: #94a49f; --rule: #283041;
+    --accent: #8fb0f2; --accent-soft: #1c2742; --term: #080d0c; --term-ink: #d8e5e1; --term-dim: #7f988f;
+    --out: #1a2321; --out-ink: #cbd8d4;
+    --k-os: #8fa3bd; --k-cuda: #6f9fd0; --k-apt: #5fb98a; --k-pip: #c393d6; --k-code: #dca35a; --k-host: #ec8a74;
+    --good: #5cc08a; --warn: #e2aa4c; --bad: #f0807a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1018; --sheet: #151a24; --ink: #e1eae7; --muted: #94a49f; --rule: #283041;
+  --accent: #8fb0f2; --accent-soft: #1c2742; --term: #080d0c; --term-ink: #d8e5e1; --term-dim: #7f988f;
+  --out: #1a2321; --out-ink: #cbd8d4;
+  --k-os: #8fa3bd; --k-cuda: #6f9fd0; --k-apt: #5fb98a; --k-pip: #c393d6; --k-code: #dca35a; --k-host: #ec8a74;
+  --good: #5cc08a; --warn: #e2aa4c; --bad: #f0807a;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: var(--step); line-height: 1.6; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+code, kbd { font-family: var(--font-mono); font-size: 0.88em; }
+p code, li code, td code, label code { background: var(--accent-soft); color: var(--ink); padding: 0.05em 0.35em; border-radius: 3px; overflow-wrap: anywhere; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; line-height: 1.15; margin: 0; }
+strong { font-weight: 600; }
+
+.page { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 64px; }
+.wrap { max-width: 1200px; margin-inline: auto; }
+
+/* header */
+.masthead { display: grid; gap: 14px; max-width: 72ch; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.masthead h1 { font-size: clamp(2rem, 1.4rem + 2.6vw, 3.1rem); font-weight: 700; letter-spacing: -0.01em; }
+.lede { font-size: 1.12em; margin: 0; }
+.practice-note { margin: 0; color: var(--muted); font-size: 0.92em; }
+.pill { display: inline-block; font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; padding: 0.1em 0.5em; border-radius: 999px; border: 1px solid currentColor; color: var(--accent); vertical-align: 0.1em; }
+
+.folders { margin-top: 22px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 16px; display: grid; gap: 12px; max-width: 900px; }
+.folders h2 { font-size: 1.05rem; font-weight: 600; letter-spacing: 0.02em; }
+.folders .hint { margin: 0; color: var(--muted); font-size: 0.9em; }
+.field { display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 10px; align-items: center; }
+.field label { font-size: 0.92em; }
+.field label span { display: block; color: var(--muted); font-size: 0.85em; }
+.field input { width: 100%; font-family: var(--font-mono); font-size: 0.85rem; padding: 8px 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); min-width: 0; }
+
+/* two-column layout */
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 36px; margin-top: 34px; align-items: start; }
+.rail { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); max-height: calc(100vh - 32px); overflow-y: auto; }
+.rail .progress { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); margin: 0 0 10px; letter-spacing: 0.03em; }
+.rail ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.rail a { display: grid; grid-template-columns: 1.8rem minmax(0, 1fr); gap: 6px; align-items: baseline; padding: 5px 8px; border-radius: 6px; text-decoration: none; color: var(--ink); font-size: 0.9rem; line-height: 1.3; }
+.rail a:hover { background: var(--accent-soft); }
+.rail a .n { font-family: var(--font-display); font-weight: 700; color: var(--accent); text-align: right; }
+.rail a.is-done { color: var(--muted); }
+.rail a.is-done .n::after { content: " \2713"; color: var(--good); font-size: 0.8em; }
+.rail .sep { height: 1px; background: var(--rule); margin: 8px 0; }
+
+main { min-width: 0; display: grid; gap: 28px; }
+
+/* sheets */
+.sheet { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; padding: clamp(16px, 2.5vw, 28px); min-width: 0; display: grid; gap: 18px; }
+.sheet > * { min-width: 0; }
+.sheet-title h2 { font-size: clamp(1.45rem, 1.2rem + 1vw, 1.9rem); font-weight: 700; }
+.sheet-title p { margin: 6px 0 0; color: var(--muted); max-width: 70ch; }
+.prose { max-width: 70ch; }
+.prose p { margin: 0 0 10px; }
+.prose p:last-child { margin-bottom: 0; }
+
+.step-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: center; border-bottom: 1px solid var(--rule); padding-bottom: 14px; }
+.step-no { font-family: var(--font-display); font-weight: 700; font-size: 2.6rem; line-height: 1; color: var(--accent); min-width: 2.2ch; text-align: center; font-variant-numeric: tabular-nums; }
+.step-head h2 { font-size: clamp(1.3rem, 1.1rem + 0.8vw, 1.65rem); font-weight: 700; }
+.step-meta { margin: 2px 0 0; color: var(--muted); font-size: 0.88em; }
+.done-box { display: inline-flex; gap: 8px; align-items: center; font-size: 0.9rem; color: var(--muted); cursor: pointer; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 999px; white-space: nowrap; }
+.done-box input { width: 1.05rem; height: 1.05rem; accent-color: var(--good); margin: 0; }
+.done-box:has(input:checked) { color: var(--good); border-color: var(--good); }
+
+h3.block-title { font-family: var(--font-mono); font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
+
+/* command blocks */
+.cmd { background: var(--term); border-radius: 8px; overflow: hidden; min-width: 0; }
+.cmd-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 7px 10px 7px 14px; border-bottom: 1px solid rgba(127, 160, 152, 0.18); }
+.where { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--term-dim); }
+.where.inside::before { content: "\25B8 "; color: var(--accent); }
+.copy { font-family: var(--font-mono); font-size: 0.75rem; background: transparent; color: var(--term-ink); border: 1px solid rgba(216, 229, 225, 0.35); border-radius: 5px; padding: 3px 10px; cursor: pointer; }
+.copy:hover { border-color: var(--term-ink); }
+.cmd pre { margin: 0; padding: 12px 14px 14px; color: var(--term-ink); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; overflow-x: auto; white-space: pre; tab-size: 4; }
+
+.out { background: var(--out); border: 1px dashed var(--rule); border-radius: 8px; overflow: hidden; min-width: 0; }
+.out-bar { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 7px 14px 0; }
+.out pre { margin: 0; padding: 6px 14px 12px; color: var(--out-ink); font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5; overflow-x: auto; white-space: pre; }
+.out pre b { color: var(--accent); font-weight: 600; }
+
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; }
+.why, .check { min-width: 0; }
+.why ul, .check ul { margin: 0; padding-left: 1.1em; display: grid; gap: 7px; }
+.why li::marker { color: var(--accent); }
+.check li::marker { content: "\2713  "; color: var(--good); }
+.check li.bad::marker { content: "\2715  "; color: var(--bad); }
+.callout { border-left: 3px solid var(--warn); background: var(--out); padding: 10px 14px; border-radius: 0 8px 8px 0; max-width: 78ch; }
+.callout p { margin: 0; }
+.callout strong { color: var(--warn); }
+
+details.more { border: 1px solid var(--rule); border-radius: 8px; padding: 0 14px; min-width: 0; }
+details.more > summary { cursor: pointer; padding: 10px 0; font-weight: 500; color: var(--accent); }
+details.more[open] > summary { border-bottom: 1px solid var(--rule); margin-bottom: 12px; }
+details.more > div { display: grid; gap: 14px; padding-bottom: 14px; min-width: 0; }
+
+/* annotated Dockerfile */
+.dsec { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 18px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.dsec:first-of-type { border-top: 0; padding-top: 0; }
+.dsec h4 { font-family: var(--font-display); font-size: 1.08rem; margin: 0 0 8px; display: flex; gap: 8px; align-items: baseline; }
+.dsec h4 .sec { font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; }
+.dsec .why ul { gap: 6px; font-size: 0.95em; }
+.tag-parts { display: flex; flex-wrap: wrap; gap: 0; font-family: var(--font-mono); font-size: 0.86rem; margin: 4px 0 10px; }
+.tag-parts span { padding: 3px 7px; border: 1px solid var(--rule); background: var(--out); }
+.tag-parts span + span { border-left: 0; }
+.tag-parts span b { color: var(--accent); font-weight: 600; }
+
+/* anatomy bars */
+.bars { display: grid; gap: 18px; }
+.bar-row { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr); gap: 12px; align-items: center; }
+.bar-label { font-size: 0.9rem; line-height: 1.3; }
+.bar-label b { display: block; font-family: var(--font-display); font-size: 1.05rem; }
+.bar-label span { color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.bar-track { display: flex; height: 34px; border-radius: 6px; overflow: hidden; background: var(--out); border: 1px solid var(--rule); }
+.seg { height: 100%; min-width: 2px; position: relative; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 0.72rem; color: var(--sheet); white-space: nowrap; overflow: hidden; }
+.seg + .seg { box-shadow: inset 1px 0 0 var(--sheet); }
+.seg.os { background: var(--k-os); }
+.seg.cuda { background: var(--k-cuda); }
+.seg.apt { background: var(--k-apt); }
+.seg.pip { background: var(--k-pip); }
+.seg.code { background: var(--k-code); }
+.seg.est { background: repeating-linear-gradient(135deg, var(--k-apt) 0 5px, transparent 5px 9px); color: var(--ink); }
+.scale { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr); gap: 12px; }
+.scale-ticks { position: relative; height: 1.6em; font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); font-variant-numeric: tabular-nums; border-top: 1px solid var(--rule); }
+.scale-ticks span { position: absolute; top: 0; padding-top: 3px; transform: translateX(-50%); white-space: nowrap; }
+.scale-ticks span::before { content: ""; position: absolute; top: -1px; left: 50%; width: 1px; height: 4px; background: var(--muted); }
+.scale-ticks span:first-child { transform: none; }
+.scale-ticks span:first-child::before { left: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.86rem; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.legend i.os { background: var(--k-os); } .legend i.cuda { background: var(--k-cuda); } .legend i.apt { background: var(--k-apt); }
+.legend i.pip { background: var(--k-pip); } .legend i.code { background: var(--k-code); } .legend i.host { background: var(--k-host); }
+
+/* tables */
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; min-width: 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--rule); }
+th { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; background: var(--out); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td code { overflow-wrap: anywhere; }
+.src { display: inline-block; font-family: var(--font-mono); font-size: 0.72rem; padding: 1px 7px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+.src.cuda { color: var(--k-cuda); } .src.apt { color: var(--k-apt); } .src.pip { color: var(--k-pip); }
+.src.host { color: var(--k-host); } .src.code { color: var(--k-code); } .src.os { color: var(--k-os); }
+.map-table td { padding: 8px 10px; }
+.map-table td:nth-child(2) { white-space: nowrap; }
+input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; padding: 5px 8px; border: 1px solid var(--rule); border-radius: 5px; background: var(--bg); color: var(--ink); }
+
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: 14px; counter-reset: rule; }
+.rule { border-top: 2px solid var(--accent); padding-top: 10px; }
+.rule h3 { font-size: 1.05rem; margin-bottom: 4px; }
+.rule p { margin: 0; font-size: 0.93em; }
+
+.send-list { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; max-width: 78ch; }
+
+@media (max-width: 960px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .rail { position: static; max-height: none; overflow: visible; }
+  .rail ol { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+  .rail li { flex: 0 0 auto; }
+  .rail a { display: flex; gap: 6px; border: 1px solid var(--rule); background: var(--sheet); white-space: nowrap; }
+  .rail a .n { text-align: left; }
+  .rail .sep { display: none; }
+  .dsec { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .field { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .step-head { grid-template-columns: auto minmax(0, 1fr); }
+  .done-box { grid-column: 1 / -1; justify-self: start; }
+  .bar-row, .scale { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .scale > :first-child { display: none; }
+  .step-no { font-size: 2.1rem; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .rail a, .copy { transition: background-color 0.15s ease, border-color 0.15s ease; }
+}
+/* the map: the flow, numbered because the order is real */
+.flow { display: grid; gap: 12px; counter-reset: flow; max-width: 80ch; }
+.flow-step { display: grid; grid-template-columns: 2.1rem minmax(0, 1fr); gap: 12px; align-items: start; counter-increment: flow; }
+.flow-step::before { content: counter(flow); width: 2.1rem; height: 2.1rem; border-radius: 999px; display: grid; place-items: center; font-family: var(--font-display); font-weight: 700; color: var(--accent); background: var(--accent-soft); font-variant-numeric: tabular-nums; }
+.flow-step > div { min-width: 0; display: grid; gap: 6px; padding-top: 4px; }
+.flow-step p { margin: 0; }
+.in-docker { font-size: 0.92em; color: var(--muted); border-left: 3px solid var(--k-cuda); padding-left: 10px; }
+.rule.warn { border-top-color: var(--warn); }
+.rule.warn h3 { color: var(--warn); }
+.pill.yours { color: var(--k-code); }
+.out pre[data-tpl] { color: var(--out-ink); }
+.field select { width: 100%; font-family: var(--font-mono); font-size: 0.85rem; padding: 8px 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); min-width: 0; }
+.part-title { font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin: 10px 0 -12px; padding-top: 6px; border-top: 2px solid var(--accent); }
+.rail .part { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); padding: 10px 8px 2px; }
+@media (max-width: 960px) { .rail .part { display: none; } }
+body { margin: 0; }
+</style>
+</head>
+<body>
+<div class="page">
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow">X-Ray &middot; any Python project &middot; Windows + Docker Desktop</div>
+  <h1>X-Ray Project Walkthrough</h1>
+  <p class="lede">From a project folder to a small, verified Docker image, for any Python project: what to run, what each report line means, and what you decide at each step. Nothing in here belongs to one project; your settings fill the commands.</p>
+  <p class="practice-note">Every step says <strong>what you decide</strong>. The tools never change the project's code: what only code can fix goes to <code>code-changes.txt</code>. The reference behind every step is <code>GUIDE.md</code> in the tools folder (section numbers in brackets).</p>
+</header>
+
+<section class="folders" aria-labelledby="folders-h">
+  <h2 id="folders-h">Your settings</h2>
+  <p class="hint">Type them once. The commands below use them; this browser keeps them, nothing is sent anywhere.</p>
+  <div class="field"><label for="dirX">xray-tools folder<span>where the tools are on this PC</span></label><input id="dirX" type="text" spellcheck="false" autocomplete="off"></div>
+  <div class="field"><label for="dirP">Project folder<span>the folder with the entry file</span></label><input id="dirP" type="text" spellcheck="false" autocomplete="off"></div>
+  <div class="field"><label for="nameN">Short name<span>letters / digits: runs\NAME, image NAME-naive</span></label><input id="nameN" type="text" spellcheck="false" autocomplete="off"></div>
+  <div class="field"><label for="entE">Entry file<span>the file you start: python main.py</span></label><input id="entE" type="text" spellcheck="false" autocomplete="off"></div>
+  <div class="field"><label for="reqR">Requirements file<span>its name inside the project folder</span></label><input id="reqR" type="text" spellcheck="false" autocomplete="off"></div>
+  <div class="field"><label for="gpuG">GPU<span>does the program use an NVIDIA GPU?</span></label><select id="gpuG"><option value="yes">yes - NVIDIA GPU</option><option value="no">no - CPU only</option></select></div>
+</section>
+
+<div class="layout">
+<nav class="rail" aria-label="Steps">
+  <p class="progress" id="progress">0 of 14 steps done</p>
+  <ol>
+    <li><a href="#flow"><span class="n">&#9673;</span><span>The flow</span></a></li>
+    <li class="sep" aria-hidden="true"></li>
+    <li><a href="#step0"><span class="n">0</span><span>Get ready</span></a></li>
+    <li><a href="#step1"><span class="n">1</span><span>Read the code</span></a></li>
+    <li><a href="#step2"><span class="n">2</span><span>Requirements, naive Dockerfile</span></a></li>
+    <li><a href="#step3"><span class="n">3</span><span>Write the run files</span></a></li>
+    <li><a href="#step4"><span class="n">4</span><span>Build, run it on its own</span></a></li>
+    <li><a href="#step5"><span class="n">5</span><span>Look inside the image</span></a></li>
+    <li><a href="#step6"><span class="n">6</span><span>Watch it run</span></a></li>
+    <li><a href="#step7"><span class="n">7</span><span>Explore, by hand</span></a></li>
+    <li><a href="#step8"><span class="n">8</span><span>Packages and the plan</span></a></li>
+    <li><a href="#step9"><span class="n">9</span><span>Build slim, verify</span></a></li>
+    <li><a href="#step10"><span class="n">10</span><span>Compare the images</span></a></li>
+    <li><a href="#step11"><span class="n">11</span><span>Videos</span></a></li>
+    <li><a href="#step12"><span class="n">12</span><span>Load tests</span></a></li>
+    <li><a href="#step13"><span class="n">13</span><span>Production: compose</span></a></li>
+    <li class="sep" aria-hidden="true"></li>
+    <li><a href="#windows"><span class="n">&#9634;</span><span>Windows on screen</span></a></li>
+    <li><a href="#send"><span class="n">&rarr;</span><span>Send to Claude</span></a></li>
+    <li><a href="#trouble"><span class="n">!</span><span>When something breaks</span></a></li>
+  </ol>
+</nav>
+
+<main>
+
+<!-- ============================================================ FLOW -->
+<section class="sheet" id="flow">
+  <div class="sheet-title">
+    <h2>The flow: two images, one proof</h2>
+    <p>The naive image is built the usual way and is the reference. The slim image is built from what the program really used, and verify proves it does the same.</p>
+  </div>
+  <div class="flow">
+    <div class="flow-step"><div><p><strong>Read</strong> the code (step 1) and the requirements (step 2): what the program needs, written as a <code>Dockerfile.naive</code> that builds.</p></div></div>
+    <div class="flow-step"><div><p><strong>Run</strong> the program in that image, alone (step 4) and with X-Ray watching (steps 6, 7): what it really imports, opens, loads, connects to, writes; RAM, CPU, GPU.</p></div></div>
+    <div class="flow-step"><div><p><strong>Plan</strong> the slim image from that evidence (step 8): only the packages, libraries and files that were used, each line with its reason in <code>plan.json</code>.</p></div></div>
+    <div class="flow-step"><div><p><strong>Prove</strong> it: the same run on the slim image, compared fact by fact (step 9: <code>VERDICT: PASS</code>), and both images side by side (step 10).</p></div></div>
+    <div class="flow-step"><div><p><strong>Ship</strong> it with a compose file and one <code>.env</code> per machine (step 13).</p></div></div>
+  </div>
+  <div class="rules">
+    <div class="rule"><h3>Linux, always</h3><p>Docker Desktop on Windows runs Linux containers; the same image runs on a Linux server. What can differ is the CPU: x86_64 (Intel, AMD) or ARM (Jetson, Raspberry Pi). Step 2 checks the requirements for the one you name.</p></div>
+    <div class="rule"><h3>The driver comes from the PC</h3><p><code>--gpus all</code> mounts the NVIDIA driver into the container. Every other GPU library must be inside the image: from an <code>nvidia/cuda</code> base or from pip wheels (torch brings its own).</p></div>
+    <div class="rule"><h3>Evidence before removal</h3><p>Something leaves the image only when no code that ran used it and nothing needed depends on it. Whatever the code can reach stays, even if the test run did not touch it.</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 0 -->
+<section class="sheet step" id="step0">
+  <header class="step-head">
+    <span class="step-no">0</span>
+    <div><h2>Get ready</h2><p class="step-meta">10 min &middot; CMD</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step0" data-step="step0"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>cd /d "«X»"
+git pull
+findstr /b VERSION xray_naive.py xray_static.py xray_needs.py xray_runfile.py xray_plan.py xray_look.py xray_videos.py
+python --version
+docker version --format "{{.Server.Version}}"</pre></div>
+  <div class="out"><div class="out-bar">Versions this page is written for</div><pre>xray_naive.py:VERSION = "0.4.5"      xray_runfile.py:VERSION = "0.2.7"
+xray_static.py:VERSION = "0.5.12"    xray_plan.py:VERSION = "0.1.14"
+xray_needs.py:VERSION = "0.1.12"     xray_look.py:VERSION = "0.1.5"
+                                     xray_videos.py:VERSION = "0.2.0"</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; GPU projects only</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi</pre></div>
+  <div class="notes">
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li>Docker Desktop answers with a version; the GPU table shows your card and <code>CUDA Version</code> 12.8 or higher.</li>
+      <li class="bad"><code>could not select device driver "" with capabilities: [[gpu]]</code>: Docker cannot see the GPU. Update the NVIDIA driver, restart Docker Desktop.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">What you decide</h3><ul>
+      <li>The short name: everything goes to <code>runs\NAME</code>, the images are <code>NAME-naive</code> and <code>NAME-slim</code>. Several entry files or services: one name each.</li>
+      <li>Which test proves the program works: a video it processes, a camera, a request it answers. Every run below uses that test.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 1 -->
+<section class="sheet step" id="step1">
+  <header class="step-head">
+    <span class="step-no">1</span>
+    <div><h2>Read the code</h2><p class="step-meta">5 min &middot; nothing runs, nothing changes (GUIDE 3)</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step1" data-step="step1"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>cd /d "«X»"
+set "P=«P»"
+python xray_static.py --root "%P%" --entry «E» --requirements «R» --out runs\«N»\«N».json
+python xray_needs.py runs\«N»\«N».json &gt; runs\«N»\step1-needs.txt
+notepad runs\«N»\step1-needs.txt</pre></div>
+  <div class="callout"><p><strong>A new CMD window</strong> needs the <code>cd /d</code> and <code>set "P=..."</code> lines again; the later steps use <code>%P%</code>.</p></div>
+  <h3 class="block-title">Reading TO RUN IT IN A CONTAINER, YOU PROVIDE</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>The report says</th><th>Meaning</th><th>What you do</th></tr></thead>
+    <tbody>
+      <tr><td><code>model</code> / <code>data ... (must be inside the image or mounted)</code></td><td>a file the code reads</td><td>inside the project folder: nothing, it goes in with the code. A path on your PC (<code>C:\...</code>): step 2 decides copy or mount.</td></tr>
+      <tr><td><code>writes /home/... = SOME_CONST (file:line)</code></td><td>a folder written in the code, of one machine</td><td>nothing now: the run files mount a test folder at exactly that path; production mounts the real one (step 13). The code owner can make it an env var.</td></tr>
+      <tr><td><code>writes logs/...</code></td><td>files below the program's own folder</td><td>the load and explore runs keep them in <code>applog\</code>; compose mounts a folder there.</td></tr>
+      <tr><td><code>camera</code> / <code>network host:port</code></td><td>a camera, database or API it connects to</td><td>nothing to pass: a container reaches what your PC reaches. Check it from this PC first.</td></tr>
+      <tr><td><code>env</code></td><td>settings it reads from the environment</td><td>they go into <code>run.env</code> (step 3), one place for every run.</td></tr>
+      <tr><td><code>screen  cv2.imshow ...</code> and <code>in a container: ...</code></td><td>it opens windows; a container has no screen</td><td>nothing: X-Ray's runs and <code>NO_WINDOWS=1</code> handle OpenCV windows (see <a href="#windows">Windows on screen</a>). Other GUI libraries: the code owner.</td></tr>
+      <tr><td><code>system  GPU ...</code> / <code>shared memory</code></td><td>needs the GPU / shared memory between processes</td><td>the run files add <code>--gpus all</code> / <code>--shm-size 2g</code>; compose gets a measured size.</td></tr>
+      <tr><td><code>CODE CHANGES NEEDED</code></td><td>what no Docker setting can fix: secrets, hosts, paths in the code</td><td>the list for the code owner (<code>code-changes.txt</code>, step 3). A secret is never copied into an image.</td></tr>
+      <tr><td><code>(imported, never used)</code> / <code>OPTIONAL CODE CHANGES</code></td><td>a package only imported: the image carries it for nothing</td><td>optional; the image gets smaller if the code owner removes or guards the line.</td></tr>
+      <tr><td><code>NOT USED BY THIS ENTRY POINT</code></td><td>files no path from the entry reaches</td><td>left out of the slim image. <code>[maybe]</code> marks code that may not run; its files stay in.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============================================================ STEP 2 -->
+<section class="sheet step" id="step2">
+  <header class="step-head">
+    <span class="step-no">2</span>
+    <div><h2>Requirements and the naive Dockerfile</h2><p class="step-meta">2&ndash;5 min &middot; pip only reads the package index (GUIDE 2.4, 3b)</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step2" data-step="step2"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>python xray_naive.py --project "%P%" --requirements «R» --entry «E» --name «N» --static runs\«N»\«N».json «NG»
+notepad runs\«N»\naive\naive-check.txt</pre></div>
+  <div class="out"><div class="out-bar">Line 2 of naive-check.txt: what it checked for</div><pre>for: Linux x86_64, Python 3.10 (from venv/pyvenv.cfg (the virtual environment in the project)), GPU image (base ...)</pre></div>
+  <div class="notes">
+    <div class="why"><h3 class="block-title">Which Python, which Linux</h3><ul>
+      <li><strong>Python</strong> comes from the project itself: its venv (<code>venv\pyvenv.cfg</code>), <code>.python-version</code>, <code>pyproject.toml</code>, its own Dockerfile ... Line 2 says where. Nothing found: 3.12. Yours wins: <code>--python 3.10</code>.</li>
+      <li><strong>Linux</strong> is always the image's OS. The CPU decides the files: x86_64 by default, <code>--arch aarch64</code> for ARM.</li>
+      <li><strong>OTHER PYTHON VERSIONS</strong> (near the end): for a pin with no Linux wheel, the Pythons that have one. The project's real Python is usually among them.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">What you can decide</h3><ul>
+      <li><code>--copy NAME</code> / <code>--mount NAME</code>: a file the code reads from your PC (env var NAME). <strong>Copy</strong> = into the image at build time: it runs anywhere on its own, the image is bigger, a new file means a rebuild. <strong>Mount</strong> = attached at run time with <code>-v</code>: the image stays small, the file can change, every machine must have it. Default: up to 500 MB copied.</li>
+      <li><code>--keep PACKAGE</code>: only when two packages install the SAME files (<code>opencv-python</code> + <code>opencv-python-headless</code> both write <code>cv2/</code>). Both in one image = whichever installs last wins. Keep <code>opencv-python</code> if the program opens windows; <code>-headless</code> is smaller and has none.</li>
+    </ul></div>
+  </div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Status</th><th>Meaning</th><th>Done for you</th></tr></thead>
+    <tbody>
+      <tr><td>OK</td><td>a ready-made Linux wheel</td><td>&mdash;</td></tr>
+      <tr><td>COMPILED</td><td>only the source: pip compiles it in the build. Also when pip could not even prepare it on your PC (psycopg2 asks for PostgreSQL's <code>pg_config</code>): that part runs again inside the image</td><td>compiler + <code>-dev</code> library for that one RUN (psycopg2: <code>libpq-dev</code>; or use <code>psycopg2-binary</code>)</td></tr>
+      <tr><td>MISSING</td><td>that version has no file for Linux and this Python</td><td>the nearest version that has one, listed under HANDLED; the OTHER PYTHON VERSIONS list says which Python it was made for</td></tr>
+      <tr><td>WINDOWS</td><td>Windows-only (<code>pywin32</code> ...)</td><td>left out</td></tr>
+      <tr><td>second step</td><td>pins pip will not install together in one go</td><td>installed after the others, exactly as pinned</td></tr>
+      <tr><td>SAME FILES</td><td>two packages, one folder</td><td>one kept (<code>--keep</code> decides)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; then copy the three files next to the entry file</span><button class="copy" type="button">Copy</button></div><pre data-tpl>copy runs\«N»\naive\Dockerfile.naive "%P%\"
+copy runs\«N»\naive\Dockerfile.naive.dockerignore "%P%\"
+copy runs\«N»\naive\requirements.docker.txt "%P%\"</pre></div>
+  <p class="practice-note">Each line of Dockerfile.naive has its reason above it, and the file ends with <strong>CHECK BY HAND</strong>: one command per choice, for that image's layout.</p>
+</section>
+
+<!-- ============================================================ STEP 3 -->
+<section class="sheet step" id="step3">
+  <header class="step-head">
+    <span class="step-no">3</span>
+    <div><h2>Write the run files</h2><p class="step-meta">1 min &middot; runs nothing</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step3" data-step="step3"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder &middot; add --mac AA:BB:CC:DD:EE:FF if a licence checks the MAC</span><button class="copy" type="button">Copy</button></div><pre data-tpl>python xray_runfile.py --static runs\«N»\«N».json --project "%P%" --name «N»
+notepad runs\«N»\code-changes.txt</pre></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>File</th><th>What it does</th><th>Step</th></tr></thead>
+    <tbody>
+      <tr><td><code>build-naive.bat</code></td><td>builds <code>NAME-naive</code> from Dockerfile.naive</td><td>4</td></tr>
+      <tr><td><code>run-naive.bat</code></td><td>the program alone in that image, no X-Ray: does it start and work?</td><td>4</td></tr>
+      <tr><td><code>run-window.bat</code></td><td>only when the code opens windows: the same, with the windows on your screen</td><td><a href="#windows">windows</a></td></tr>
+      <tr><td><code>run-step2.bat</code> (<code>-cpu</code>)</td><td>the traced run: what it really used</td><td>6</td></tr>
+      <tr><td><code>run-explore.bat</code></td><td>traced, no time limit, so you can look inside</td><td>7</td></tr>
+      <tr><td><code>run-step3-4.bat</code></td><td>package scan and the plan</td><td>8</td></tr>
+      <tr><td><code>build-slim.bat</code>, <code>run-slim.bat</code></td><td>the slim image, and verify</td><td>9</td></tr>
+      <tr><td><code>compare-images.bat</code></td><td>both images side by side</td><td>10</td></tr>
+      <tr><td><code>videos.bat</code></td><td>can the image read your videos; converts the rest</td><td>11</td></tr>
+      <tr><td><code>run-load.bat</code></td><td>load tests A, B, C ...</td><td>12</td></tr>
+      <tr><td><code>run.env</code>, <code>code-changes.txt</code></td><td>every env var in one place; the list for the code owner (required, then OPTIONAL)</td><td>&mdash;</td></tr>
+    </tbody>
+  </table></div>
+  <p class="practice-note">At the top of each run file: <code>RUN_SECONDS</code> (how long, 0 = until it ends), <code>LOOP</code> and <code>VIDEOS</code> (video files only). Change them in Notepad; running xray_runfile.py again rewrites the files.</p>
+</section>
+
+<!-- ============================================================ STEP 4 -->
+<section class="sheet step" id="step4">
+  <header class="step-head">
+    <span class="step-no">4</span>
+    <div><h2>Build the naive image, run it on its own</h2><p class="step-meta">the build: minutes to an hour (big GPU images) &middot; the run: RUN_SECONDS</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step4" data-step="step4"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\«N»\build-naive.bat
+runs\«N»\run-naive.bat</pre></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>It ends with exit code</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td class="num">0</td><td>normal end</td></tr>
+      <tr><td class="num">1</td><td>a Python error: the Traceback above says which line</td></tr>
+      <tr><td class="num">125</td><td>Docker could not start the container: Docker's own message above</td></tr>
+      <tr><td class="num">130</td><td>stopped at RUN_SECONDS (Ctrl+C)</td></tr>
+      <tr><td class="num">134 / 139</td><td>aborted / crashed: in a container usually a window with no screen, else a native library</td></tr>
+      <tr><td class="num">137</td><td>killed: out of memory, or the stop after 30 s</td></tr>
+    </tbody>
+  </table></div>
+  <p class="practice-note">The <code>WINDOWS:</code> note at the top of run-naive.bat says how this run handles the program's windows: the program's own env switch, or <code>NO_WINDOWS=1</code> for OpenCV windows.</p>
+</section>
+
+<!-- ============================================================ STEP 5 -->
+<section class="sheet step" id="step5">
+  <header class="step-head">
+    <span class="step-no">5</span>
+    <div><h2>Look inside the image</h2><p class="step-meta">5 min &middot; the program does not start (GUIDE 10a)</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step5" data-step="step5"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm «GPU»-v "«X»:/x:ro" --entrypoint "" «N»-naive python /x/xray_look.py --image &gt; runs\«N»\look-naive.txt
+notepad runs\«N»\look-naive.txt</pre></div>
+  <div class="notes">
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li><code>MISSING for an import: none</code>, and DOES EVERY PACKAGE IMPORT: <code>FAILED: none</code>.</li>
+      <li>GPU TEST: torch <code>GPU: True</code> with your card; onnxruntime lists <code>CUDAExecutionProvider</code>.</li>
+      <li><code>missing only for parts loaded on demand</code>: plugins the program may never load. One line names <code>the Qt window plugin</code> with the apt packages a real window needs.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">By hand</h3><ul>
+      <li>Under every section a <code>by hand:</code> line gives the same check as a standard command. The commands ask Python where its packages are, so they fit any image: system Python or a venv.</li>
+      <li>A library missing that X-Ray has no package name for: <code>apt-file search NAME</code> (the line says how).</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 6 -->
+<section class="sheet step" id="step6">
+  <header class="step-head">
+    <span class="step-no">6</span>
+    <div><h2>Watch it run</h2><p class="step-meta">RUN_SECONDS (180 s) &middot; your test, with X-Ray (GUIDE 4)</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step6" data-step="step6"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\«N»\run-step2.bat</pre></div>
+  <div class="notes">
+    <div class="check"><h3 class="block-title">Read step2-needs.txt</h3><ul>
+      <li>WHAT THE RUN USED, at the end: RAM (sum of the processes), CPU cores busy, which GPU provider ran, the whole card's GPU memory.</li>
+      <li>The program's own output: <code>runs\NAME\step2.log</code>. <code>KeyboardInterrupt</code> at the end = X-Ray stopping it at RUN_SECONDS.</li>
+      <li>What its windows showed: <code>runs\NAME\trace\gui\</code>, one picture per window every 5 s.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">Why the run matters</h3><ul>
+      <li>Code reading cannot tell which <code>if</code> runs, which of two packages loads, whether the GPU is really used. The run records it.</li>
+      <li>Make the test real: the inputs and settings production uses. What the run never touches stays in the image only because the code can reach it.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 7 -->
+<section class="sheet step" id="step7">
+  <header class="step-head">
+    <span class="step-no">7</span>
+    <div><h2>Explore: look inside while it runs, by hand too</h2><p class="step-meta">20 min &middot; two CMD windows (GUIDE 10, 12)</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step7" data-step="step7"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 1</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\«N»\run-explore.bat</pre></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 2</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker exec -it «N»-explore python /xray/xray_look.py
+docker exec -it «N»-explore python /xray/xray_look.py --watch 5
+docker exec -it «N»-explore bash</pre></div>
+  <h3 class="block-title">Every xray_look section, by hand (inside, after docker exec ... bash; PID = the program's number)</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>xray_look shows</th><th>By hand</th></tr></thead>
+    <tbody>
+      <tr><td>processes, RAM, threads</td><td><code>for p in /proc/[0-9]*; do echo "${p#/proc/}  $(tr '\0' ' ' &lt; $p/cmdline)"; done</code><br><code>grep -E 'VmRSS|VmHWM|Threads' /proc/PID/status</code></td></tr>
+      <tr><td>files open now (models, videos, logs)</td><td><code>ls -l /proc/PID/fd | grep -v -E 'pipe:|socket:|anon_inode:|/dev/'</code></td></tr>
+      <tr><td>network connections</td><td><code>python3 -c "import socket,struct;[print(socket.inet_ntoa(struct.pack('&lt;I',int(r[2][:8],16))),int(r[2][9:],16)) for r in (l.split() for l in open('/proc/PID/net/tcp').readlines()[1:]) if r[3]=='01']"</code></td></tr>
+      <tr><td>libraries loaded</td><td><code>grep -o '/[^ ]*\.so[^ ]*' /proc/PID/maps | sort -u</code></td></tr>
+      <tr><td>which package a library came from</td><td><code>dpkg -S /path/of/lib.so</code> (apt) &middot; <code>pip show -f PACKAGE</code> (pip)</td></tr>
+      <tr><td>GPU: CUDA loaded, memory</td><td><code>grep -o '/[^ ]*\.so[^ ]*' /proc/PID/maps | grep -iE 'cudnn|cublas|cudart'</code> &middot; <code>nvidia-smi</code></td></tr>
+      <tr><td>env vars it got</td><td><code>tr '\0' '\n' &lt; /proc/PID/environ | sort</code></td></tr>
+      <tr><td>shared memory in use</td><td><code>df -h /dev/shm</code> &middot; <code>ls -la /dev/shm</code></td></tr>
+      <tr><td>biggest pip packages</td><td><code>du -sh $(python3 -c "import site; print(site.getsitepackages()[0])")/* | sort -h | tail -15</code></td></tr>
+      <tr><td>CUDA library folders the loader knows</td><td><code>cat /etc/ld.so.conf.d/*.conf; echo $LD_LIBRARY_PATH; ldconfig -p | grep -E 'libcudnn|libcublas'</code></td></tr>
+      <tr><td>what it changed on disk (from CMD)</td><td><code>docker diff NAME-explore</code></td></tr>
+      <tr><td>which code line runs now</td><td><code>pip install py-spy &amp;&amp; py-spy dump --pid PID</code> (explore has the permission)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD window 2 &middot; stop</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker stop -t 60 «N»-explore</pre></div>
+  <p class="practice-note">A look by hand is one moment: a file read once at start is gone from <code>/proc/PID/fd</code> a second later. X-Ray's report covers the whole run.</p>
+</section>
+
+<!-- ============================================================ STEP 8 -->
+<section class="sheet step" id="step8">
+  <header class="step-head">
+    <span class="step-no">8</span>
+    <div><h2>Packages and the plan</h2><p class="step-meta">10 min (GUIDE 5, 6.1)</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step8" data-step="step8"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder &middot; GPU projects: GPUBASE at the top first</span><button class="copy" type="button">Copy</button></div><pre data-tpl>notepad runs\«N»\run-step3-4.bat
+runs\«N»\run-step3-4.bat
+notepad runs\«N»\step4.txt</pre></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>GPUBASE</th><th>Base of the slim image</th><th>When</th></tr></thead>
+    <tbody>
+      <tr><td><code>auto</code></td><td>the same kind as Dockerfile.naive</td><td>you have no reason to change it</td></tr>
+      <tr><td><code>pip</code></td><td><code>python:3.X-slim</code> + NVIDIA's CUDA from pip wheels</td><td>torch is in the image (it brings CUDA anyway); one GPU service per machine</td></tr>
+      <tr><td><code>nvidia</code></td><td><code>nvidia/cuda</code> runtime image</td><td>no torch, and several GPU images on one machine share that base</td></tr>
+    </tbody>
+  </table></div>
+  <p class="practice-note">step3.txt: packages kept, removed (with sizes), swapped. step4.txt: the plan, with a NOTE for every decision. <code>plan\Dockerfile</code> ends with CHECK BY HAND, like Dockerfile.naive.</p>
+</section>
+
+<!-- ============================================================ STEP 9 -->
+<section class="sheet step" id="step9">
+  <header class="step-head">
+    <span class="step-no">9</span>
+    <div><h2>Build slim, verify</h2><p class="step-meta">15 min (GUIDE 6.2, 6.3)</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step9" data-step="step9"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\«N»\build-slim.bat
+runs\«N»\run-slim.bat
+docker image ls «N»-naive
+docker image ls «N»-slim</pre></div>
+  <div class="notes">
+    <div class="check"><h3 class="block-title">Check verify.txt</h3><ul>
+      <li><code>VERDICT: PASS</code> and <code>problems (0)</code>; with a GPU, it checks the GPU is still in use.</li>
+      <li>Harmless in the lists above it: temporary files with random names, <code>__pycache__</code>, outputs that depend on the input of the moment.</li>
+      <li class="bad"><code>CHECK</code> with problems: send verify.txt. The fix goes into the plan.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">Sizes</h3><ul>
+      <li><code>CONTENT SIZE</code> = what a machine downloads; <code>DISK USAGE</code> = download plus the unpacked files.</li>
+      <li>The slim image runs as a normal user (<code>app</code>, uid 1000), not root.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 10 -->
+<section class="sheet step" id="step10">
+  <header class="step-head">
+    <span class="step-no">10</span>
+    <div><h2>Compare the two images</h2><p class="step-meta">5 min</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step10" data-step="step10"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\«N»\compare-images.bat
+notepad runs\«N»\compare\compare.txt</pre></div>
+  <p class="practice-note">Side by side: Linux and Python, apt and pip sizes, the folders that differ most, what only one image has (marked used / NOT used in the runs), and where each image gets each CUDA library. By hand: <code>docker history IMAGE</code> (MB per Dockerfile line).</p>
+</section>
+
+<!-- ============================================================ STEP 11 -->
+<section class="sheet step" id="step11">
+  <header class="step-head">
+    <span class="step-no">11</span>
+    <div><h2>Videos: can the image read them?</h2><p class="step-meta">programs that read video files</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step11" data-step="step11"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\«N»\videos.bat "D:\your videos"</pre></div>
+  <div class="notes">
+    <div class="why"><h3 class="block-title">What it does</h3><ul>
+      <li>Opens every video with the OpenCV inside the image and reads frames. Any format, because it asks the real library.</li>
+      <li>Converts the unreadable ones (AV1, for example) to H.264 into <code>h264\</code>, checks the copies, prints the <code>run.env</code> line for each.</li>
+      <li><strong>On the GPU when it can</strong>: <code>GPU=1</code> at the top (default). NVIDIA's encoder is tested first; no GPU, or a file it refuses: the CPU. Each line ends with <code>GPU)</code> or <code>CPU)</code>.</li>
+    </ul></div>
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li>The first convert line says which encoder, and why not the GPU when it is the CPU.</li>
+      <li>The image <code>xray-ffmpeg:2</code> (about 1 GB) is built the first time only.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ STEP 12 -->
+<section class="sheet step" id="step12">
+  <header class="step-head">
+    <span class="step-no">12</span>
+    <div><h2>Load tests</h2><p class="step-meta">5 min per run</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step12" data-step="step12"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder &middot; change the load between runs</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\«N»\run-load.bat A
+runs\«N»\run-load.bat B</pre></div>
+  <p class="practice-note">Each run: <code>load-A\needs.txt</code> (WHAT THE RUN USED), <code>gpu.csv</code> (the GPU every 2 s), <code>run.log</code>, <code>applog\</code>. The slim image when it exists; no line counting, so the numbers are real speed. Grow the load (inputs, cameras, requests) until the GPU memory, the CPU or the frame rate gives out.</p>
+</section>
+
+<!-- ============================================================ STEP 13 -->
+<section class="sheet step" id="step13">
+  <header class="step-head">
+    <span class="step-no">13</span>
+    <div><h2>Production: compose</h2><p class="step-meta">no X-Ray &middot; one .env per machine</p></div>
+    <label class="done-box"><input type="checkbox" class="done" id="done-step13" data-step="step13"> Done</label>
+  </header>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>cd /d "«X»\runs\«N»\plan"
+copy .env.example .env
+notepad .env
+docker compose build
+docker compose up -d
+docker compose logs -f</pre></div>
+  <div class="notes">
+    <div class="why"><h3 class="block-title">What compose.yml holds</h3><ul>
+      <li>The slim image, <code>restart: unless-stopped</code>, the GPU, <code>shm_size</code> (4&times; what the run measured, at least 256m), the MAC when a licence checks it.</li>
+      <li>Folders: each written path and log folder, mounted from a folder named in <code>.env</code>.</li>
+      <li>OpenCV windows without a switch of their own: <code>NO_WINDOWS=1</code> in <code>.env</code> and the <code>no_windows</code> folder mounted.</li>
+      <li>The project already has a compose file: the plan writes <code>compose.xray.yml</code> to put on top of it instead.</li>
+    </ul></div>
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li><code>docker compose ps</code>: running; the logs show the work starting.</li>
+      <li class="bad"><code>Permission denied</code> on a mounted folder (Linux machine): <code>sudo chown -R 1000</code> on it; the image runs as uid 1000.</li>
+      <li class="bad"><code>.env</code> holds passwords: never in git, never in a chat.</li>
+    </ul></div>
+  </div>
+  <p class="practice-note">Stop: <code>docker compose down</code>. <code>logs -f</code>: Ctrl+C stops the following, not the program.</p>
+</section>
+
+<!-- ============================================================ WINDOWS -->
+<section class="sheet" id="windows">
+  <div class="sheet-title"><h2>Windows on screen, or switched off</h2><p>A container has no screen. No variable names are needed for any of this (GUIDE 16).</p></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Run</th><th>The program's windows</th><th>How</th></tr></thead>
+    <tbody>
+      <tr><td>X-Ray's runs (steps 6, 7, 9, 12)</td><td>not opened; pictures saved</td><td>X-Ray replaces OpenCV's window calls in the library itself: every window, any name. One picture per window every 5 s in <code>trace\gui\</code>.</td></tr>
+      <tr><td>run-naive, compose</td><td>not opened</td><td>the program's own env switch if it has one; else <code>NO_WINDOWS=1</code>: the tools' <code>xray_no_windows</code> on PYTHONPATH makes OpenCV's window calls do nothing. No code change. Other GUI libraries need the code's own switch.</td></tr>
+      <tr><td>run-window</td><td>on your screen</td><td>Windows 11: WSLg, shared by Docker Desktop. Windows 10: an X server (VcXsrv) and <code>DISPLAY=host.docker.internal:0.0</code>.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\«N»\run-window.bat</pre></div>
+  <div class="notes">
+    <div class="check"><h3 class="block-title">If no window opens</h3><ul>
+      <li><code>Could not load the Qt platform plugin "xcb" even though it was found</code> with a screen: the image lacks the window plugin's libraries. <code>WINDOW_APT</code> at the top of run-window adds them in a test image; the names are in step 5's <code>the Qt window plugin</code> line.</li>
+      <li><code>opencv-python-headless</code> has no window code: no screen helps.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">Tested</h3><ul>
+      <li>A real OpenCV window from a container on an X display, and NO_WINDOWS on and off in run-naive and compose.</li>
+      <li>Not tested: WSLg itself (no Windows machine here). If run-window shows nothing, send its output.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ SEND -->
+<section class="sheet" id="send">
+  <div class="sheet-title"><h2>Send to Claude</h2><p>Remove passwords, addresses with <code>user:password@</code>, IPs and people's names first (<code>***</code>).</p></div>
+  <ol class="send-list">
+    <li><code>step1-needs.txt</code>: TO RUN IT IN A CONTAINER and CODE CHANGES NEEDED.</li>
+    <li><code>naive-check.txt</code> (step 2), and the end of the build log if the build failed.</li>
+    <li>What <code>run-naive</code> printed, with its exit code (step 4); <code>look-naive.txt</code> (step 5).</li>
+    <li>WHAT THE RUN USED from <code>step2-needs.txt</code>, the last 40 lines of <code>step2.log</code>.</li>
+    <li><code>step3.txt</code>, <code>step4.txt</code>, image sizes, <code>verify.txt</code>, <code>compare.txt</code>.</li>
+  </ol>
+  <p class="practice-note">Never: <code>.env</code>, files with passwords, folders with personal data.</p>
+</section>
+
+<!-- ============================================================ TROUBLE -->
+<section class="sheet" id="trouble">
+  <div class="sheet-title"><h2>When something breaks</h2></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>You see</th><th>Meaning, what to do</th></tr></thead>
+    <tbody>
+      <tr><td>Build: <code>gcc</code> / <code>pg_config</code> / <code>Python.h</code> not found</td><td>a package is compiled and its tools are missing: run step 2 again (it adds them), or use the binary package it names.</td></tr>
+      <tr><td>Build: <code>No matching distribution found</code></td><td>that version has no file for Linux and this Python: naive-check.txt's OTHER PYTHON VERSIONS says which Python it was made for.</td></tr>
+      <tr><td>Build: <code>ResolutionImpossible</code></td><td>pins pip refuses together: Dockerfile.naive installs them in a second step; run step 2 again on the current file.</td></tr>
+      <tr><td><code>Could not load the Qt platform plugin "xcb"</code>, exit 134 / 139</td><td>a window, no screen: <code>NO_WINDOWS=1</code> (OpenCV) or the program's own switch; to see it: run-window.</td></tr>
+      <tr><td><code>No module named ...</code>, <code>cannot open shared object file</code></td><td>step 5: <code>xray_look.py --image</code> imports every package and names what is missing.</td></tr>
+      <tr><td>onnxruntime runs on the CPU in the image</td><td>its CUDA libraries are not found: step 5's CUDA section, and the folders registered in <code>/etc/ld.so.conf.d</code>.</td></tr>
+      <tr><td><code>CUDA out of memory</code></td><td>the GPU is full: less load per container, or a card with more memory (step 12 measures).</td></tr>
+      <tr><td><code>Bus error</code>, errors about <code>/dev/shm</code></td><td>shared memory too small: <code>--shm-size</code> / <code>shm_size</code>.</td></tr>
+      <tr><td>A video opens but gives no frame</td><td>a format the image's OpenCV cannot decode (AV1): step 11.</td></tr>
+      <tr><td><code>unsatisfied condition: cuda&gt;=12.8</code></td><td>the NVIDIA driver is older than the image's CUDA needs: update it.</td></tr>
+      <tr><td><code>no space left on device</code></td><td><code>docker system df</code>, then <code>docker builder prune</code> and <code>docker rmi</code> for old images.</td></tr>
+      <tr><td><code>'for' is not recognized</code>, <code>ls</code> fails in CMD</td><td>a line for INSIDE the container: first <code>docker exec -it NAME bash</code>.</td></tr>
+      <tr><td>A Traceback in an <code>xray_*.py</code> file</td><td>an X-Ray bug: send the traceback.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+</main>
+</div>
+</div>
+</div>
+
+<script>
+(function () {
+  var store = {
+    get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* storage blocked: the page still works */ } }
+  };
+  var P = "xraywalk.";
+  var fields = {"X": "dirX", "P": "dirP", "N": "nameN", "E": "entE", "R": "reqR", "G": "gpuG"};          // token -> input / select id
+  var defaults = {"X": "C:\\Users\\you\\PycharmProjects\\xray-tools", "P": "C:\\Users\\you\\PycharmProjects\\your-project", "N": "app", "E": "main.py", "R": "requirements.txt", "G": "yes"};      // the value a field starts with
+  var shown = {};            // what an empty field shows in the commands
+  var derived = {"GPU": {"field": "G", "map": {"yes": "--gpus all ", "no": ""}}, "NG": {"field": "G", "map": {"yes": "--gpu", "no": "--cpu"}}};        // token -> {field, map of the field's value -> text}
+  var tpls = Array.prototype.map.call(document.querySelectorAll("pre[data-tpl]"), function (pre) {
+    return { pre: pre, text: pre.textContent };
+  });
+  function val(k) {
+    var v = document.getElementById(fields[k]).value.trim();
+    return v || shown[k] || defaults[k] || "";
+  }
+  function render() {
+    var vals = {};
+    Object.keys(fields).forEach(function (k) { vals[k] = val(k); });
+    Object.keys(derived).forEach(function (k) { vals[k] = derived[k].map[val(derived[k].field)] || ""; });
+    tpls.forEach(function (t) {
+      var s = t.text;
+      Object.keys(vals).forEach(function (k) { s = s.split("«" + k + "»").join(vals[k]); });
+      t.pre.textContent = s;
+    });
+  }
+  Object.keys(fields).forEach(function (k) {
+    var el = document.getElementById(fields[k]);
+    var saved = store.get(P + "set." + k);
+    el.value = saved !== null ? saved : defaults[k];
+    if (el.tagName === "SELECT" && el.selectedIndex < 0) { el.value = defaults[k]; }
+    el.addEventListener(el.tagName === "SELECT" ? "change" : "input", function () { store.set(P + "set." + k, el.value); render(); });
+  });
+  render();
+
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("button.copy") : null;
+    if (!b) return;
+    var pre = b.closest(".cmd").querySelector("pre");
+    var text = pre.textContent;
+    function show(msg) { b.textContent = msg; window.setTimeout(function () { b.textContent = "Copy"; }, 1800); }
+    function fallback() {
+      var r = document.createRange(); r.selectNodeContents(pre);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      show("Ctrl+C now");
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { show("Copied"); }, fallback);
+      } else { fallback(); }
+    } catch (err) { fallback(); }
+  });
+
+  var boxes = Array.prototype.slice.call(document.querySelectorAll("input.done"));
+  function progress() {
+    var n = boxes.filter(function (b) { return b.checked; }).length;
+    document.getElementById("progress").textContent = n + " of " + boxes.length + " steps done";
+    boxes.forEach(function (b) {
+      var link = document.querySelector('.rail a[href="#' + b.dataset.step + '"]');
+      if (link) link.classList.toggle("is-done", b.checked);
+    });
+  }
+  boxes.forEach(function (b) {
+    b.checked = store.get(P + "done." + b.dataset.step) === "1";
+    b.addEventListener("change", function () { store.set(P + "done." + b.dataset.step, b.checked ? "1" : "0"); progress(); });
+  });
+  progress();
+
+  Array.prototype.forEach.call(document.querySelectorAll("input.num"), function (el) {
+    var saved = store.get(P + "num." + el.id);
+    if (saved !== null) el.value = saved;
+    el.addEventListener("input", function () { store.set(P + "num." + el.id, el.value); });
+  });
+})();
+</script>
+</body>
+</html>

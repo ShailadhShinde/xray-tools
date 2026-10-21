@@ -22,7 +22,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.11"
+VERSION = "0.1.12"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -306,7 +306,7 @@ def needs(d, facts, show_all):
             run_state(f) == "seen" for f in gui)
         out["screen"] = {"calls": sorted({str(f["subject"]) for f in gui}), "maybe": maybe,
                          "trace": "--gui off (X-Ray saves the shown frames every 5 s to <trace>/gui/)",
-                         "linux_window": "-e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix  (needs a desktop)",
+                         "linux_window": "run-window (Windows 11: WSLg; a Linux desktop: DISPLAY + /tmp/.X11-unix)",
                          "switch": window_switch_of(d)}
     envs = {}
     code_sets = sorted({f["subject"] for f in use if f["category"] == "env_var" and set_by_code(f)})
@@ -509,6 +509,11 @@ def print_needs(nd, out=print):
                 "(a container has no screen)")
         elif not (sw.get("no_screen") or ("", True))[1]:
             out(f"           in a container: nothing to do - {sw['no_screen'][0]}")
+        elif sw.get("calls") and all(str(c[2]).startswith("cv2.") for c in sw["calls"]):
+            how = (f"{sw['const']['name']} = {sw['const']['value']!r} in the code" if sw.get("const") else
+                   "an if no env var decides" if sw.get("guarded") else "no setting at all")
+            out(f"           in a container: NO_WINDOWS=1 switches OpenCV's windows off without a code change (X-Ray's "
+                f"no_windows - run-naive and the plan's compose use it); the code's own switch: {how}")
         elif sw.get("const"):
             k = sw["const"]
             out(f"           in a container: off - but {k['name']} = {k['value']!r} ({k['file']}:{k['line']}) is a constant "
@@ -518,7 +523,7 @@ def print_needs(nd, out=print):
         elif sw.get("guarded"):
             out("           in a container: switch them off - they sit inside an if no env var decides (a constant in "
                 "the code? a command-line flag? a config value?)")
-        out(f"           trace: {nd['screen']['trace']}   |   real window on Linux: {nd['screen']['linux_window']}")
+        out(f"           trace: {nd['screen']['trace']}   |   real window on your screen: {nd['screen']['linux_window']}")
     for e in nd["env"]:
         none = False
         out(f"  env      {e['flag']:<40} {e['why']} ({', '.join(e['where'][:2])})")

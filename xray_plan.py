@@ -24,10 +24,11 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import textwrap
 
-VERSION = "0.1.13"
+VERSION = "0.1.14"
 APP_USER, APP_UID = "app", 1000
 APP_HOME = f"/home/{APP_USER}"
 ALWAYS_IGNORE = [".git/", "**/__pycache__/", "**/*.pyc", ".idea/", ".vscode/", "Dockerfile*", "docker-compose*.yml",
@@ -653,9 +654,40 @@ def dockerfile(p):
     for c in p["copy"]:
         L.append(f"COPY --chown={p['user']['name']}:{p['user']['name']} {c} {c}")
     L += ["", f"USER {p['user']['name']}"]
+    L += check_by_hand(p, kind, dirs, vols)
     if p.get("cmd"):
         L.append("CMD " + json.dumps(p["cmd"]))
     return "\n".join(L) + "\n"
+
+
+def check_by_hand(p, kind, dirs, vols):
+    """comments: each choice above, checked by hand inside the built image (Python is asked where things are, so
+    the lines fit the layout: venv or not)"""
+    gpu = kind in ("nvidia", "pip-cuda")
+    L = ["", "# CHECK BY HAND - inside the built image:  docker run --rm -it --entrypoint bash IMAGE" +
+         ("   (+ --gpus all)" if gpu else ""),
+         '#   python -c "import sys, site; print(sys.executable, sys.version.split()[0], site.getsitepackages())"',
+         "#   pip list                                    only the kept packages; the removed ones are not there"]
+    if p["apt_packages"]:
+        L.append("#   dpkg -l " + " ".join(a["name"] if kind == "pip-cuda" else a["installed_as"] for a in p["apt_packages"]) +
+                 "    the system libraries (ii = installed)")
+    if p.get("build_from_source"):
+        L.append("#   which gcc || echo no compiler               removed again in the same RUN as pip")
+    if kind == "pip-cuda":
+        L += ["#   cat /etc/ld.so.conf.d/cuda-wheels.conf     the CUDA wheel folders registered above",
+              "#   ldconfig -p | grep -E 'libcudnn|libcublas'  the loader finds them by name"]
+    elif kind == "nvidia":
+        L.append("#   echo $LD_LIBRARY_PATH; ldconfig -p | grep -E 'libcudnn|libcublas'    CUDA from the base image")
+    if gpu:
+        L.append("#   nvidia-smi                                  the GPU (only with docker run --gpus all)")
+    L += [f"#   id                                          the user: {p['user']['name']} (uid {p['user']['uid']}), not root",
+          f"#   ls -la {p['workdir']}                                 only the copied code"]
+    if dirs or vols:
+        d0 = (dirs + vols)[0]
+        L.append(f"#   touch {d0.rstrip('/')}/x && rm {d0.rstrip('/')}/x && echo writable    a folder the app writes")
+    L.append('#   all at once, from your PC:  docker run --rm' + (" --gpus all" if gpu else "") +
+             ' -v "TOOLS_FOLDER:/x:ro" --entrypoint "" IMAGE python /x/xray_look.py --image')
+    return L
 
 
 def dockerignore(p):
@@ -689,6 +721,9 @@ def compose_override(p, services, out_dir, compose_path, window=None):
         env = dict(p.get("env_remap") or {})
         if window and window.get("env"):
             env[window["env"]] = window["value"]          # the code's own window switch: a container has no screen
+        nwpp = nw_setup(p, out_dir) if no_windows(window) else None
+        if nwpp:                                        # no switch of its own: X-Ray's no_windows (cv2 windows off)
+            env["NO_WINDOWS"], env["PYTHONPATH"] = "1", nwpp
         if env:
             L.append("    environment:")
             L += [f"      {k}: {v}" for k, v in env.items()]
@@ -707,9 +742,12 @@ def compose_override(p, services, out_dir, compose_path, window=None):
                     changed = True
                     continue      # test the code baked into the image, not a bind mount of the source
                 vols.append(f"{src}:{new_t}")
+        nwv = f"{rel(os.path.join(out_dir, 'no_windows'))}:{NW_DIR}:ro" if nwpp else None
         if changed:
             L.append("    volumes: !override")
-            L += [f"      - {v}" for v in vols]
+            L += [f"      - {v}" for v in vols + ([nwv] if nwv else [])]
+        elif nwv:
+            L += ["    volumes:", f"      - {nwv}"]
     new_named = []
     for s in p["images"]["services"]:
         for v in services.get(s, {}).get("volumes", []):
@@ -743,6 +781,35 @@ def window_of(static, project):
         return xray_runfile.window_switch(static or {}, project)
     except Exception:
         return None
+
+
+def no_windows(window):
+    """OpenCV windows with no env var of the program to switch them: X-Ray's no_windows does it (NO_WINDOWS=1)"""
+    try:
+        import xray_runfile
+        return xray_runfile.no_windows(window)
+    except Exception:
+        return False
+
+
+NW_DIR = "/opt/xray-no-windows"
+
+
+def nw_setup(p, out_dir):
+    """copy the tools' no_windows (a sitecustomize.py) next to the compose file; -> the PYTHONPATH to set"""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xray_no_windows", "sitecustomize.py")
+    os.makedirs(os.path.join(out_dir, "no_windows"), exist_ok=True)
+    shutil.copyfile(src, os.path.join(out_dir, "no_windows", "sitecustomize.py"))
+    pp = (p.get("image_env") or {}).get("PYTHONPATH")
+    return NW_DIR + (":" + re.sub(r":?\$\{?PYTHONPATH\}?", "", pp) if pp else "")
+
+
+def nw_env_lines(window):
+    where = ", ".join(f"{c[2]} at {c[0]}:{c[1]}" for c in (window.get("calls") or [])[:2])
+    return ["# windows: the code opens OpenCV windows (" + where + ") and a container has no screen.",
+            "# NO_WINDOWS=1: X-Ray's no_windows (the folder no_windows, mounted by compose.yml) makes cv2's window calls",
+            "# do nothing - no code change, the rest runs as it is. 0 = the code's own behaviour (it needs a screen then).",
+            "NO_WINDOWS=1"]
 
 
 def compose_new(p, out_dir, mac_needed, window=None):
@@ -780,6 +847,11 @@ def compose_new(p, out_dir, mac_needed, window=None):
          "services:", f"  {svc}:", f"    image: {name}-slim", "    build:",
          f"      context: {p['inputs']['project']}", f"      dockerfile: {os.path.abspath(os.path.join(out_dir, 'Dockerfile'))}",
          "    restart: unless-stopped", "    env_file: .env"]
+    nw = no_windows(window)
+    if nw:
+        L += ["    environment:", "      # X-Ray's no_windows: its sitecustomize.py runs at Python start (NO_WINDOWS in .env)",
+              f"      PYTHONPATH: {nw_setup(p, out_dir)}"]
+        dirs = dirs + [("", "./no_windows", NW_DIR + ":ro")]
     if mac_needed:
         L.append('    mac_address: "${MAC_ADDRESS:?set MAC_ADDRESS in .env (the MAC the licence expects)}"')
     if shm:
@@ -790,7 +862,7 @@ def compose_new(p, out_dir, mac_needed, window=None):
     if vols or dirs or ins:
         L.append("    volumes:")
         L += [f"      - ${{{k}:-./{c.rstrip('/').rsplit('/', 1)[-1]}}}:{c}:ro" for k, _h, c in ins]
-        L += [f"      - ${{{k}:-{d}}}:{c}" for k, d, c in vols + dirs]
+        L += [f"      - ${{{k}:-{d}}}:{c}" if k else f"      - {d}:{c}" for k, d, c in vols + dirs]
     if str(cr.get("gpus", "")).startswith("all"):
         L += ["    deploy:", "      resources:", "        reservations:", "          devices:",
               "            - driver: nvidia", "              count: all", "              capabilities: [gpu]"]
@@ -800,9 +872,11 @@ def compose_new(p, out_dir, mac_needed, window=None):
     if ins:
         E.append("# input folders on this machine, mounted read-only (from the code defaults; / works on Windows too)")
         E += [f"{k}={h}" for k, h, c in ins] + [""]
-    if vols or dirs:
+    if vols or any(k for k, _d, _c in dirs):
         E.append("# folders on this machine (left: host, mounted into the container)")
-        E += [f"{k}={d}" for k, d, c in vols + dirs] + [""]
+        E += [f"{k}={d}" for k, d, c in vols + dirs if k] + [""]
+    if nw:
+        E += nw_env_lines(window) + [""]
     if env:
         E.append("# env vars the code reads")
         for e in env:          # comments on their own line: in an env file "X=1  # c" makes the value "1  # c"
@@ -822,7 +896,8 @@ def compose_new(p, out_dir, mac_needed, window=None):
                 E.append(f"{e['name']}={dv}")
     else:
         E.append("# (the code reads no env vars yet: its settings are written in the code - see code_changes_required)")
-    if window and window.get("calls") and not window.get("env") and (window.get("no_screen") or ("", True))[1]:
+    if window and window.get("calls") and not window.get("env") and (window.get("no_screen") or ("", True))[1] \
+            and not nw:
         where = ", ".join(f"{c[2]} at {c[0]}:{c[1]}" for c in window["calls"][:2])
         k = window.get("const")
         if k:

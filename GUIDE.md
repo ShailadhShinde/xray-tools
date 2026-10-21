@@ -96,12 +96,21 @@ run (`--entry a.py --entry b.py`). Mapping them separately makes each one think 
 The pip packages list: `requirements.txt`, or another name. Look at the Dockerfile's `COPY ... requirements` /
 `pip install -r ...` line - **that** is the file the image really uses (there may be several old ones).
 
-### 2.4 Find the Python version
-- Dockerfile `FROM python:3.9-slim` -> 3.9.
-- Dockerfile `FROM nvidia/cuda:...ubuntu24.04` + `apt install python3` -> the Ubuntu one (24.04 = 3.12, 22.04 = 3.10).
-- A PyCharm venv: `.venv/pyvenv.cfg`, line `version`.
-- Give it to xray_naive.py as `--python 3.11` (for example). 3.12 is only the default; versions and wheels depend on
-  the Python, so `naive-check.txt` warns when the PC running the check has another one.
+### 2.4 Find the Python version (xray_naive.py reads it itself)
+The image should run the Python the project already runs on: package versions and wheels depend on it.
+`xray_naive.py` looks in the project, in this order, and says in `naive-check.txt` where it found it:
+- a virtual environment in the project (`venv/`, `.venv/`, `env/` - PyCharm makes one): `pyvenv.cfg`, line `version`.
+  This is the strongest evidence: it is what the code really runs on;
+- `.python-version` (pyenv), `runtime.txt`, `Pipfile`, `environment.yml` (conda), the project's own `Dockerfile`
+  (`FROM python:3.9-slim` -> 3.9);
+- `pyproject.toml` `requires-python`, `setup.py` / `setup.cfg` `python_requires`: the newest Python it allows.
+Nothing found: 3.12. Your own choice wins: `--python 3.10`. The venv lives elsewhere (PyCharm: Settings > Project >
+Python Interpreter shows its path and version)? Then give it with `--python`.
+
+**Which Linux?** Always Linux: Docker Desktop on Windows runs Linux containers, the same image runs on a Linux server.
+What differs between machines is the CPU: `x86_64` (Intel / AMD PCs and servers, the default) or `aarch64` (ARM:
+Jetson, Raspberry Pi, ARM cloud servers) - `--arch aarch64` checks the requirements for ARM. A Jetson with its GPU
+needs one of NVIDIA's L4T base images; the tool says so.
 
 ### 2.5 What does the app need from outside?
 You will confirm this with X-Ray, but write down what you already know:
@@ -245,7 +254,7 @@ minute, without installing anything (pip only reads the package index - it needs
 
 | It reports | Meaning | What the tool does |
 |---|---|---|
-| COMPILED | no ready-made Linux package ("wheel") for that version: pip compiles it in the build (`gcc not found`, `pg_config not found` ...) | the Dockerfile gets a compiler + the right `-dev` library |
+| COMPILED | no ready-made Linux package ("wheel") for that version: pip compiles it in the build (`gcc not found`, `pg_config not found` ...). Also when only the source exists and pip could not even PREPARE it on your PC (psycopg2 asks for PostgreSQL's `pg_config`, which a Windows PC does not have): that part runs again inside the image, where the build installs what it needs | the Dockerfile gets a compiler + the right `-dev` library (psycopg2: `libpq-dev`; or use `psycopg2-binary`) |
 | MISSING | that version does not exist for Linux / this Python (`No matching distribution`) | lists the nearest versions that do: change the pin |
 | WINDOWS | a Windows-only package (`pyreadline3`, `pywin32` ...) - a `pip freeze` from a Windows PC | left out |
 | INDEX | `torch==2.8.0+cu126`: exists only on PyTorch's own index | the index line is added |
@@ -271,10 +280,16 @@ Windows-only packages (`pywin32`, `pyreadline3` ...) are the only lines left out
 ```bat
 python xray_naive.py --project "PROJECT_FOLDER" --requirements requirements.txt --entry main.py --name app --gpu
 ```
-(`--cpu` for a CPU image; `--python 3.10` if the machine that runs the code today has Python 3.10.)
+(`--cpu` for a CPU image; `--python 3.10` to choose the Python yourself - section 2.4; `--arch aarch64` for ARM.)
 If `naive-check.txt` starts with `WARNING: your pip (...) checks 'Requires-Python' ...`: run `python -m pip install -U pip`
-and the check again. pip 24.1 and older, on a PC whose Python is older than the image's, show wrong versions (or
-MISSING for packages that need the newer Python).
+and the check again. pip 24.1 and older check a package's Python limits against the PC's own Python instead of the
+image's, so a package made only for some Python versions shows up as MISSING or with another version.
+
+**OTHER PYTHON VERSIONS.** For every line with no Linux wheel for the chosen Python, `naive-check.txt` lists the
+Pythons (3.8 to 3.13) that DO have one for exactly that pin - e.g. `numpy==1.21.6  Linux wheels for Python 3.8, 3.9,
+3.10`. Often that is the real answer: the file comes from a PC with Python 3.10, and the image should be 3.10 too.
+When one Python has a wheel for all of them, it says so (`-> Python 3.10 ...`); run the check again with that
+`--python` to see every other line for it. It is a choice, not a fix: the project must run on that Python.
 
 `naive-check.txt` also has two tables:
 - **WHAT KIND OF PACKAGE EACH ONE IS** - for every line, the file pip would really download for Linux:
@@ -358,8 +373,14 @@ Example - the worker on the slim image for 10 minutes on a 2-minute video: in `r
 your program uses - and reads a few frames. The ones it cannot read are converted to H.264 into the subfolder `h264`
 (the originals stay), checked again, and it prints the `run.env` line for each copy; for a run file, `VIDEOS=` that
 `h264` folder. It works for any format because it asks the real library, not a list. A second run skips what is
-already converted. The ffmpeg it uses comes from a small image (`xray-ffmpeg`, python:3.12-slim + imageio-ffmpeg)
-that it builds the first time.
+already converted. The ffmpeg it uses comes from an image it builds the first time (`xray-ffmpeg:2`, about 1 GB:
+linuxserver's ffmpeg + Python). **The GPU converts when it can:** with `GPU=1` (the default, at the top of
+videos.bat) the converter gets the GPU with its video part (`--gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,video,
+utility`; plain `--gpus all` leaves the encoder out), encodes a one-second test video on NVIDIA's encoder
+(`h264_nvenc`), and if that works converts on the GPU - much faster for big videos. Otherwise, and for a file the GPU
+encoder refuses (H.264 on NVENC takes at most 4096 pixels wide), the CPU (`libx264`) does it; each line says which
+(`, GPU)` / `, CPU)`), and the first line says why the GPU was not used. Docker cannot give the GPU at all (exit code
+125): videos.bat runs it again on the CPU. Tested here without a GPU (the fallback); the GPU path needs your card.
 What OpenCV's Linux wheel read in a test (4.13 and 5.0 the same): H.264 (8-bit, 10-bit, 4:2:2), H.265 (8-bit,
 10-bit), VP8, VP9, MPEG-4, MPEG-2, MJPEG, ProRes, DNxHD, FFV1, Theora, WMV, H.263, GIF - all fine; AV1 - opens, but
 no frame.
@@ -624,6 +645,10 @@ image, then **DOES EVERY PACKAGE IMPORT?** - every pip package is imported in a 
 does, and each failure gets its reason (`built for NumPy 1.x, but NumPy 2.x is installed`, `'six' is missing`,
 `compiled for another version of torch`, `a system library is missing`), packages that installed the same files
 (two OpenCVs), and last a GPU test per framework (torch: `GPU: True` + the card; onnxruntime: its providers).
+Under every section of its report a `by hand:` line gives the standard command that shows the same thing (section
+10b), with the real PID filled in. Those commands ask Python where its packages are
+(`python3 -c "import site; print(site.getsitepackages()[0])"`), so they fit any image: system Python
+(`/usr/local/lib/python3.12/site-packages`) or a venv (`/opt/venv/lib/python3.12/site-packages`).
 
 **Two images side by side** (the same project on two bases, naive against slim ...): `compare-images.bat`
 (section 6.2). By hand it is `xray_look.py --inventory` inside each image, then `xray_look.py --compare a.json b.json`.
@@ -843,7 +868,9 @@ on `exit`, so you can break things freely). In CMD:
 docker run --rm -it --entrypoint bash IMAGE
 ```
 then type these INSIDE (the prompt is `root@...:/app#`, not `C:\...>`). `xray_look.py --image` (section 10a) does
-most of it in one go; this is the same by hand:
+most of it in one go; this is the same by hand. Each generated Dockerfile (Dockerfile.naive and the plan's) also ends
+with a **CHECK BY HAND** block: one command per choice it made - its packages, its apt libraries, the CUDA folders it
+registered, the user, the copied code - written for THAT Dockerfile's layout:
 ```bash
 which python; python --version; echo $PATH          # which Python, and is the venv first on PATH
 SP=$(python -c "import site;print(site.getsitepackages()[0])"); echo $SP     # where pip put the packages
@@ -956,8 +983,51 @@ extends the rule for every project:
 | file, network, process calls it follows | `IO_CALLS`, `NET_CALLS`, `SUBPROC` ... | xray_static.py |
 | import errors explained | `HINTS` | xray_look.py |
 | video formats OpenCV cannot read | `CODEC_NOTE` | xray_runfile.py |
+| the apt package of a MISSING library (a hint only: the library is found missing by `ldd`, whatever it is; one not in the list gets `apt-file search NAME`) | `APT` | xray_look.py |
+| where a project names its Python version | `project_python` | xray_naive.py |
+| which OpenCV calls open windows and are switched off by NO_WINDOWS | `_windows_off` | xray_no_windows/sitecustomize.py |
 
 **The safety net for anything a list does not know.** Once an image exists X-Ray stops guessing: the traced run
 records what really loaded, `xray_look.py --image` imports every package and lists every library that is missing
 (whatever the library), and verify compares the slim image's run with the naive one's. A new library the lists do not
 know still shows up there - as a failed import, a missing `.so`, or a difference in verify.
+
+
+## 16. Windows (cv2.imshow) in a container: switch them off, or see them on your screen
+
+A container has no screen. A program that opens a window there stops (OpenCV: `Could not load the Qt platform plugin
+"xcb"`, exit code 134 or 139). X-Ray handles that in three places, none of them needs the name of a variable:
+
+| Where | What happens to the windows | How |
+|---|---|---|
+| X-Ray's runs (run-step2, run-explore, run-load, run-slim) | not opened; what each window WOULD show is saved | `--gui off`: X-Ray replaces OpenCV's window calls (`imshow`, `waitKey`, `namedWindow` ...) inside the library itself, for every window the program opens. Every 5 s one picture per window name goes to `runs\NAME\trace\gui\` (`load-A\trace\gui\` ...): open them to see what the windows showed |
+| run-naive and the plan's compose (no X-Ray in them) | not opened | the program's OWN switch when it has one in an env var (`-e SHOW=0`, read from the `if` around the window call); otherwise **NO_WINDOWS=1**: the tools' folder `xray_no_windows` goes on `PYTHONPATH`, and its `sitecustomize.py` (Python runs it at start) makes OpenCV's window calls do nothing. No code change, any number of windows, any window names. `NO_WINDOWS=0` = the program as it is |
+| run-window (new) | opened on YOUR screen | see below |
+
+`NO_WINDOWS` covers OpenCV (`cv2`) - the window calls of almost every vision project. Another GUI library (tkinter,
+pygame, Qt widgets) has no such switch: there the code needs its own (`code-changes.txt` says where). The code's own
+switch is still the cleaner way for production: `code-changes.txt` lists it under OPTIONAL when NO_WINDOWS already
+makes it run.
+
+**Seeing the windows on your screen (run-window.bat).** Two things are needed:
+1. **A screen the container can reach.** Windows 11 has one built in: WSLg (Windows' own Linux display), which Docker
+   Desktop shares. run-window.bat passes it:
+   ```bat
+   docker run --rm -e DISPLAY=:0 -e WAYLAND_DISPLAY=wayland-0 -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir ^
+     -e PULSE_SERVER=/mnt/wslg/PulseServer -e QT_X11_NO_MITSHM=1 ^
+     -v /run/desktop/mnt/host/wslg/.X11-unix:/tmp/.X11-unix -v /run/desktop/mnt/host/wslg:/mnt/wslg IMAGE
+   ```
+   Windows 10 has no WSLg: install an X server (VcXsrv; tick "Disable access control" when it starts) and use
+   `-e DISPLAY=host.docker.internal:0.0` instead of those display lines. A Linux desktop: `-e DISPLAY=$DISPLAY
+   -v /tmp/.X11-unix:/tmp/.X11-unix` (run-window.sh), after `xhost +local:`.
+2. **The window libraries in the image.** A server image lacks them, and then even WITH a screen OpenCV prints the
+   same `Could not load the Qt platform plugin "xcb" even though it was found`. `xray_look.py --image` names them:
+   `... the Qt window plugin (cv2.imshow on a screen) -> apt-get install -y libsm6` and so on. run-window adds them
+   in a small test image (`IMAGE-window`: FROM the naive image + one apt layer, built once - the naive image itself
+   is not changed) from `WINDOW_APT` at the top of the file. Tested here with opencv-python 5.0 on Ubuntu 24.04: the
+   window plugin lacked `libSM.so.6` and `libICE.so.6` (packages `libsm6 libice6`, the default), and with them the
+   window opened on an X display. `opencv-python-headless` has no window code at all: no screen helps there.
+
+What was tested here: the window on an X display (Xvfb) from a container, NO_WINDOWS in run-naive and in compose
+(on: the program runs to its end; off: it stops, no screen). Not tested here: WSLg itself (no Windows machine) -
+the Docker Desktop paths above are the ones its users use for WSLg (not tested by me); if no window opens, send what run-window prints.
