@@ -229,7 +229,6 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
 </style>
 </head>
 <body>
-
 <div class="page">
 <div class="wrap">
 
@@ -369,15 +368,15 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
 python --version
 python -m pip install -U pip
 findstr /b VERSION xray_naive.py xray_static.py xray_trace.py xray_needs.py xray_pkg.py xray_plan.py xray_runfile.py xray_look.py xray_videos.py</pre></div>
-  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.4"
+  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.5"
 xray_static.py:VERSION = "0.5.12"
 xray_trace.py:VERSION = "0.2.7"
-xray_needs.py:VERSION = "0.1.11"
+xray_needs.py:VERSION = "0.1.12"
 xray_pkg.py:VERSION = "0.1.4"
-xray_plan.py:VERSION = "0.1.13"
-xray_runfile.py:VERSION = "0.2.6"
-xray_look.py:VERSION = "0.1.4"
-xray_videos.py:VERSION = "0.1.0"</pre></div>
+xray_plan.py:VERSION = "0.1.14"
+xray_runfile.py:VERSION = "0.2.7"
+xray_look.py:VERSION = "0.1.5"
+xray_videos.py:VERSION = "0.2.0"</pre></div>
 
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; Docker Desktop running</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi</pre></div>
 
@@ -462,9 +461,9 @@ notepad runs\zip\naive\Dockerfile.naive</pre></div>
 
   <div class="callout"><p><strong>Lines pip will not install together</strong> (the error the worker's build had). A <code>pip freeze</code> comes from a PC where packages were installed at different times, e.g. torch first, newer <code>nvidia-*</code> later; pip only warned there. A Docker build installs the whole file in ONE <code>pip install</code>, and pip refuses the same combination. naive-check.txt then lists those lines as <code>INSTALLED IN A SECOND STEP, exactly this version - pip says: ...</code>, and Dockerfile.naive installs them in section 3c, after everything else, with <code>--no-deps</code>: the same way your PC got them. Nothing is left out, no version is changed; what they need that is not in your file is added right after (<code>ADDED</code>). The build log then shows pip's warning and <code>pip check</code> lines, the same your PC had; the build goes on. Whether the program works with those versions: <code>run-naive</code> (step 4), <code>xray_look.py --image</code> (step 5) and the runs.</p></div>
 
-  <div class="callout"><p><strong>Two packages that install the same files</strong>, e.g. <code>opencv-python</code> and <code>opencv-python-headless</code> in one file: both write into <code>cv2/</code>, so the one installed last overwrites the other's files. The tool reads each wheel's file list from the package index (a few KB, not the download) and finds such pairs for any packages (<code>PyJWT</code> + <code>jwt</code>, <code>pymongo</code> + <code>bson</code> ...). It keeps one, says which and why under HANDLED, and <code>--keep NAME</code> picks the other. <strong>Python version:</strong> the check runs for <code>--python</code> (default 3.12). If the project runs on another Python on its PC, pass that one; naive-check.txt warns when the PC running the check has a different Python.</p></div>
+  <div class="callout"><p><strong>Two packages that install the same files</strong>, e.g. <code>opencv-python</code> and <code>opencv-python-headless</code> in one file: both write into <code>cv2/</code>, so the one installed last overwrites the other's files. The tool reads each wheel's file list from the package index (a few KB, not the download) and finds such pairs for any packages (<code>PyJWT</code> + <code>jwt</code>, <code>pymongo</code> + <code>bson</code> ...). It keeps one, says which and why under HANDLED, and <code>--keep NAME</code> picks the other. <strong>Python version:</strong> the tool reads it from the project itself: its venv (<code>venv\pyvenv.cfg</code>, PyCharm makes one), <code>.python-version</code>, <code>pyproject.toml</code>, its own Dockerfile. Line 2 of naive-check.txt says where it came from; nothing found = 3.12; <code>--python 3.10</code> overrides it. A pin with no Linux wheel gets OTHER PYTHON VERSIONS: the Pythons that do have one. An ARM machine (Jetson): <code>--arch aarch64</code>.</p></div>
 
-  <div class="prose"><p>For every line of the requirements, the tool asks pip which file it would download for Linux and Python 3.12. Nothing gets installed. From those answers it writes the Dockerfile. Read naive-check.txt first, then the Dockerfile next to the explanations below.</p></div>
+  <div class="prose"><p>For every line of the requirements, the tool asks pip which file it would download for Linux and the project's Python (3.12 here). Nothing gets installed. From those answers it writes the Dockerfile. Read naive-check.txt first, then the Dockerfile next to the explanations below.</p></div>
 
   <div class="out"><div class="out-bar">Practice run, naive-check.txt</div><pre>OK - a prebuilt Linux wheel exists (4):
   numpy, opencv-python, onnxruntime-gpu==1.22.0, nvidia-ml-py
@@ -601,8 +600,8 @@ copy /y runs\zip\naive\requirements.docker.txt "%P%\"</pre></div>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>python xray_runfile.py --static runs\zip\zip.json --project "%P%" --name zip
 notepad runs\zip\run.env</pre></div>
 
-  <div class="out"><div class="out-bar">What it prints (names and folders come from your code)</div><pre>  build-naive.bat  run-naive.bat  run-step2.bat  run-step2-cpu.bat  run-step3-4.bat  build-slim.bat
-  run-slim.bat  run-load.bat  run-explore.bat  compare-images.bat  videos.bat  run.env  code-changes.txt
+  <div class="out"><div class="out-bar">What it prints (names and folders come from your code)</div><pre>  build-naive.bat  run-naive.bat  run-window.bat  run-step2.bat  run-step2-cpu.bat  run-step3-4.bat
+  build-slim.bat  run-slim.bat  run-load.bat  run-explore.bat  compare-images.bat  videos.bat  run.env  code-changes.txt
   image zip-naive; entry live_video.py; GPU yes/no; window yes/no; ports ...
   mount &lt;a folder on your PC&gt; -&gt; /xin/&lt;name&gt;     one per file the code reads from your PC
   env   &lt;NAME&gt;=/xin/&lt;name&gt;/&lt;file&gt;              that file, inside the container
@@ -689,12 +688,13 @@ zip-naive:latest       9.01GB          3.4GB</pre></div>
   <h3 class="block-title">Can the image read your videos?</h3>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\videos.bat
 runs\zip\videos.bat "D:\other videos"</pre></div>
-  <div class="prose"><p>Every video in the folder (no folder given: the folder of your program's video) is opened with the OpenCV inside the image, the same library your program uses, and a few frames are read. Whatever it cannot read is converted to H.264 into the subfolder <code>h264</code>; the originals stay. The copies are checked again, and the run.env line for each is printed. It asks the real library, so it works for any format, not only the ones on a list. The ffmpeg for the conversion comes from a small image it builds the first time.</p></div>
+  <div class="prose"><p>Every video in the folder (no folder given: the folder of your program's video) is opened with the OpenCV inside the image, the same library your program uses, and a few frames are read. Whatever it cannot read is converted to H.264 into the subfolder <code>h264</code>; the originals stay. The copies are checked again, and the run.env line for each is printed. It asks the real library, so it works for any format, not only the ones on a list. The ffmpeg for the conversion comes from an image it builds the first time (<code>xray-ffmpeg:2</code>, about 1 GB). <strong>On the GPU when it can:</strong> with <code>GPU=1</code> at the top of videos.bat (the default) the converter gets the GPU with its video part, tries NVIDIA's encoder on a one-second test video, and converts there - much faster for big videos. No GPU for Docker, or a file the GPU refuses: the CPU does it. The first convert line says which encoder, and why not the GPU.</p></div>
   <div class="out"><div class="out-bar">Practice run: a folder with H.264, H.265 and two AV1 videos (shortened)</div><pre>  clip_h264.mp4         H.264   OK  960x540  25.0 fps  50 frames
   clip_h265.mp4         H.265   OK  960x540  25.0 fps  50 frames
   drone_av1.mp4         AV1     CANNOT READ: it opens, but no frame comes out - OpenCV here has no decoder for AV1
   more/second_av1.mp4   AV1     CANNOT READ: ...
-  drone_av1.mp4 -> h264/drone_av1.mp4  (0.4 MB, 1 s)
+xray_videos 0.2.0 - converting 2 video(s) to H.264 into h264/ ... Encoder: libx264, the CPU ... GPU not used: ...
+  drone_av1.mp4 -> h264/drone_av1.mp4  (0.4 MB, 1 s, CPU)
       in run.env, for the program's own video:  VIDEO_IN=/xin/video_in/h264/drone_av1.mp4
 Checking the copies with the same OpenCV ...
   drone_av1.mp4         H.264   OK  960x540  25.0 fps  75 frames</pre></div>
@@ -703,7 +703,7 @@ Checking the copies with the same OpenCV ...
   <h3 class="block-title">Does the image run on its own? (no X-Ray)</h3>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; tools folder</span><button class="copy" type="button">Copy</button></div><pre data-tpl>runs\zip\run-naive.bat</pre></div>
   <div class="prose"><p>The image as it is, with its mounts and <code>run.env</code>, in container <code>zip-run</code>, for <code>RUN_SECONDS</code> (120 by default; then Ctrl+C, and if it does not stop within 30 s Docker ends it). You see your program's own output directly, and at the end what its exit code means.</p>
-  <p><strong>Windows:</strong> a container has no screen, and a program that opens one (<code>cv2.imshow</code>) stops there with <code>Could not load the Qt platform plugin "xcb"</code>. xray_runfile looks for the code's own switch (the <code>if</code> around the window and the env var it comes from, e.g. <code>SHOW</code>) and run-naive sets it off: its <code>WINDOWS:</code> note at the top says which. If the code has no switch, the note says so: watch it with run-explore instead (X-Ray switches windows off).</p></div>
+  <p><strong>Windows:</strong> a container has no screen, and a program that opens one (<code>cv2.imshow</code>) stops there with <code>Could not load the Qt platform plugin "xcb"</code>. xray_runfile looks for the code's own switch (the <code>if</code> around the window and the env var it comes from, e.g. <code>SHOW</code>) and run-naive sets it off: its <code>WINDOWS:</code> note at the top says which. If the code has no switch and the windows are OpenCV's, run-naive sets <code>NO_WINDOWS=1</code> instead: the tools' <code>xray_no_windows</code> folder on PYTHONPATH makes OpenCV's window calls do nothing, no code change. <strong>To SEE the windows</strong> on this PC: <code>runs\zip\run-window.bat</code> (Windows 11: Docker Desktop shares WSLg, Windows' own Linux display; it adds the window plugin's libraries <code>libsm6 libice6</code> in a small test image). In X-Ray's runs the windows are not opened, but what they show is saved: <code>runs\zip\trace\gui\</code>, one picture per window every 5 s.</p></div>
   <div class="out"><div class="out-bar">Practice run, the top of run-naive and its end</div><pre>REM WINDOWS: the code opens windows (cv2.imshow at live_video.py:73) only when SHOW is on. A container has no screen,
 REM so this run sets SHOW=0 (found in the code's own if-condition). ...
 ...
@@ -728,15 +728,18 @@ The program ended with exit code 0:
   LD_LIBRARY_PATH (extra folders searched for libraries): /usr/local/cuda/lib64
     /usr/local/cuda/lib64  ok
   PIP PACKAGES: 12, 709 MB in all; the biggest:
+    by hand: pip list
+             du -sh $(python3 -c "import site; print(site.getsitepackages()[0])")/* | sort -h | tail -15
     onnxruntime_gpu   432 MB     opencv_python   187 MB     numpy   54 MB ...
   SYSTEM LIBRARIES YOUR PIP PACKAGES NEED (ldd on 68 compiled files):
     apt package libcublas-12-8      used by onnxruntime_gpu
     apt package libgl1              used by opencv_python   ...
-    MISSING (an import that needs one of these fails with 'cannot open shared object file'):
-      libSM.so.6           needed by opencv_python (libqxcb.so)
-        (only for windows on a screen: cv2.imshow with a display)
-      libnvinfer.so.10     needed by onnxruntime_gpu (libonnxruntime_providers_tensorrt.so)
-        (a plugin / optional part: matters only if the program uses it)
+    MISSING for an import: none - every library a Python module loads is in the image
+    missing only for parts loaded on demand (3: plugins, optional providers, multi-GPU transports - they matter only
+    if the program uses that part; the X-Ray run shows what it really loads):
+      libICE.so.6                the Qt window plugin (cv2.imshow on a screen)  -> apt-get install -y libice6
+      libSM.so.6                 the Qt window plugin (cv2.imshow on a screen)  -> apt-get install -y libsm6
+      libnvinfer.so.10           TensorRT (onnxruntime's TensorRT provider)  -> find its package: apt-file search ...
   CUDA LIBRARIES IN THE IMAGE:
     libcublasLt.so.12   717 MB  apt libcublas-12-8   /usr/local/cuda-12.8/targets/x86_64-linux/lib/...
     libcudnn.so.9       122 KB  apt libcudnn9-cuda-12   /usr/lib/x86_64-linux-gnu/libcudnn.so.9.8.0  ...
@@ -745,7 +748,7 @@ The program ended with exit code 0:
     OK (12): coloredlogs, cv2, flatbuffers, humanfriendly, mpmath, numpy, onnxruntime, packaging, pynvml, sympy ...
   GPU TEST (each framework that is installed, in its own process):
     onnxruntime 1.22.0 - providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']</pre></div>
-  <div class="prose"><p>The import test is the quickest answer to "does everything in this image work": a version that does not fit (<code>built for NumPy 1.x, but NumPy 2.x is installed</code>), a missing dependency (<code>'six' is missing</code>), a library compiled for another torch (<code>undefined symbol</code>) show up here with their reason, before any run. With <code>--gpus all</code> the GPU test also says <code>torch ... GPU: True</code> and your card. The next part does the same by hand, one line at a time.</p></div>
+  <div class="prose"><p>The import test is the quickest answer to "does everything in this image work": a version that does not fit (<code>built for NumPy 1.x, but NumPy 2.x is installed</code>), a missing dependency (<code>'six' is missing</code>), a library compiled for another torch (<code>undefined symbol</code>) show up here with their reason, before any run. With <code>--gpus all</code> the GPU test also says <code>torch ... GPU: True</code> and your card. Under every section a <code>by hand:</code> line gives the standard command for the same check; it asks Python where its packages are, so it fits this venv image (<code>/opt/venv</code>) as well as a slim one. The next part does the same by hand, one line at a time.</p></div>
 
   <h3 class="block-title">B. By hand, without the GPU</h3>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm -it --entrypoint bash zip-naive</pre></div>
@@ -1185,7 +1188,7 @@ cd /d "«X»"</pre></div>
   <div class="notes">
     <div class="why"><h3 class="block-title">Why</h3><ul>
       <li><code>.env</code> holds everything that changes per PC: folders, settings, later passwords. compose.yml stays the same everywhere. Never put .env on GitHub.</li>
-      <li><strong>Windows</strong>: without X-Ray nothing catches <code>cv2.imshow</code>, and a container has no screen (<code>Could not load the Qt platform plugin "xcb"</code>). xray_plan finds the code's own switch and sets it off in <code>.env.example</code> (e.g. <code>SHOW=0</code>, with the reason above it). A <code>.env</code> you copied before that: add the line yourself. No switch in the code: .env.example says so.</li>
+      <li><strong>Windows</strong>: without X-Ray nothing catches <code>cv2.imshow</code>, and a container has no screen (<code>Could not load the Qt platform plugin "xcb"</code>). xray_plan finds the code's own switch and sets it off in <code>.env.example</code> (e.g. <code>SHOW=0</code>, with the reason above it). A <code>.env</code> you copied before that: add the line yourself. No switch in the code and OpenCV windows: <code>NO_WINDOWS=1</code> in .env.example, and compose.yml mounts the plan's <code>no_windows</code> folder, which makes OpenCV's window calls do nothing - no code change.</li>
       <li><strong><code>run --rm</code>, not <code>up -d</code></strong>: compose.yml has <code>restart: unless-stopped</code>. That suits a camera stream that should run forever. A program that works through one video file and then ends would be started again by <code>up -d</code> every time it finishes.</li>
       <li>The service is called <code>zip-main</code> after the folder name ZIP-main.</li>
     </ul></div>
@@ -1232,7 +1235,7 @@ cd /d "«X»"</pre></div>
         <tr><td>The image builds, the program says <code>No module named ...</code>, <code>undefined symbol</code>, <code>numpy.core.multiarray failed to import</code></td><td><code>xray_look.py --image</code> (step 5A): every package is imported and each failure gets its reason.</td></tr>
         <tr><td><code>VIDEOIO(CV_IMAGES) ... icvExtractPattern</code> then <code>cannot open video: /xin/...</code></td><td>The video is not at that path inside the container. The OpenCV message is misleading: when FFmpeg cannot open the file, OpenCV tries the name as an image-sequence pattern. Check: <code>docker run --rm -v "D:\your folder:/xin/video_in" --entrypoint "" zip-naive ls -la /xin/video_in</code>. Is the file listed with exactly that name? Nothing listed: Docker Desktop cannot see that drive or folder (Settings &rarr; Resources &rarr; File sharing), or the path is wrong.</td></tr>
         <tr><td>Two OpenCV packages in one image (<code>opencv-python</code> + <code>opencv-python-headless</code>)</td><td>Step 2 keeps one (SAME FILES). In a built image, <code>xray_look.py --image</code> shows "PACKAGES THAT INSTALLED THE SAME FILES". opencv-python's wheel brings its own FFmpeg; no system FFmpeg is needed to read videos.</td></tr>
-        <tr><td><code>Could not load the Qt platform plugin "xcb" ... even though it was found</code>, exit code 134 or 139</td><td>The program opened a window and a container has no screen. Regenerate the run files (step 3): run-naive then sets the code's own window switch, see its <code>WINDOWS:</code> note. No switch in the code: use run-explore / run-load (X-Ray switches windows off).</td></tr>
+        <tr><td><code>Could not load the Qt platform plugin "xcb" ... even though it was found</code>, exit code 134 or 139</td><td>The program opened a window and a container has no screen. Regenerate the run files (step 3): run-naive then sets the code's own window switch, or <code>NO_WINDOWS=1</code> when there is none - see its <code>WINDOWS:</code> note. To see the windows: <code>run-window.bat</code>; if that prints the same message, the image lacks the window libraries (<code>WINDOW_APT</code> at its top).</td></tr>
         <tr><td><code>[av1 @ ...] Your platform doesn't support hardware accelerated AV1 decoding</code>, no frames</td><td>The video is AV1, and OpenCV's Linux wheel cannot read AV1 (4.13 and 5.0 alike: no software AV1 decoder inside). Run <code>runs\zip\videos.bat "D:\your folder"</code>: it opens every video with the image's own OpenCV, converts the ones it cannot read to H.264 into <code>h264\</code> and prints the run.env line for each copy (step 4).</td></tr>
         <tr><td>A run with <code>RUN_SECONDS</code> wrote no results file</td><td>The program writes it only at its end, and the time limit stopped it first: <code>RUN_SECONDS=0</code>, <code>LOOP=0</code>.</td></tr>
         <tr><td>A Traceback that mentions an <code>xray_*.py</code> file</td><td>An X-Ray bug: send the traceback.</td></tr>
