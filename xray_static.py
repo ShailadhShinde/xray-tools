@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-VERSION = "0.5.12"
+VERSION = "0.5.13"
 PLACE = "<var>"
 REQ = {"no": 0, "conditional": 1, "yes": 2}
 
@@ -176,6 +176,9 @@ MODEL_EXT = {".onnx", ".pt", ".pth", ".pb", ".tflite", ".task", ".engine", ".trt
              ".mlmodel", ".joblib", ".pkl"}
 CONFIG_EXT = {".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".conf", ".env", ".properties"}
 KEY_EXT = {".pem", ".key", ".pfx", ".p12", ".crt", ".cer", ".csr", ".jks", ".der"}
+VIDEO_EXT = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".mpg", ".mpeg", ".ts", ".wmv", ".flv", ".h264", ".h265"}
+# a file of one PC written in the code: C:\Users\me\Videos\lane.mp4, D:/data/x.onnx, /home/alice/clip.mp4 (spaces allowed)
+PC_FILE_RE = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/[^/]+/)")
 SAVE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".pdf"} | MODEL_EXT
 JUNK_DIRS = {".git", ".idea", ".vscode", "__pycache__", ".mypy_cache", ".pytest_cache",
              ".ruff_cache", ".venv", "venv", ".tox", "node_modules", ".ipynb_checkpoints", ".eggs"}
@@ -2469,11 +2472,29 @@ class ModuleVisitor(ast.NodeVisitor):
                 self.fact(node, "device", v, "string_literal", detail="host device path -> compose devices:")
         s = v.strip()
         ext = posixpath.splitext(s)[1].lower()
+        if len(s) < 260 and "\n" not in s and not urls and 1 < len(ext) <= 9 and PC_FILE_RE.match(s):
+            self.pc_file_fact(node, s, ext)
+            return
         if len(s) < 260 and "\n" not in s and " " not in s and not urls:
             if ext in (MODEL_EXT | CONFIG_EXT | KEY_EXT):
                 self.path_fact(node, None, "ref_literal", "python_io", fv=FV(s))
             elif 1 < len(ext) <= 9 and "%" not in s and "{" not in s:
                 self.path_fact(node, None, "ref_literal", "python_io", fv=FV(s))  # kept only if the file exists
+
+
+    def pc_file_fact(self, node, s, ext):
+        """C:\\Users\\me\\Videos\\lane.mp4 written in the code and not passed straight to a call X-Ray follows (a config list,
+        a dict value, a constant): a file of one PC. The run files mount it and map the path (xray_inputs)"""
+        subj = s.replace("\\", "/")
+        kind = "video" if ext in VIDEO_EXT else "model" if ext in MODEL_EXT else "file"
+        here = os.path.isfile(s)
+        name = self.assign_names.get(id(node))
+        self.fact(node, "hardcoded_config", subj, "pc_file", cap="conditional", value=subj, kind=kind,
+                  on_this_pc=here,
+                  detail=f"a {kind} of one PC named in the code" + (f" ({name})" if name else "") + " - a container "
+                         "cannot see it: the run files mount it and give the code the container path (PC_PATHS, no code "
+                         "change); on a server the config needs a path there, or a camera address"
+                         + ("" if here else "; not found on the PC this map was made on"))
 
 
 # =============================================================== call graph
@@ -4566,6 +4587,8 @@ class Mapper:
         if c == "secret":
             return "never bake: env var / Docker secret / runtime mount"
         if c == "hardcoded_config":
+            if f.get("mechanism") == "pc_file":
+                return "mounted by the run files, the path mapped (PC_PATHS) - no code change"
             return "externalize to env/config (code change)"
         if c == "network_endpoint":
             return f"reach {s} by compose service name; keep internal services unpublished"

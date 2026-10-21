@@ -572,6 +572,8 @@ python3 xray_plan.py verify --naive app-runtime.json --planned app-xray-runtime.
 | `permission denied` writing `trace-...` / `pkg-...` | `chmod 777 thatfolder` |
 | `docker: command not found` / cannot connect | Docker is not running (start Docker Desktop / `sudo systemctl start docker`) |
 | the app exits at once in Step 2 | read the error above `[xray-trace] app exited`: missing env var, file, or unreachable DB/camera |
+| `VIDEOIO(FFMPEG): backend is generally available but can't be used to capture by name`, then the program's own "camera not connected" again and again | OpenCV cannot open that name: in a container, usually a file of your PC (`C:\...\video.mp4` in the code's config). Step 1 lists it as `pcfile`; run Step 1 and xray_runfile.py again on the PC where the file is, and the run files mount it (section 17b) - or set SOURCE at the top of the run file to a video of this PC (17a) |
+| a run ends with exit code 137 | the program did not end within 30 s of Ctrl+C, so Docker killed it. Normal for a program with child processes (each camera / worker in its own process) - not an error. Or out of memory: `docker stats` while it runs |
 | `could not select device driver "" with capabilities: [[gpu]]` | `--gpus all` without the NVIDIA container toolkit on that machine |
 | `timed out waiting for /mnt/wslg` | Docker Desktop cannot show windows: use `--gui off` |
 | verify says `CHECK` | send `step4-verify.log` |
@@ -986,6 +988,9 @@ extends the rule for every project:
 | the apt package of a MISSING library (a hint only: the library is found missing by `ldd`, whatever it is; one not in the list gets `apt-file search NAME`) | `APT` | xray_look.py |
 | where a project names its Python version | `project_python` | xray_naive.py |
 | which OpenCV calls open windows and are switched off by NO_WINDOWS | `_windows_off` | xray_no_windows/sitecustomize.py |
+| what a path of one PC looks like in code (`C:\`, `D:/`, `/home/NAME/`), and video extensions | `PC_FILE_RE`, `VIDEO_EXT` | xray_static.py |
+| which calls get the container path for a PC path (VideoCapture, imread, open, os.path, onnxruntime), and which one SOURCE replaces (VideoCapture) | `PATCH`, the `builtins` / `posixpath` wraps, `_patch_cv2` | xray_inputs/sitecustomize.py |
+| which addresses SOURCE passes on as a stream; video files it takes from a folder | the `rtsp` / `rtmp` / `http` / `udp:` lines of `source_lines`; `VIDEO_EXT` | xray_runfile.py; xray_inputs/sitecustomize.py |
 
 **The safety net for anything a list does not know.** Once an image exists X-Ray stops guessing: the traced run
 records what really loaded, `xray_look.py --image` imports every package and lists every library that is missing
@@ -1031,3 +1036,213 @@ makes it run.
 What was tested here: the window on an X display (Xvfb) from a container, NO_WINDOWS in run-naive and in compose
 (on: the program runs to its end; off: it stops, no screen). Not tested here: WSLg itself (no Windows machine) -
 the Docker Desktop paths above are the ones its users use for WSLg (not tested by me); if no window opens, send what run-window prints.
+
+
+## 17. Feed the program any video, folder of videos or camera - SOURCE (and files named by a PC path)
+
+### 17a. SOURCE - what the program reads, whatever its code opens
+
+The code decides what a program opens: a camera address from a config, a video path in a list, a camera number,
+`if TEST: video else: rtsp`. To give it something else you would normally edit the code. Every run file has a
+setting at its top instead:
+
+```bat
+REM SOURCE: what the program reads INSTEAD of what its code opens ...
+set "SOURCE="
+```
+
+| What you write | What the program gets |
+|---|---|
+| `set "SOURCE="` (empty, the default) | what its code says - nothing is changed |
+| `set "SOURCE=D:\videos\lane 3.mp4"` | this video, for EVERY source it opens (one camera or ten) |
+| `set "SOURCE=D:\videos"` | a folder: source 1 gets the 1st video in it (by name), source 2 the 2nd, ... (more sources than videos: it starts again from the 1st). A source keeps its video when the program reconnects |
+| `set "SOURCE=rtsp://user:password@192.168.1.20:554/stream1"` | this camera stream, for every source (`rtsp`, `rtmp`, `http`, `udp:` addresses) |
+
+A relative path works (`set "SOURCE=videos\test.mp4"`, from the folder you run the file in). A path that does not
+exist stops the run file at once: `SOURCE "D:\videos\x.mp4": no such file or folder on this PC`. A `%` in an address
+(a password with `%`) must be written `%%` in a .bat file. The .sh files: `SOURCE="..."`, the same values.
+
+**How, without a code change.** The run file mounts the file or folder (`-v "D:\videos:/xsource:ro"`) and passes
+`-e XRAY_SOURCE=/xsource`. The tools' folder `xray_inputs` is on `PYTHONPATH` in every run file; its
+`sitecustomize.py` runs when Python starts - in every process the program starts, too - and gives
+`cv2.VideoCapture(...)` (and `.open(...)`) the SOURCE instead of what the code passed: a camera number, an rtsp
+address, a file path. Each swap is printed once per process, at the start of the program's output:
+
+```text
+[xray] video source: C:\Users\me\Videos\Lane-12 down side.mp4 -> /xsource/a lane 1.mp4
+```
+
+No `[xray] video source` line = the program did not open a source through `cv2.VideoCapture` (another library -
+PyAV, GStreamer, imageio - or it never got that far): read the program's own output above.
+
+It is in every run file: run-naive, run-window, run-step2, run-step3-4, run-slim, run-load, run-explore. In X-Ray's
+runs the needs report shows the swapped video as `the test video the run file gave in place of the code's own
+source (its SOURCE setting)`, so it is not mistaken for a file the image needs.
+
+**SOURCE and VIDEOS.** VIDEOS (X-Ray's runs only) plays a folder of videos ONE AFTER THE OTHER for a program that
+reads a video FILE, and leaves cameras alone. SOURCE replaces every source - cameras and streams too - and gives each
+source its own video. To test a multi-camera program with recorded videos: SOURCE = a folder with one video per
+camera. To loop a single video file forever: SOURCE = the file, LOOP=1.
+
+Tested here: the toll-style program from section 17b (a spawned process, `VideoCapture(path, cv2.CAP_FFMPEG)`, its
+config naming a video of another PC): with SOURCE empty `Cam ... Not Connected`; with SOURCE = a file, a folder, or
+an rtsp stream (a test RTSP server) `Cam connected`, in run-naive and in the traced run-step2. Three sources (two
+rtsp addresses and camera 0, in spawned processes) with SOURCE = a folder of two videos: video 1, video 2, video 1,
+and each source got the same video again when it reconnected. Not tested here: Windows CMD itself (no Windows
+machine) - if a .bat line fails, send what it printed.
+
+### 17b. Files the code names by their PC path (a video in a config list, a model on D:)
+
+A program written on Windows often names a file by where it is on that PC - in a config list, a dict, a constant:
+```python
+CAMERA_CONFIG = [{'name': 'Lane_3', 'rtsp_url': r"C:\Users\me\Videos\Lane-12 down side.mp4", ...}]
+...
+cap = cv2.VideoCapture(cam_config['rtsp_url'], cv2.CAP_FFMPEG)
+```
+A Linux container has no `C:\`. OpenCV prints `can't be used to capture by name` and the program waits for its
+"camera" forever. No env var to set, no `-v` that helps: the code asks for `C:\Users\...`, a name no container has.
+
+**What X-Ray does, without a code change:**
+1. Step 1 finds every path of a PC written in the code (spaces allowed, any depth: a list, a dict, a constant) and
+   lists it in the needs report: `pcfile  C:/Users/me/Videos/Lane-12 down side.mp4 (constants.py:5) - a video of one
+   PC, named in the code`. Near an unresolved camera it adds: the video file(s) named in the code may be what it opens.
+2. xray_runfile.py mounts each such file that is on THIS PC into every run: `-v "C:\...\Lane-12 down side.mp4:/xin/pc_1/
+   Lane-12 down side.mp4:ro"`, and writes `PC_PATHS=C:\...\Lane-12 down side.mp4=/xin/pc_1/Lane-12 down side.mp4` into
+   `run.env`.
+3. The same `xray_inputs` folder as SOURCE (on `PYTHONPATH`: `-v "%X%\xray_inputs:/opt/xray-inputs:ro"`) gives
+   `cv2.VideoCapture`, `cv2.imread` / `imwrite`, `open()`, `os.path.exists` / `isfile` / `isdir` / `getsize` and
+   `onnxruntime.InferenceSession` the container path whenever the code names a path in `PC_PATHS` (upper / lower
+   case and `/` against `\` do not matter, as on Windows). Every other path is passed on as it is.
+
+It works in X-Ray's runs (together with X-Ray's own trace hook) and in run-naive / run-window. Tested here with the
+same pattern as a real multi-camera worker: `VideoCapture(path, cv2.CAP_FFMPEG)` in a spawned child process opened
+the mounted video; without it, nothing.
+
+**The file is not on this PC** (the config names another developer's PC): xray_runfile prints `CHECK the code names
+C:\... - that file is not on this PC`. Either copy the video to exactly that path and run xray_runfile.py again, or -
+quicker - set SOURCE (17a) to any video of this PC. SOURCE wins when both are set: it replaces the source before the
+path is looked up.
+
+**Production is different:** a server has neither your PC's file nor X-Ray's run files. There the config holds what
+the server has - a camera address (`rtsp://...`) or a path on the server - and nothing needs mapping. The plan's
+`.env.example` names the PC files it found and says how to test compose with one, if you want to.
+
+The slim image never contains such a test file or SOURCE video: they are mounted at run time only.
+
+
+## 18. Edit the run files and Dockerfile.naive yourself
+
+The files X-Ray writes are plain text: open them in Notepad (right click > Edit, or `notepad run-naive.bat`). Every
+line is a command you could type yourself. This section shows what each part does, so you can change it.
+
+### 18.1 Before you edit: which file, and what survives
+
+| You want to change | Change it in | Kept when xray_runfile.py runs again? |
+|---|---|---|
+| how long it runs, loop, videos, SOURCE | the settings at the top of that run file | no - set it again |
+| an env var the program reads (for every run) | `runs\NAME\run.env` | no - written again too |
+| a `-v` / `-e` / `-p` for one run | the `docker run` line of that run file | no |
+| what is INSTALLED in the image | `Dockerfile.naive` in the project, then build-naive again | yes - xray_runfile.py never writes it (xray_naive.py does, when you run it again) |
+
+xray_runfile.py writes ALL its files again each time it runs (run.env included). To keep an edited run file, save it
+under your own name: `copy run-naive.bat my-run-naive.bat` - X-Ray never touches a file it did not write. Edit the
+copy, run the copy.
+
+### 18.2 The settings at the top of a run file
+
+```bat
+set "RUN_SECONDS=180"
+set "LOOP=0"
+set "VIDEOS="
+set "SOURCE="
+```
+- Write the value between `=` and the closing `"`: `set "SOURCE=D:\videos"`. Keep both quotes - they let a path
+  have spaces. No spaces around `=` (`set "SOURCE = D:\x"` makes a variable called `SOURCE `, with a space).
+- `REM` at the start of a line = a comment, CMD skips it. In .sh files the comment sign is `#` and a setting is
+  `SOURCE="D:/videos"` (no `set`, no spaces around `=`).
+- `%NAME%` later in the file = the value of that setting. `%%` = one `%` character.
+- What each setting does is written in the `REM` lines above it.
+
+### 18.3 The docker run line, part by part
+
+A run file is mostly one `docker run` command. CMD reads a line ending in `^` and the next line as ONE line (in .sh
+files: `\`). A typical one (run-naive of a GPU project):
+
+```bat
+docker run --rm --name proj-run --gpus all --shm-size 2g ^
+  -v "D:\models\best.onnx:/data/best.onnx:ro" ^
+  --env-file "%RUN%\run.env" ^
+  -v "%X%\xray_no_windows:/opt/xray-no-windows:ro" -v "%X%\xray_inputs:/opt/xray-inputs:ro" -e PYTHONPATH=/opt/xray-no-windows:/opt/xray-inputs -e NO_WINDOWS=1 ^
+  %XSRC% ^
+  proj-naive
+```
+
+| Part | What it does | When to change it |
+|---|---|---|
+| `docker run` | start a NEW container from an image | - |
+| `--rm` | delete the container when it ends (its files are gone; the image stays) | remove it to look at a stopped container (`docker ps -a`, `docker logs NAME`) |
+| `--name proj-run` | a fixed name: `docker stop proj-run`, `docker exec -it proj-run bash` | - |
+| `--gpus all` | give the container the GPU (the driver comes from the PC) | remove it to test the CPU fallback |
+| `--shm-size 2g` | shared memory for programs that pass frames between processes (`multiprocessing`, PyTorch DataLoader); Docker's default is 64 MB | raise it on `Bus error` / `No space left on device` in /dev/shm |
+| `--mac-address ...` | the network card address a licence check expects | when the licence is for another PC |
+| `-p 8000:8000` | PC port : container port - a web API the program serves | when the program listens on a port |
+| `-v "PC_PATH:CONTAINER_PATH:ro"` | show a PC file or folder inside the container. `:ro` = read only; leave it out to let the program write there | add one for every file the program needs that is not in the image |
+| `--env-file "...\run.env"` | every `NAME=value` line of run.env becomes an env var | change values in run.env |
+| `-e NAME=value` | one env var; written AFTER `--env-file` it wins over run.env | a quick change for one run |
+| `PYTHONPATH=...` + the two `-v ...\xray_...` | X-Ray's two helper folders: NO_WINDOWS (16) and SOURCE / PC_PATHS (17) | leave them - empty settings change nothing |
+| `%XSRC%` | the `-v` / `-e` the SOURCE setting made (empty when SOURCE is empty) | change SOURCE instead |
+| `proj-naive` | the IMAGE. Anything AFTER the image name replaces the image's CMD | add `python other_entry.py` after it to start another file |
+
+**Add a mount or an env var:** put a new line before the image line, ending in ` ^`:
+```bat
+  -v "D:\data\lanes.json:/app/config/lanes.json:ro" ^
+  -e LOG_LEVEL=DEBUG ^
+  proj-naive
+```
+The container path must be what the code opens (a relative path in the code is relative to `/app`, the WORKDIR of
+the Dockerfile). Paths with spaces: keep the whole `PC:container:ro` inside one pair of quotes.
+
+**Common mistakes:** a space after `^` (CMD then ends the command there: the next line runs as its own command -
+`'-v' is not recognized`); a line without `^` before the image line (same); a Windows path on the container side
+(`-v "D:\x:D:\x"` - the container side is always Linux: `/something`).
+
+In run-step2 (and the other X-Ray runs) the image name is followed by `python /xray/xray_trace.py run ... -- python
+main.py`: X-Ray starts the program itself to watch it. The part after `--` is the program's own command.
+
+### 18.4 Dockerfile.naive, part by part
+
+xray_naive.py writes it into `runs\NAME\naive\`; you copy it into the project and build it with build-naive.bat
+(`docker build -f Dockerfile.naive -t NAME-naive .`). Every `RUN`, `COPY`, `ENV` line makes a layer; `#` lines are
+comments. Its sections:
+
+| Section | Lines | Change it when |
+|---|---|---|
+| 1. BASE IMAGE | `FROM nvidia/cuda:...-cudnn-runtime-ubuntu24.04` or `FROM python:3.12-slim` | another Python version (`python:3.10-slim`), CPU only (`python:X-slim` instead of nvidia/cuda) - or run xray_naive.py again with `--python 3.10` / `--cpu` |
+| `ENV` / `ARG` | `PYTHONUNBUFFERED=1` (prints reach the log at once), `DEBIAN_FRONTEND` (apt asks nothing) | rarely |
+| 2. SYSTEM LIBRARIES | `RUN apt-get update && apt-get install -y --no-install-recommends ... && rm -rf /var/lib/apt/lists/*` | `xray_look.py --image` or an error names a missing library: add its package to that list |
+| 3a / 3b / 3c. PACKAGES | `RUN pip install --no-cache-dir 'name==version' ...` - 3a the big frameworks (own layer), 3b the rest, 3c (only if present) pins pip will not combine, installed after with `--no-deps` | change a version, add a package the program imports but the requirements forgot |
+| 4. LD_LIBRARY_PATH | where the CUDA wheels put their libraries | only when xray_naive.py wrote one and a package moved them |
+| 5. THE CODE | `COPY . .` (everything in the project, minus `Dockerfile.naive.dockerignore`) | add a folder to the .dockerignore to keep it out |
+| `CMD` | `CMD ["python", "main.py"]` = what the container starts | another entry file |
+
+**Add a system library** - e.g. `xray_look.py --image` says `libsm6`: add it to the apt line, with a space, before the
+`\` (the `\` at a line end joins the next line, like `^` in CMD):
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-venv libgl1 libglib2.0-0t64 libx11-6 libxcb1 libsm6 \
+ && rm -rf /var/lib/apt/lists/*
+```
+Find the package of a library you only know by its file name: `apt-file search libSM.so.6` (inside a container of the
+same base: `apt-get update && apt-get install -y apt-file && apt-file update` first).
+
+**Change a version** - one line in the pip list. Each package is in single quotes (`'numpy==1.26.4'`): keep them -
+the shell that runs a RUN line would otherwise read `<` / `>` in `numpy<2` as a redirect. Also change it in your requirements file,
+or the next xray_naive.py run brings back the old one.
+
+**Rebuild:** run build-naive.bat again. Docker reuses every layer ABOVE the first changed line, so a change in 3b does
+not download 3a (torch, onnxruntime) again. Then run run-naive.bat to see it start.
+
+**Test a change before you write it down:** `docker run --rm -it --entrypoint bash NAME-naive` opens a shell in the
+image (as root): `apt-get update && apt-get install -y libsm6`, `pip install 'numpy==1.26.4'`, then `python main.py`
+there. What worked goes into Dockerfile.naive; the shell's changes are gone when you exit. The `CHECK BY HAND` lines
+at the end of Dockerfile.naive show how each section can be checked in the built image.

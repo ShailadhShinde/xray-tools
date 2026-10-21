@@ -28,7 +28,7 @@ import shutil
 import sys
 import textwrap
 
-VERSION = "0.1.14"
+VERSION = "0.1.16"
 APP_USER, APP_UID = "app", 1000
 APP_HOME = f"/home/{APP_USER}"
 ALWAYS_IGNORE = [".git/", "**/__pycache__/", "**/*.pyc", ".idea/", ".vscode/", "Dockerfile*", "docker-compose*.yml",
@@ -812,7 +812,17 @@ def nw_env_lines(window):
             "NO_WINDOWS=1"]
 
 
-def compose_new(p, out_dir, mac_needed, window=None):
+def pc_files_of(static):
+    """files of one PC the code names in its config (xray_static: hardcoded_config / pc_file) -> 'path (file:line)'"""
+    out = []
+    for f in (static or {}).get("facts", []):
+        if f.get("category") == "hardcoded_config" and f.get("mechanism") == "pc_file":
+            site = next((f"{x.get('file')}:{x.get('line')}" for x in f.get("sites") or [] if x.get("line")), "")
+            out.append(f"{str(f['subject']).replace('/', chr(92)) if re.match(r'^[A-Za-z]:/', str(f['subject'])) else f['subject']} ({site})")
+    return out
+
+
+def compose_new(p, out_dir, mac_needed, window=None, pc_files=()):
     """no compose file in the project: a compose.yml for the planned image + .env.example (one place for every
     value that changes per site: env vars, host folders, the licence MAC)"""
     name = slug(p["fixture"])
@@ -896,6 +906,12 @@ def compose_new(p, out_dir, mac_needed, window=None):
                 E.append(f"{e['name']}={dv}")
     else:
         E.append("# (the code reads no env vars yet: its settings are written in the code - see code_changes_required)")
+    if pc_files:
+        E += ["", "# the code's config names file(s) of one PC: " + "; ".join(pc_files[:3]),
+              "# A container cannot see them. In production the config holds what the server really has (a camera",
+              "# address, a path there). To run this compose with such a test file: mount it like the run files do",
+              "# (volumes: the file at /xin/pc_1/file.mp4:ro, and the tools' xray_inputs folder at /opt/xray-inputs:ro),",
+              "# add /opt/xray-inputs to PYTHONPATH, and here PC_PATHS=C:\\...\\file.mp4=/xin/pc_1/file.mp4 - GUIDE 17b."]
     if window and window.get("calls") and not window.get("env") and (window.get("no_screen") or ("", True))[1] \
             and not nw:
         where = ", ".join(f"{c[2]} at {c[0]}:{c[1]}" for c in window["calls"][:2])
@@ -935,7 +951,7 @@ def cmd_plan(a):
             fh.write(compose_override(p, pl.services, a.out, pl.compose_path, window))
     else:
         mac = bool(pl.sfacts("hardware_identity"))
-        comp, envx = compose_new(p, a.out, mac, window)
+        comp, envx = compose_new(p, a.out, mac, window, pc_files_of(jload(a.static) if a.static else None))
         with open(os.path.join(a.out, "compose.yml"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(comp)
         with open(os.path.join(a.out, ".env.example"), "w", encoding="utf-8", newline="\n") as fh:

@@ -22,7 +22,7 @@ import posixpath
 import re
 import sys
 
-VERSION = "0.1.12"
+VERSION = "0.1.14"
 
 # (key, title, one-line meaning) - display order: what an ML developer cares about first
 BUNDLES = [
@@ -297,8 +297,14 @@ def needs(d, facts, show_all):
                                                           "network like any program"}
                             if re.match(r"^[a-z]+://", s) else
                             {"kind": "file", "url": s, "where": site, "run": run_state(f),
-                             "note": "a video FILE, not a stream: mount its folder with -v and pass the path "
-                                     "(env var / argument)"})
+                             "note": ("the test video of this PC the code names in its config (pcfile): mounted by "
+                                      "the run files, the path mapped (PC_PATHS) - in production the config's camera "
+                                      "address takes its place") if s.startswith("/xin/pc_") else
+                             ("the test video the run file gave in place of the code's own source (its SOURCE "
+                              "setting, X-Ray's xray_inputs) - in production the code's own source is opened")
+                             if s.startswith("/xsource") else
+                             "a video FILE, not a stream: mount its folder with -v and pass the path "
+                             "(env var / argument)"})
     out["cameras"] = list(cams.values())
     gui = [f for f in use if f["category"] == "gui_usage"]
     if gui:
@@ -366,6 +372,10 @@ def needs(d, facts, show_all):
             out.setdefault("_gpu", []).append(f)
         elif c in ("subprocess_binary", "system_package_candidate", "ipc_shared_memory"):
             out["system"].append(f"{CAT.get(c, c)}: {s}")
+        elif c == "hardcoded_config" and f.get("mechanism") == "pc_file":
+            site = ", ".join(f"{x['file']}:{x['line']}" for x in (f.get("sites") or [])[:2] if x.get("line"))
+            out.setdefault("pc_files", []).append({"path": s, "where": site, "kind": f.get("kind") or "file",
+                                                   "here": f.get("on_this_pc")})
         elif c in ("secret", "hardcoded_config") and f.get("docker_implication"):
             k = const_of(s, consts) if f.get("mechanism") in ("machine_path", "windows_path") else None
             if k:                                   # 10 paths built from one folder constant -> one change
@@ -383,7 +393,7 @@ def needs(d, facts, show_all):
     out["optional_changes"] = never_used(use)
     for k in ("models", "data", "writes", "system", "code_changes"):
         out[k] = sorted(set(out[k]))
-    out["data"] = [x for x in out["data"] if x not in out["models"]]
+    out["data"] = [x for x in out["data"] if x not in out["models"] and not str(x).startswith(("/xin/pc_", "/xsource"))]
     for k, paths in sorted(const_changes.items()):
         out["code_changes"].append(f"{k[0]} ({k[2]}) = {k[1]!r}: {len(paths)} hardcoded paths are built from it - "
                                    f"read it from an env var: {k[0]} = os.getenv(\"{k[0]}\", {k[1]!r})")
@@ -499,6 +509,14 @@ def print_needs(nd, out=print):
         else:
             out(f"  camera   {c['pattern']} ({c['where']}): URL computed at runtime")
             out(f"           {c['note']}")
+            if any(x["kind"] == "video" for x in nd.get("pc_files") or []):
+                out("           the video file(s) of a PC named in the code (pcfile below) may be what it opens")
+    for x in nd.get("pc_files") or []:
+        none = False
+        out(f"  pcfile   {x['path']} ({x['where']}) - a {x['kind']} of one PC, named in the code: the run files mount "
+            "it and give the code the container path (PC_PATHS, X-Ray's xray_inputs) - no code change"
+            + ("" if x["here"] else "; NOT on the PC this map was made on: run Step 1 where the file is, or give the run a "
+                                      "video of this PC with SOURCE at the top of the run file"))
     if nd["screen"]:
         none = False
         out(f"  screen   {', '.join(nd['screen']['calls'])}"

@@ -52,7 +52,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Linux platform tags of the CPU the image runs on (pip matches the listed tags exactly; pure-Python "any" wheels
@@ -1143,6 +1143,8 @@ def outside_files(static_path, project, name, copy, mount=()):
     p = rf.plan(st, project, name, None, None, 180)
     items = []
     for host, cont, _mode, _why in p["mounts"]:
+        if "PC_PATHS" in _why:      # a test file the code names by its PC path: mounted at run time, never baked
+            continue
         envs = [(n, v) for n, v, _w in p["env"] if v == cont or v.startswith(cont + "/")]
         hn = host.replace("\\", "/").rstrip("/")
         used = set()

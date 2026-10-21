@@ -289,6 +289,8 @@ body { margin: 0; }
     <li><a href="#step13"><span class="n">13</span><span>Production: compose</span></a></li>
     <li class="sep" aria-hidden="true"></li>
     <li><a href="#windows"><span class="n">&#9634;</span><span>Windows on screen</span></a></li>
+    <li><a href="#source"><span class="n">&#9655;</span><span>Any video: SOURCE</span></a></li>
+    <li><a href="#edit"><span class="n">&#9998;</span><span>Edit by hand</span></a></li>
     <li><a href="#send"><span class="n">&rarr;</span><span>Send to Claude</span></a></li>
     <li><a href="#trouble"><span class="n">!</span><span>When something breaks</span></a></li>
   </ol>
@@ -328,9 +330,9 @@ git pull
 findstr /b VERSION xray_naive.py xray_static.py xray_needs.py xray_runfile.py xray_plan.py xray_look.py xray_videos.py
 python --version
 docker version --format "{{.Server.Version}}"</pre></div>
-  <div class="out"><div class="out-bar">Versions this page is written for</div><pre>xray_naive.py:VERSION = "0.4.5"      xray_runfile.py:VERSION = "0.2.7"
-xray_static.py:VERSION = "0.5.12"    xray_plan.py:VERSION = "0.1.14"
-xray_needs.py:VERSION = "0.1.12"     xray_look.py:VERSION = "0.1.5"
+  <div class="out"><div class="out-bar">Versions this page is written for</div><pre>xray_naive.py:VERSION = "0.4.6"      xray_runfile.py:VERSION = "0.2.9"
+xray_static.py:VERSION = "0.5.13"    xray_plan.py:VERSION = "0.1.16"
+xray_needs.py:VERSION = "0.1.14"     xray_look.py:VERSION = "0.1.5"
                                      xray_videos.py:VERSION = "0.2.0"</pre></div>
   <div class="cmd"><div class="cmd-bar"><span class="where">CMD &middot; GPU projects only</span><button class="copy" type="button">Copy</button></div><pre data-tpl>docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi</pre></div>
   <div class="notes">
@@ -363,6 +365,7 @@ notepad runs\«N»\step1-needs.txt</pre></div>
     <thead><tr><th>The report says</th><th>Meaning</th><th>What you do</th></tr></thead>
     <tbody>
       <tr><td><code>model</code> / <code>data ... (must be inside the image or mounted)</code></td><td>a file the code reads</td><td>inside the project folder: nothing, it goes in with the code. A path on your PC (<code>C:\...</code>): step 2 decides copy or mount.</td></tr>
+      <tr><td><code>pcfile C:/Users/.../video.mp4 (constants.py:5)</code></td><td>a file of your PC written in the code (a config list, a constant): a container has no <code>C:\</code></td><td>nothing: the run files mount it and give the code the container path (<code>PC_PATHS</code>, X-Ray's <code>xray_inputs</code>). Run steps 1 and 3 on the PC where the file is (GUIDE 17b) - or give the run any video with <a href="#source">SOURCE</a>.</td></tr>
       <tr><td><code>writes /home/... = SOME_CONST (file:line)</code></td><td>a folder written in the code, of one machine</td><td>nothing now: the run files mount a test folder at exactly that path; production mounts the real one (step 13). The code owner can make it an env var.</td></tr>
       <tr><td><code>writes logs/...</code></td><td>files below the program's own folder</td><td>the load and explore runs keep them in <code>applog\</code>; compose mounts a folder there.</td></tr>
       <tr><td><code>camera</code> / <code>network host:port</code></td><td>a camera, database or API it connects to</td><td>nothing to pass: a container reaches what your PC reaches. Check it from this PC first.</td></tr>
@@ -439,7 +442,7 @@ notepad runs\«N»\code-changes.txt</pre></div>
       <tr><td><code>run.env</code>, <code>code-changes.txt</code></td><td>every env var in one place; the list for the code owner (required, then OPTIONAL)</td><td>&mdash;</td></tr>
     </tbody>
   </table></div>
-  <p class="practice-note">At the top of each run file: <code>RUN_SECONDS</code> (how long, 0 = until it ends), <code>LOOP</code> and <code>VIDEOS</code> (video files only). Change them in Notepad; running xray_runfile.py again rewrites the files.</p>
+  <p class="practice-note">At the top of each run file: <code>RUN_SECONDS</code> (how long, 0 = until it ends), <code>LOOP</code> and <code>VIDEOS</code> (video files only), and <a href="#source"><code>SOURCE</code></a> (any video, folder or camera instead of what the code opens). Change them in Notepad; running xray_runfile.py again rewrites the files - <a href="#edit">edit by hand</a>.</p>
 </section>
 
 <!-- ============================================================ STEP 4 -->
@@ -459,7 +462,7 @@ runs\«N»\run-naive.bat</pre></div>
       <tr><td class="num">125</td><td>Docker could not start the container: Docker's own message above</td></tr>
       <tr><td class="num">130</td><td>stopped at RUN_SECONDS (Ctrl+C)</td></tr>
       <tr><td class="num">134 / 139</td><td>aborted / crashed: in a container usually a window with no screen, else a native library</td></tr>
-      <tr><td class="num">137</td><td>killed: out of memory, or the stop after 30 s</td></tr>
+      <tr><td class="num">137</td><td>killed: it did not end within 30 s of the stop - normal for a program with child processes - or out of memory</td></tr>
     </tbody>
   </table></div>
   <p class="practice-note">The <code>WINDOWS:</code> note at the top of run-naive.bat says how this run handles the program's windows: the program's own env switch, or <code>NO_WINDOWS=1</code> for OpenCV windows.</p>
@@ -684,6 +687,59 @@ docker compose logs -f</pre></div>
   </div>
 </section>
 
+<!-- ============================================================ SOURCE -->
+<section class="sheet" id="source">
+  <div class="sheet-title"><h2>Any video, folder or camera: SOURCE</h2><p>Whatever the code opens - a camera from a config, a video path, <code>if TEST: video else: rtsp</code> - the run can give it something else. No code change (GUIDE 17a).</p></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">Notepad &middot; the top of any run file</span><button class="copy" type="button">Copy</button></div><pre>set "SOURCE=D:\videos\lane 3.mp4"</pre></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>SOURCE</th><th>What the program gets</th></tr></thead>
+    <tbody>
+      <tr><td>empty (default)</td><td>what its code says</td></tr>
+      <tr><td>a video file</td><td>that video, for every source it opens</td></tr>
+      <tr><td>a folder of videos</td><td>source 1 the 1st video (by name), source 2 the 2nd ...; a source keeps its video when it reconnects</td></tr>
+      <tr><td><code>rtsp://user:password@IP:554/...</code></td><td>that stream, for every source (also <code>rtmp</code>, <code>http</code>, <code>udp:</code>)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="notes">
+    <div class="check"><h3 class="block-title">Check</h3><ul>
+      <li>The program's output starts with <code>[xray] video source: OLD -&gt; NEW</code>, once per process. No such line: it opens its video another way than <code>cv2.VideoCapture</code>.</li>
+      <li>A path that does not exist stops the run file at once and says so. A <code>%</code> in a .bat value: write <code>%%</code>.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">How</h3><ul>
+      <li>The run file mounts the file or folder and passes <code>XRAY_SOURCE</code>; the tools' <code>xray_inputs</code> folder on PYTHONPATH swaps what <code>cv2.VideoCapture</code> gets, in every process.</li>
+      <li>VIDEOS plays files one after the other and leaves cameras alone; SOURCE replaces every source. Tested: a file, a folder and an rtsp stream, in run-naive and the traced run.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ EDIT -->
+<section class="sheet" id="edit">
+  <div class="sheet-title"><h2>Edit the run files and Dockerfile.naive by hand</h2><p>Plain text: every line is a command you could type. Running xray_runfile.py again writes the run files and run.env again; Dockerfile.naive it never touches. What each part does: GUIDE 18.</p></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>To change</th><th>Edit</th><th>Kept?</th></tr></thead>
+    <tbody>
+      <tr><td>how long, loop, videos, SOURCE</td><td>the settings at the top of the run file</td><td>no</td></tr>
+      <tr><td>an env var for every run</td><td><code>run.env</code></td><td>no</td></tr>
+      <tr><td>a <code>-v</code> / <code>-e</code> for one run</td><td>the <code>docker run</code> line</td><td>no: save as <code>my-run.bat</code></td></tr>
+      <tr><td>what is installed in the image</td><td><code>Dockerfile.naive</code>, then build-naive again</td><td>yes</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cmd"><div class="cmd-bar"><span class="where">Notepad &middot; a run file: new lines go before the image name, each ending in ^</span><button class="copy" type="button">Copy</button></div><pre>  -v "D:\data\lanes.json:/app/config/lanes.json:ro" ^
+  -e LOG_LEVEL=DEBUG ^</pre></div>
+  <div class="notes">
+    <div class="check"><h3 class="block-title">Run files</h3><ul>
+      <li><code>set "NAME=value"</code>: both quotes, no spaces around <code>=</code>. <code>REM</code> = a comment.</li>
+      <li><code>^</code> at a line end joins the next line; a space after it breaks the command (<code>'-v' is not recognized</code>).</li>
+      <li><code>-e</code> written after <code>--env-file</code> wins over run.env. The container side of <code>-v</code> is always a Linux path.</li>
+    </ul></div>
+    <div class="why"><h3 class="block-title">Dockerfile.naive</h3><ul>
+      <li>A missing system library: add its apt package to the <code>apt-get install</code> line (section 2), rebuild.</li>
+      <li>Another version: change the pin in section 3 and in your requirements file. Keep the single quotes.</li>
+      <li>Try first in <code>docker run --rm -it --entrypoint bash NAME-naive</code>; what works goes into the file.</li>
+    </ul></div>
+  </div>
+</section>
+
 <!-- ============================================================ SEND -->
 <section class="sheet" id="send">
   <div class="sheet-title"><h2>Send to Claude</h2><p>Remove passwords, addresses with <code>user:password@</code>, IPs and people's names first (<code>***</code>).</p></div>
@@ -711,6 +767,7 @@ docker compose logs -f</pre></div>
       <tr><td>onnxruntime runs on the CPU in the image</td><td>its CUDA libraries are not found: step 5's CUDA section, and the folders registered in <code>/etc/ld.so.conf.d</code>.</td></tr>
       <tr><td><code>CUDA out of memory</code></td><td>the GPU is full: less load per container, or a card with more memory (step 12 measures).</td></tr>
       <tr><td><code>Bus error</code>, errors about <code>/dev/shm</code></td><td>shared memory too small: <code>--shm-size</code> / <code>shm_size</code>.</td></tr>
+      <tr><td><code>can't be used to capture by name</code>, then "camera not connected" again and again</td><td>OpenCV cannot open that name: usually a file of your PC named in the code. Step 1's <code>pcfile</code> line; run steps 1 and 3 on the PC where the file is, and the run files mount it - or set <a href="#source">SOURCE</a> to a video of this PC.</td></tr>
       <tr><td>A video opens but gives no frame</td><td>a format the image's OpenCV cannot decode (AV1): step 11.</td></tr>
       <tr><td><code>unsatisfied condition: cuda&gt;=12.8</code></td><td>the NVIDIA driver is older than the image's CUDA needs: update it.</td></tr>
       <tr><td><code>no space left on device</code></td><td><code>docker system df</code>, then <code>docker builder prune</code> and <code>docker rmi</code> for old images.</td></tr>

@@ -226,6 +226,7 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
 @media (prefers-reduced-motion: no-preference) {
   .rail a, .copy { transition: background-color 0.15s ease, border-color 0.15s ease; }
 }
+body { margin: 0; }
 </style>
 </head>
 <body>
@@ -368,13 +369,13 @@ input.num { width: 7.5rem; font-family: var(--font-mono); font-size: 0.85rem; pa
 python --version
 python -m pip install -U pip
 findstr /b VERSION xray_naive.py xray_static.py xray_trace.py xray_needs.py xray_pkg.py xray_plan.py xray_runfile.py xray_look.py xray_videos.py</pre></div>
-  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.5"
-xray_static.py:VERSION = "0.5.12"
+  <div class="out"><div class="out-bar">You should see</div><pre>xray_naive.py:VERSION = "0.4.6"
+xray_static.py:VERSION = "0.5.13"
 xray_trace.py:VERSION = "0.2.7"
-xray_needs.py:VERSION = "0.1.12"
+xray_needs.py:VERSION = "0.1.14"
 xray_pkg.py:VERSION = "0.1.4"
-xray_plan.py:VERSION = "0.1.14"
-xray_runfile.py:VERSION = "0.2.7"
+xray_plan.py:VERSION = "0.1.16"
+xray_runfile.py:VERSION = "0.2.9"
 xray_look.py:VERSION = "0.1.5"
 xray_videos.py:VERSION = "0.2.0"</pre></div>
 
@@ -618,7 +619,7 @@ notepad runs\zip\run.env</pre></div>
   </div>
 
   <div>
-    <h3 class="block-title">How long it runs, loop, several videos: the top of every run file</h3>
+    <h3 class="block-title">How long it runs, loop, several videos, another source: the top of every run file</h3>
     <div class="cmd"><div class="cmd-bar"><span class="where">the top of run-slim.bat, as xray_runfile writes it &middot; change the set lines in Notepad, save</span></div><pre>REM ---- settings: change them here, then run this file ----
 REM RUN_SECONDS: how long the program runs, then it is stopped (0 = until it ends by itself or you stop it)
 set "RUN_SECONDS=180"
@@ -627,7 +628,11 @@ set "LOOP=0"
 REM VIDEOS: a folder with videos (.mp4 .avi .mov ...): the program plays them one after the other instead
 REM         of its own video (with LOOP=1 the list starts again). Empty = the program's own video.
 REM         (both only matter for programs that read video FILES; cameras / streams are not touched)
-set "VIDEOS="</pre></div>
+set "VIDEOS="
+...
+REM SOURCE: what the program reads INSTEAD of what its code opens (a camera, an rtsp:// address, a
+REM         video file) - no code change. Empty = what the code says. A % in it: write %%.
+set "SOURCE="</pre></div>
     <p class="practice-note">A folder name with spaces is fine: <code>set "VIDEOS=D:\test videos"</code> (the quotes go around the whole <code>VIDEOS=...</code>, as in the line above).</p>
     <div class="table-wrap">
       <table>
@@ -636,10 +641,11 @@ set "VIDEOS="</pre></div>
           <tr><td>the slim image for 10 minutes on a 2-minute video</td><td>run-slim.bat: <code>RUN_SECONDS=600</code>, <code>LOOP=1</code></td></tr>
           <tr><td>three different videos, one after the other, once</td><td>put them in one folder; <code>VIDEOS=that folder</code>, <code>LOOP=0</code>, <code>RUN_SECONDS=0</code></td></tr>
           <tr><td>the same three for an hour</td><td><code>VIDEOS=that folder</code>, <code>LOOP=1</code>, <code>RUN_SECONDS=3600</code></td></tr>
+          <tr><td>another video than the one the code opens, or a camera</td><td><code>SOURCE=D:\videos\other.mp4</code> or <code>SOURCE=rtsp://...</code> (any run file, run-naive too; GUIDE 17a)</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="practice-note">Practice: a folder with a 300-frame and a 100-frame video, <code>LOOP=0</code>: the program read 400 frames and ended by itself. <code>LOOP=1</code>, <code>RUN_SECONDS=15</code>: it kept reading and was stopped after 15.1 s. Only video FILES opened with <code>cv2.VideoCapture</code> change; cameras and <code>rtsp://</code> streams never. A video in the folder that OpenCV cannot read here (AV1) is skipped with a message. A program that writes its results only at its end writes nothing when <code>RUN_SECONDS</code> stops it first. Defaults: run-step2 / run-slim 180 s, run-load 300 s, run-explore 0 (until you stop it), run-naive 120 s (no X-Ray there, so no LOOP / VIDEOS).</p>
+    <p class="practice-note">Practice: a folder with a 300-frame and a 100-frame video, <code>LOOP=0</code>: the program read 400 frames and ended by itself. <code>LOOP=1</code>, <code>RUN_SECONDS=15</code>: it kept reading and was stopped after 15.1 s. LOOP and VIDEOS change only video FILES opened with <code>cv2.VideoCapture</code>; cameras and <code>rtsp://</code> streams never (SOURCE replaces those). A video in the folder that OpenCV cannot read here (AV1) is skipped with a message. A program that writes its results only at its end writes nothing when <code>RUN_SECONDS</code> stops it first. Defaults: run-step2 / run-slim 180 s, run-load 300 s, run-explore 0 (until you stop it), run-naive 120 s (no X-Ray there, so no LOOP / VIDEOS - SOURCE works there too: the output then starts with <code>[xray] video source: OLD -&gt; NEW</code>).</p>
   </div>
 </section>
 

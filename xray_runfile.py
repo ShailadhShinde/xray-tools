@@ -42,6 +42,7 @@ How env vars are handled (from the code's os.getenv / os.environ reads):
 import argparse
 import json
 import ntpath
+import posixpath
 import os
 import re
 import sys
@@ -55,7 +56,7 @@ except ImportError:                   # pragma: no cover - xray_needs.py missing
     def const_of(path, consts, outer=False):
         return None
 
-VERSION = "0.2.7"
+VERSION = "0.2.9"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PC_PATH = re.compile(r"^([A-Za-z]:[\\/]|/(home|Users)/)")
 GPU_WORDS = {"cuda", "gpu", "cuda:0", "cuda:1"}
@@ -126,9 +127,17 @@ def no_windows(w):
         all(str(c[2]).startswith("cv2.") for c in calls)
 
 
-def nw_flags(p, X, sep):
-    pp = NW_DIR + (":" + p["pythonpath"] if p.get("pythonpath") else "")
-    return '  -v "' + X + sep + 'xray_no_windows:' + NW_DIR + ':ro" -e PYTHONPATH=' + pp + " -e NO_WINDOWS=1"
+IN_DIR = "/opt/xray-inputs"           # where the tools' xray_inputs folder is mounted
+
+
+def adapt_flags(p, X, sep, windows):
+    """the tools' sitecustomize folders a run needs, in one PYTHONPATH: xray_no_windows (OpenCV windows off) and
+    xray_inputs (SOURCE at the top of the run file, and files the code names by their PC path) - always there, so
+    SOURCE works whenever you set it; with nothing to do it changes nothing"""
+    dirs = ([("xray_no_windows", NW_DIR)] if windows else []) + [("xray_inputs", IN_DIR)]
+    pp = ":".join(c for _h, c in dirs) + (":" + p["pythonpath"] if p.get("pythonpath") else "")
+    return ["  " + " ".join('-v "' + X + sep + h + ":" + c + ':ro"' for h, c in dirs) + " -e PYTHONPATH=" + pp
+            + (" -e NO_WINDOWS=1" if windows else "")]
 
 
 # --------------------------------------------------------------------------- windows (cv2.imshow) and their switch
@@ -447,10 +456,35 @@ def plan(st, project, name, image, dockerfile, stop_after):
         else:
             p["env_optional"].append((n, d if d not in (None, "") else "", site))
     # hardcoded paths of one machine: env vars cannot fix them
+    # files of one PC named in the code (C:\...\lane.mp4 in a config list): each one that is on this PC is mounted,
+    # and X-Ray's xray_inputs gives the code the container path (PC_PATHS) - no code change
+    p["pc_files"] = []
     for f in by.get("hardcoded_config", []):
-        if f.get("mechanism") in ("windows_path", "machine_path"):
-            s = next((f"{x.get('file')}:{x.get('line')}" for x in f.get("sites") or [] if x.get("line")), "")
+        subj = str(f["subject"])
+        s = next((f"{x.get('file')}:{x.get('line')}" for x in f.get("sites") or [] if x.get("line")), "")
+        if f.get("mechanism") in ("pc_file", "windows_path") and "<" not in subj and posixpath.splitext(subj)[1] \
+                and subj.lower() not in {x["key"] for x in p["pc_files"]}:
+            host = subj.replace("/", "\\") if re.match(r"^[A-Za-z]:/", subj) else subj
+            here = os.path.isfile(subj)
+            n = sum(1 for x in p["pc_files"] if x["here"]) + 1
+            cont = f"/xin/pc_{n}/" + subj.rsplit("/", 1)[-1]
+            p["pc_files"].append({"key": subj.lower(), "pc": host, "cont": cont, "where": s, "here": here})
+            if here:
+                p["mounts"].append((host, cont, "ro", f"a file of this PC named in the code ({s}) - PC_PATHS maps "
+                                                      "the code's path to it"))
+            else:
+                p["notes"].append(f"the code names {host} ({s}) - that file is not on this PC: copy it to exactly "
+                                  "that path and run xray_runfile.py again (then it is mounted)"
+                                  + (", or set SOURCE below to a video of this PC (or a folder of videos, or an "
+                                     "rtsp:// camera)" if subj.lower().endswith(VIDEO_EXT) else "")
+                                  + " - else the program cannot open it")
+        elif f.get("mechanism") == "machine_path":
             p["notes"].append(f"code change needed: {f['subject']} is hardcoded ({s}) - the run cannot find it")
+    here = [x for x in p["pc_files"] if x["here"]]
+    if here:
+        p["env"].append(("PC_PATHS", "|".join(f"{x['pc']}={x['cont']}" for x in here),
+                         "files the code names by their PC path -> where the run mounts them; X-Ray's xray_inputs "
+                         "(on PYTHONPATH) gives the code that path - no code change"))
     p["gpu"] = any(f.get("mechanism") not in ("env_default",) for f in by.get("gpu_usage", []))
     p["gui"] = bool(by.get("gui_usage"))
     p["window"] = window_switch(st, project) if p["gui"] else None
@@ -797,6 +831,41 @@ def write_build_slim(p, sh, out_dir):
     return nl.join(L) + nl
 
 
+def source_lines(sh):
+    """SOURCE at the top of a run file: what every video source of the program gets instead (xray_inputs)"""
+    if sh.bat:
+        return ["REM SOURCE: what the program reads INSTEAD of what its code opens (a camera, an rtsp:// address, a",
+                "REM         video file) - no code change. Empty = what the code says. A % in it: write %%.",
+                'REM           a video file on this PC:  set "SOURCE=D:\\videos\\lane 3.mp4"   every source gets it',
+                'REM           a folder of videos:       set "SOURCE=D:\\videos"    each source its own video from it',
+                'REM           a camera stream:          set "SOURCE=rtsp://user:password@192.168.1.20:554/stream1"',
+                'set "SOURCE="',
+                'set "XSRC="', 'if "%SOURCE%"=="" goto src_done',
+                'if /i "%SOURCE:~0,4%"=="rtsp" goto src_url', 'if /i "%SOURCE:~0,4%"=="rtmp" goto src_url',
+                'if /i "%SOURCE:~0,4%"=="http" goto src_url', 'if /i "%SOURCE:~0,4%"=="udp:" goto src_url',
+                'for %%F in ("%SOURCE%") do set "SOURCE=%%~fF"',
+                'if "%SOURCE:~-1%"=="\\" set "SOURCE=%SOURCE:~0,-1%"',
+                'if exist "%SOURCE%\\*" goto src_dir',
+                'if not exist "%SOURCE%" goto src_missing',
+                'for %%F in ("%SOURCE%") do set "SRCNAME=%%~nxF"',
+                'set XSRC=-v "%SOURCE%:/xsource/%SRCNAME%:ro" -e "XRAY_SOURCE=/xsource/%SRCNAME%"', "goto src_done",
+                ":src_missing", 'echo SOURCE "%SOURCE%": no such file or folder on this PC - fix SOURCE at the top '
+                'of this file.', "exit /b 1",
+                ":src_dir", 'set XSRC=-v "%SOURCE%:/xsource:ro" -e XRAY_SOURCE=/xsource', "goto src_done",
+                ":src_url", 'set XSRC=-e "XRAY_SOURCE=%SOURCE%"', ":src_done", ""]
+    return ['SOURCE=""      # what the program reads INSTEAD of what its code opens: a video file, a folder of videos '
+            '(each source its own), rtsp://... - empty = what the code says',
+            'XSRC=()',
+            'case "$SOURCE" in',
+            '  "") ;;',
+            '  rtsp*|rtmp*|http*|udp:*) XSRC=(-e "XRAY_SOURCE=$SOURCE");;',
+            '  *) [ -e "$SOURCE" ] || { echo "SOURCE $SOURCE: no such file or folder - fix SOURCE at the top of this file"; exit 1; }',
+            '     SOURCE="$(cd "$(dirname "$SOURCE")" && pwd)/$(basename "$SOURCE")"     # docker needs the full path',
+            '     if [ -d "$SOURCE" ]; then XSRC=(-v "$SOURCE:/xsource:ro" -e XRAY_SOURCE=/xsource); '
+            'else XSRC=(-v "$SOURCE:/xsource/$(basename "$SOURCE"):ro" -e "XRAY_SOURCE=/xsource/$(basename "$SOURCE")"); fi;;',
+            'esac', ""]
+
+
 def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
     name = p["name"]
     X, R, PY = ("%X%", "%RUN%", "%PY%") if sh.bat else ("$X", "$RUN", "$PY")
@@ -826,6 +895,7 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
               "REM " + "-" * 60,
               'set "XSTOP="', 'if not "%RUN_SECONDS%"=="0" set "XSTOP=--stop-after %RUN_SECONDS%"',
               'set "XVID="', 'if not "%VIDEOS%"=="" set XVID=-v "%VIDEOS%:/xvideos:ro" -e XRAY_PLAYLIST=/xvideos', ""]
+        L += source_lines(sh)
     else:
         L += ["# ---- settings: change them here ----",
               f"RUN_SECONDS={secs}".ljust(16) + "# how long the program runs, then it is stopped (0 = until it ends / you stop it)",
@@ -833,6 +903,7 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
               'VIDEOS=""'.ljust(16) + "# a folder of videos: played one after the other instead of the program's own video",
               'XSTOP=""; [ "$RUN_SECONDS" != "0" ] && XSTOP="--stop-after $RUN_SECONDS"',
               'XVID=(); [ -n "$VIDEOS" ] && XVID=(-v "$VIDEOS:/xvideos:ro" -e XRAY_PLAYLIST=/xvideos)', ""]
+        L += source_lines(sh)
     suffix = "-cpu" if cpu else "-slim" if slim else ""
     image = name + "-slim" if slim else p["image"]
     if load:
@@ -913,6 +984,7 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
         a.append('  -v "' + X + ':/xray:ro" -v "' + R + sep + tdir + ':/xray-out"')
         for host, cont, mode, why in p["mounts"]:
             a.append('  -v "' + host + ":" + cont + ":" + mode + '"')
+        a += adapt_flags(p, X, sep, False)       # X-Ray's own --gui off handles windows here
         if p["out_mount"]:
             a.append('  -v "' + R + sep + outd + ':/xout"')
         for sub, cont, why in p["file_mounts"]:
@@ -926,8 +998,8 @@ def write_run(p, sh, xdir, out_dir, cpu, slim=False, load=False, explore=False):
             a.append("  -e " + n + "=" + v)
         if load:
             a.append("  -e XRAY_COVERAGE=0")       # no line counting: it would slow the app and skew the numbers
-        a.append("  -e XRAY_LOOP_VIDEO=%LOOP% %XVID%" if sh.bat else
-                 '  -e XRAY_LOOP_VIDEO="$LOOP" ${XVID[@]+"${XVID[@]}"}')
+        a.append("  -e XRAY_LOOP_VIDEO=%LOOP% %XVID% %XSRC%" if sh.bat else
+                 '  -e XRAY_LOOP_VIDEO="$LOOP" ${XVID[@]+"${XVID[@]}"} ${XSRC[@]+"${XSRC[@]}"}')
         a.append("  " + image)
         flags = (" --gui off" if p["gui"] else "") + (" %XSTOP%" if sh.bat else " $XSTOP")
         a.append("  python /xray/xray_trace.py run --out /xray-out --root " + p["workdir"] + flags + " -- python " + e)
@@ -971,7 +1043,8 @@ EXIT_CODES = [("0", "normal end"), ("1", "a Python error: read the Traceback abo
               ("125", "docker could not start the container: read docker's message above"),
               ("130", "stopped with Ctrl+C (RUN_SECONDS)"),
               ("134", "aborted - in a container usually a window (no screen: 'Could not load the Qt platform plugin xcb')"),
-              ("137", "killed: docker stop after 30 s, or out of memory (docker stats shows the RAM)"),
+              ("137", "killed: it did not end within 30 s of the stop (Ctrl+C) - a program with child processes "
+                      "often keeps running - or out of memory (docker stats shows the RAM)"),
               ("139", "crashed (segmentation fault) - in a container usually a window (no screen), else a native library")]
 
 
@@ -1029,14 +1102,14 @@ def write_naive_run(p, sh, out_dir, xdir, window=False):
         a.append('  --env-file "' + R + sep + 'run.env"')
     if p["gui"] and w.get("env") and not window:
         a.append("  -e " + w["env"] + "=" + w["value"])        # after --env-file: this value wins
-    if p["gui"] and no_windows(w) and not window:
-        a.append(nw_flags(p, X, sep))
+    a += adapt_flags(p, X, sep, bool(p["gui"] and no_windows(w) and not window))
     if window:
         a += (["  -e DISPLAY=:0 -e WAYLAND_DISPLAY=wayland-0 -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir "
                "-e PULSE_SERVER=/mnt/wslg/PulseServer -e QT_X11_NO_MITSHM=1",
                "  -v /run/desktop/mnt/host/wslg/.X11-unix:/tmp/.X11-unix -v /run/desktop/mnt/host/wslg:/mnt/wslg"]
               if sh.bat else ['  -e DISPLAY="$DISPLAY" -e QT_X11_NO_MITSHM=1 -v /tmp/.X11-unix:/tmp/.X11-unix'])
     img = p["image"] + ("-window" if window else "")
+    a.append("  %XSRC%" if sh.bat else '  ${XSRC[@]+"${XSRC[@]}"}')
     a.append("  " + (("%WIMG%" if sh.bat else '"$WIMG"') if window else p["image"]))
     if sh.bat:
         L = ["@echo off", "REM Generated by xray_runfile.py " + VERSION + ": run the naive image ON ITS OWN (no X-Ray) - " +
@@ -1044,6 +1117,7 @@ def write_naive_run(p, sh, out_dir, xdir, window=False):
              'set "RUN=' + out_dir + '"', 'set "X=' + xdir + '"', "",
              "REM RUN_SECONDS: stop it after this many seconds (0 = until it ends by itself or you press Ctrl+C)",
              'set "RUN_SECONDS=120"', ""]
+        L += source_lines(sh)
         L += window_run_lines(p, sh, img) if window else window_lines(p, "REM ")
         L += [sh.rem + "  " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
         L += ["docker rm -f " + cn + " >nul 2>&1", 'mkdir "%RUN%\\out-naive" 2>nul' if p["out_mount"] else "",
@@ -1064,6 +1138,7 @@ def write_naive_run(p, sh, out_dir, xdir, window=False):
          ("its windows on this machine's screen" if window else "does it start and do its work?"),
          'RUN="' + out_dir + '"', 'X="' + xdir + '"',
          "RUN_SECONDS=120   # stop it after this many seconds (0 = until it ends / Ctrl+C)", ""]
+    L += source_lines(sh)
     L += window_run_lines(p, sh, img) if window else window_lines(p, "# ")
     L += ["#   " + host + "  mounted as  " + cont + "   (" + why + ")" for host, cont, mode, why in p["mounts"]]
     L += ["docker rm -f " + cn + " >/dev/null 2>&1"]
