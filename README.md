@@ -3,7 +3,8 @@
 **Any project, step by step: open [XRAY_WALKTHROUGH.html](XRAY_WALKTHROUGH.html) in a browser** - what to run, what each
 report line means, what you decide; your folders fill the commands.
 
-A worked example with one real project's results: [ZIP_WALKTHROUGH.html](ZIP_WALKTHROUGH.html).
+Worked examples with real projects' results: [ZIP_WALKTHROUGH.html](ZIP_WALKTHROUGH.html) (a video program) and
+[NORWAY_RUNBOOK.html](NORWAY_RUNBOOK.html) (a multi-camera GPU worker: licence, database, load tests, compose).
 
 **First time? Read [GUIDE.md](GUIDE.md)** - every step, what to look for, what to do when something fails.
 
