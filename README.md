@@ -1,10 +1,29 @@
 # X-Ray: plan a small, correct Docker image for a Python project
 
 **Any project, step by step: open [XRAY_WALKTHROUGH.html](XRAY_WALKTHROUGH.html) in a browser** - what to run, what each
-report line means, what you decide; your folders fill the commands.
+report line means, what you decide; your folders fill the commands. The short version, with a map of the steps and
+where the space is saved, as a Word file: [X-Ray_How_It_Works.docx](X-Ray_How_It_Works.docx).
 
 Worked examples with real projects' results: [ZIP_WALKTHROUGH.html](ZIP_WALKTHROUGH.html) (a video program) and
 [NORWAY_RUNBOOK.html](NORWAY_RUNBOOK.html) (a multi-camera GPU worker: licence, database, load tests, compose).
+
+**A .NET app (a dashboard, a web API), step by step: open [DOTNET_WALKTHROUGH.html](DOTNET_WALKTHROUGH.html)** - from
+the published folder to a running container: `dotnet_check.py`, a form that writes the Dockerfile, `.dockerignore`,
+`compose.yml` and `.env` from what it finds, what to check after every command, new versions and the way back.
+
+**The dashboard and your ML programs as one system: open [SYSTEM_WALKTHROUGH.html](SYSTEM_WALKTHROUGH.html)** - started
+one by one with `docker run` (the naive images) or with their compose files: one network, every program called by its
+name, the commands in the right order with a check after each, the logs - then uploads, HTTPS and keys, one at a time.
+
+**How one program's address reaches another: [CONNECTIONS_GUIDE.html](CONNECTIONS_GUIDE.html)** (CONNECTIONS_GUIDE.md) -
+`os.getenv("NAME", default)` in the code, what X-Ray and run.env do with it, the Flask "Running on" lines and which
+address matters, the port and the route to write down, the docker run line piece by piece, env-file rules (no quotes),
+ports inside the network and from the PC, and what to check once the network exists.
+
+**The database has the new rows, the dashboard shows nothing: [EMPTY_DASHBOARD.html](EMPTY_DASHBOARD.html)**
+(EMPTY_DASHBOARD.md) - the checks in order: the same database, an old row next to a new one, the containers' clock
+(UTC: `TZ`), picture paths, calls to the dashboard, the dashboard's own query (MySQL's general log), and the dashboard
+in Docker next to IIS.
 
 **First time? Read [GUIDE.md](GUIDE.md)** - every step, what to look for, what to do when something fails.
 
@@ -31,10 +50,22 @@ Python standard library only (Python 3.8+). Nothing to install.
 | 3 | `xray_pkg.py baseline` / `scan` / `facts` | inside containers / your machine | what is installed in the image and what is really needed |
 | 4 | `xray_plan.py plan` / `verify` | your machine | writes a slim Dockerfile, .dockerignore and compose override (or compose.yml + .env.example); checks the new image behaves the same |
 | 5 | `xray_compare.py` | your machine | several projects: one shared base image |
+| combine | `xray_combine.py` | your machine | several programs planned one by one, in ONE image: the shared packages once, each program's code from its verified slim image into /app/NAME, a verify run and a compose file per program (COMBINE_GUIDE) |
+| system | `xray_system.py` | your machine | several projects that call each other (an API that calls another API ...): from their Step 1 maps, who calls whom (matched by the port), the start order, what must change first (a server on 127.0.0.1, an address or a PC folder written in the code), and a compose.yml that runs them together - by name, no IPs (SERVICES_GUIDE section 9) |
 
 See results in the browser: `python3 xray_view.py app.json` (writes and opens `app.view.html` with the file built in).
 
 What X-Ray reads from your files (most of it) and what it knows from lists - and which list to extend for a library it does not know yet: GUIDE.md section 15.
+
+**The rest of the system** - a .NET dashboard / web API, a PostgreSQL or MySQL database and your programs as ONE system, started together and connected (Dockerfiles for .NET, the database images, compose, the network, moving your data in, projects that call each other, the .NET app in IIS on the PC itself): **[SERVICES_GUIDE.html](SERVICES_GUIDE.html)** (the same text: SERVICES_GUIDE.md), with a working example in `example-stack/`.
+
+**A .NET app next to your ML images** - what is the same and what differs: the Dockerfiles line by line, requirements, compilers, secrets, `.dockerignore`, slow internet, and ports - who can reach what (a program listening on 127.0.0.1 or 0.0.0.0, `ports:`, service names, client PCs): **[DOTNET_VS_ML.html](DOTNET_VS_ML.html)** (the same text: DOTNET_VS_ML.md).
+
+**Several programs in ONE image** (they share most packages: stored once, each program in its own folder and container): **[COMBINE_GUIDE.html](COMBINE_GUIDE.html)** (COMBINE_GUIDE.md), with `xray_combine.py`.
+
+**Many clients on one GPU server** - a copy of a solution per client, separate networks and data, one proxy with an API key or a password per client, sharing the GPU between the clients' models: **[MULTI_CLIENT_HOSTING.html](MULTI_CLIENT_HOSTING.html)** (MULTI_CLIENT_HOSTING.md), templates in `multi-client/`.
+
+**A program that saves videos** (ffmpeg; OpenCV cannot write H.264 in a container): GUIDE.md section 19. **Paths written with `\`** (a folder named `out\vehicle\bus` in the container) and PC folders the program saves into: GUIDE.md section 17c. **Slow or unstable internet** (builds that time out): GUIDE.md section 20. Before you put a .NET app in an image: `python dotnet_check.py "C:\path\to\app-folder" > dotnet-check.txt` (the published folder or the project folder) - its .NET version and base image, port, HTTPS, the database (wherever the connection string is: appsettings, web.config, the code), Windows-only parts and native libraries, and what goes into the image (with the .dockerignore lines), each with the fix.
 
 ## Step 1 (safe: reads files only)
 ```

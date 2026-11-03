@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>One Image, Several Programs</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Several programs X-Ray planned one by one, in ONE image: the shared packages stored once, every program in its own folder and its own container - xray_combine.py, the verify run of each, compose, sizes, when not to combine.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=JetBrains+Mono:wght@400;600&family=Source+Sans+3:wght@400;600&display=swap">
+<style>
+/* layout: a contents rail beside one reading column; one column under 900px */
+:root {
+  --bg: #f5f7f6; --surface: #ffffff; --fg: #17211d; --muted: #55635d; --line: #d9e1dd;
+  --accent: #0d6b57; --accent-soft: #e3f1ec; --code-bg: #14201b; --code-fg: #dbe7e1; --inline-bg: #e8eeeb;
+  --warn: #9a5b00; --warn-soft: #fbf0dc;
+  --font-display: "Archivo", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1513; --surface: #151d1a; --fg: #e3ebe7; --muted: #9aaba3; --line: #2a3632;
+    --accent: #5cc7a8; --accent-soft: #17302a; --code-bg: #0a0f0d; --code-fg: #d3e2db; --inline-bg: #1f2a26;
+    --warn: #f0b860; --warn-soft: #33270f; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1513; --surface: #151d1a; --fg: #e3ebe7; --muted: #9aaba3; --line: #2a3632;
+  --accent: #5cc7a8; --accent-soft: #17302a; --code-bg: #0a0f0d; --code-fg: #d3e2db; --inline-bg: #1f2a26;
+  --warn: #f0b860; --warn-soft: #33270f; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 17px/1.6 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.page { max-width: 1180px; margin: 0 auto; padding-block: 28px 64px; }
+header.top { display: grid; gap: 10px; padding-block: 8px 26px; border-bottom: 2px solid var(--fg); margin-bottom: 28px; }
+.eyebrow { font: 600 12px/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 700 clamp(30px, 5vw, 46px)/1.08 var(--font-display); letter-spacing: -.01em; margin: 0; text-wrap: balance; }
+.lede { max-width: 68ch; color: var(--muted); margin: 0; font-size: 18px; }
+.layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 44px; align-items: start; }
+nav.toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); max-height: calc(100vh - 32px); overflow-y: auto;
+  font-size: 14px; border-left: 2px solid var(--line); padding-left: 14px; }
+nav.toc summary { font: 600 12px/1 var(--font-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+  cursor: pointer; padding-block: 4px 10px; list-style: none; }
+nav.toc summary::-webkit-details-marker { display: none; }
+nav.toc summary::before { content: "+ "; color: var(--accent); }
+nav.toc details[open] summary::before { content: "\2212 "; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+nav.toc a { display: block; padding: 4px 0; color: var(--muted); text-decoration: none; line-height: 1.35; }
+nav.toc a:hover, nav.toc a:focus-visible { color: var(--accent); }
+nav.toc a.on { color: var(--fg); font-weight: 600; }
+main { min-width: 0; max-width: 80ch; }
+main h2 { font: 700 26px/1.2 var(--font-display); margin: 48px 0 12px; padding-top: 18px; border-top: 1px solid var(--line);
+  text-wrap: balance; scroll-margin-top: 16px; }
+main > h2:first-of-type { margin-top: 0; border-top: 0; padding-top: 0; }
+main h3 { font: 650 19px/1.3 var(--font-display); margin: 30px 0 8px; scroll-margin-top: 16px; }
+main p, main li { max-width: 72ch; }
+main a { color: var(--accent); }
+main hr { display: none; }
+main strong { font-weight: 650; }
+main ul, main ol { padding-left: 1.3em; }
+main li { margin-block: 4px; }
+main li > ul, main li > ol { margin-top: 4px; }
+code { font: 0.86em/1.5 var(--font-mono); background: var(--inline-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.code { position: relative; margin: 14px 0 18px; }
+.code pre { margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 8px; padding: 16px 18px;
+  overflow-x: auto; font: 13.5px/1.55 var(--font-mono); }
+.code pre code { background: none; padding: 0; font: inherit; color: inherit; overflow-wrap: normal; }
+.code.has-copy pre { padding-top: 36px; }
+.code button { position: absolute; top: 8px; right: 8px; font: 600 11px/1 var(--font-mono); letter-spacing: .06em;
+  text-transform: uppercase; color: var(--code-fg); background: transparent; border: 1px solid #3c4a44; border-radius: 5px;
+  padding: 6px 8px; cursor: pointer; opacity: .85; }
+.code button:hover, .code button:focus-visible { opacity: 1; border-color: var(--accent); }
+.table-wrap { overflow-x: auto; margin: 14px 0 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+th { font: 600 12px/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); background: var(--accent-soft); }
+tr:last-child td { border-bottom: 0; }
+td code { white-space: nowrap; }
+td code.wrap { white-space: normal; }   /* a long message: it may wrap, the table stays narrow */
+li.task { list-style: none; margin-left: -1.3em; }
+li.task::before { content: ""; display: inline-block; width: 13px; height: 13px; border: 1.5px solid var(--accent);
+  border-radius: 3px; margin-right: 9px; vertical-align: -1px; }
+p.tested { background: var(--accent-soft); border-radius: 6px; padding: 8px 12px; }
+footer { margin-top: 56px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); padding-top: 14px; }
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  nav.toc { position: static; max-height: none; border-left: 0; padding: 10px 14px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 8px; }
+  body { font-size: 16px; }
+  td code { white-space: normal; }
+}
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+body { margin: 0; }
+</style>
+</head>
+<body>
+<div class="page">
+<header class="top">
+  <div class="eyebrow">xray-tools &middot; COMBINE_GUIDE.md</div>
+  <h1>One Image, Several Programs</h1>
+  <p class="lede">When several programs share most of their Python packages, one image can hold all of them. The shared packages are
+stored once, every program keeps its own folder, and each still runs in its own container. <code>xray_combine.py</code> builds
+that image from what X-Ray already made for each program: its plan (<code>plan.json</code>) and its verified slim image. It writes
+a verify run per program, and a compose file per program that runs it from the combined image.</p>
+</header>
+<div class="layout">
+<nav class="toc" aria-label="Contents"><details open><summary>Contents</summary><ol><li><a href="#0-combine-or-keep-separate-images">0. Combine, or keep separate images?</a></li><li><a href="#1-before-you-start">1. Before you start</a></li><li><a href="#2-run-the-tool">2. Run the tool</a></li><li><a href="#3-read-combine-txt">3. Read combine.txt</a></li><li><a href="#4-build">4. Build</a></li><li><a href="#5-verify-every-program-in-the-combined-image">5. Verify every program in the combined image</a></li><li><a href="#6-start-them-from-the-combined-image">6. Start them from the combined image</a></li><li><a href="#7-the-sizes-measured">7. The sizes, measured</a></li><li><a href="#8-when-the-tool-stops-or-a-step-fails">8. When the tool stops, or a step fails</a></li><li><a href="#9-a-new-release-of-one-program">9. A new release of one program</a></li><li><a href="#10-how-it-works-for-anyone-who-changes-the-tool">10. How it works - for anyone who changes the tool</a></li></ol></details></nav>
+<main>
+
+<p class="tested"><em>Tested</em> with three small programs (two Flask APIs and a worker, numpy + OpenCV + Pillow + requests), each taken
+through X-Ray to <code>VERDICT: PASS</code> first. Their three slim images took 1,004 MB on disk together; the combined image
+568 MB, 43% less. All three programs passed their verify run in the combined image, and all three started from their
+<code>compose.combined.yml</code>. Not tested here: a GPU program (the test machine has no GPU).</p>
+<hr />
+<h2 id="0-combine-or-keep-separate-images">0. Combine, or keep separate images?</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>One combined image</th>
+<th>Separate slim images</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Disk</td>
+<td>each shared package once</td>
+<td>each image has its own copy of the shared packages - only the base image (python:3.11-slim ...) is stored once anyway</td>
+</tr>
+<tr>
+<td>Download to a new machine</td>
+<td>one image</td>
+<td>three</td>
+</tr>
+<tr>
+<td>A new release of ONE program</td>
+<td>the image is rebuilt: every program restarts and is verified again</td>
+<td>only that program</td>
+</tr>
+<tr>
+<td>Package versions</td>
+<td>one version of each package for all programs</td>
+<td>each program its own</td>
+</tr>
+<tr>
+<td>Good when</td>
+<td>the programs ship together, run on the same Python, share most packages</td>
+<td>they update at different times, or need different versions of a package</td>
+</tr>
+</tbody>
+</table></div>
+<p>Docker already shares the base image between separate images. What the combined image saves is the packages that two
+or three programs install: the more they share (numpy, OpenCV, torch, onnxruntime ...), the bigger the saving.</p>
+<hr />
+<h2 id="1-before-you-start">1. Before you start</h2>
+<ol>
+<li><strong>Every program done with X-Ray up to <code>run-slim</code></strong>, and its <code>runs\NAME\verify.txt</code> ends with <code>VERDICT: PASS</code>.
+   The tool reads <code>runs\NAME\plan\plan.json</code> and <code>runs\NAME\pkg\pkgscan.json</code>, and copies the code out of the image
+   <code>NAME-slim</code>.</li>
+<li><strong>The same Python for every program.</strong> The first lines of each <code>runs\NAME\plan\Dockerfile</code> show it
+   (<code>FROM python:3.11-slim</code>). One image has one Python - section 8 says what to do when they differ.</li>
+<li><strong>GPU programs: the same <code>GPUBASE</code></strong> (the top of <code>run-step3-4.bat</code>) for all of them - otherwise CUDA would be in
+   the image twice.</li>
+<li><strong>The slim images are there:</strong>
+   <div class="code has-copy"><button type="button">Copy</button><pre><code>docker images</code></pre></div>
+   lists <code>anpr-slim</code>, <code>middle-slim</code>, <code>toll-slim</code> (your names). Missing one: run that program's <code>build-slim.bat</code>.</li>
+</ol>
+<hr />
+<h2 id="2-run-the-tool">2. Run the tool</h2>
+<div class="code has-copy"><button type="button">Copy</button><pre><code>cd /d &quot;C:\...\xray-tools&quot;
+python xray_combine.py --run runs\anpr --run runs\middle --run runs\toll --image mep-combined --out combined
+notepad combined\combine.txt</code></pre></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>You give</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--run runs\NAME</code></td>
+<td>one per program: its X-Ray folder (2 or more)</td>
+</tr>
+<tr>
+<td><code>--image mep-combined</code></td>
+<td>the name the combined image gets</td>
+</tr>
+<tr>
+<td><code>--out combined</code></td>
+<td>the folder for the Dockerfile and the report</td>
+</tr>
+<tr>
+<td><code>--compose NAME=D:\...\compose.yml</code></td>
+<td>only if a program's compose file is NOT <code>runs\NAME\plan\compose.yml</code></td>
+</tr>
+<tr>
+<td><code>--base IMAGE</code></td>
+<td>only when the plans disagree on the base (section 8)</td>
+</tr>
+</tbody>
+</table></div>
+<p>It writes:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>File</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>combined\Dockerfile</code></td>
+<td>the combined image</td>
+</tr>
+<tr>
+<td><code>combined\combine.txt</code></td>
+<td>what is shared, what changed, what could not be combined, the sizes, the next steps</td>
+</tr>
+<tr>
+<td><code>runs\NAME\run-combined.bat</code></td>
+<td>the verify run of that program in the combined image - a copy of its run-slim.bat</td>
+</tr>
+<tr>
+<td><code>compose.combined.yml</code></td>
+<td>next to each program's compose file: the same service, switched to the combined image</td>
+</tr>
+</tbody>
+</table></div>
+<p>Nothing in your project folders changes. The combined image is made from what the plans and slim images already
+have, so run the tool again after every new plan.</p>
+<hr />
+<h2 id="3-read-combine-txt">3. Read combine.txt</h2>
+<p>From the test (shortened):</p>
+<div class="code"><pre><code>PYTHON PACKAGES THE PLANS INSTALL (pip)   - = that program does not install it
+  package                         anpr          middle        toll          in the image
+  flask                           3.0.3         3.0.3         -             3.0.3
+  numpy                           1.26.4        2.0.2         1.26.4        2.0.2   &lt;- changed
+  opencv-contrib-python-headless  -             -             4.10.0.84     4.10.0.84
+  opencv-python-headless          4.10.0.84     -             -             -  (see CHANGED)   &lt;- changed
+  pillow                          10.4.0        10.4.0        -             10.4.0
+  requests                        -             2.32.3        2.32.3        2.32.3
+  4 of 6 are installed by two or more programs: once in the combined image
+
+SIZE OF THE PYTHON PACKAGES (from the package scans, unpacked on disk)
+  3 separate images: 597 MB  (254 + 107 + 236)
+  one combined image:    262 MB   -&gt; 335 MB less
+
+CHANGED - a program gets another package or version than its slim image had (verify proves it still works)
+  anpr         opencv-python-headless==4.10.0.84  -&gt;  opencv-contrib-python-headless==4.10.0.84
+  anpr         numpy==1.26.4  -&gt;  numpy==2.0.2   (one version for every program)
+  toll         numpy==1.26.4  -&gt;  numpy==2.0.2   (one version for every program)</code></pre></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Section</th>
+<th>What it tells you</th>
+<th>What you do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PYTHON PACKAGES</td>
+<td>each program's packages side by side, and the one version in the image</td>
+<td>nothing - read it</td>
+</tr>
+<tr>
+<td>SIZE</td>
+<td>the packages of the separate images against the combined one (the measure after the build: section 7)</td>
+<td>nothing</td>
+</tr>
+<tr>
+<td>CHANGED</td>
+<td>a program gets another version, or another package that installs the same folder (one <code>cv2</code> per image)</td>
+<td>nothing now: its verify run (section 5) proves it still works</td>
+</tr>
+<tr>
+<td>CHECK</td>
+<td>two programs need versions that cannot be installed together - the build will stop</td>
+<td>section 8</td>
+</tr>
+<tr>
+<td>HAND EDITS</td>
+<td>lines you added to a program's <code>plan\Dockerfile</code> by hand: they are not in plan.json, so not in the combined image</td>
+<td>copy the ones that matter into <code>combined\Dockerfile</code></td>
+</tr>
+<tr>
+<td>... names paths of the slim image</td>
+<td>a value in <code>run.env</code> or <code>.env</code> points into <code>/app/...</code></td>
+<td>nothing: the verify run and the compose file give the program the new place</td>
+</tr>
+</tbody>
+</table></div>
+<p>How one version is chosen: the version every program's packages accept (their own requirements, read from the package
+scans); among those, a version a plan pins on purpose, then the newest. Packages that install the same folder keep the
+one that can do what the others do: <code>opencv-contrib-python</code> over <code>opencv-python</code>, the window build over <code>-headless</code>
+only when a program needs windows, <code>onnxruntime-gpu</code> over <code>onnxruntime</code> (it runs on the CPU too), <code>psycopg2-binary</code>
+over <code>psycopg2</code>, the CUDA build of torch over <code>+cpu</code>.</p>
+<hr />
+<h2 id="4-build">4. Build</h2>
+<div class="code has-copy"><button type="button">Copy</button><pre><code>cd /d &quot;C:\...\xray-tools\combined&quot;
+docker build -t mep-combined -f Dockerfile .</code></pre></div>
+<p>The folder holds only the Dockerfile: the code comes from the slim images (<code>COPY --from=anpr-slim /app/ /app/anpr/</code>),
+the packages from pip. Inside the image:</p>
+<div class="code"><pre><code>/app/anpr/      the anpr code, exactly as its slim image had it
+/app/middle/
+/app/toll/</code></pre></div>
+<hr />
+<h2 id="5-verify-every-program-in-the-combined-image">5. Verify every program in the combined image</h2>
+<div class="code has-copy"><button type="button">Copy</button><pre><code>runs\anpr\run-combined.bat
+runs\middle\run-combined.bat
+runs\toll\run-combined.bat</code></pre></div>
+<p>Each is that program's <code>run-slim.bat</code> with four changes: the combined image, <code>-w /app/NAME</code> (the folder it runs in),
+X-Ray's <code>--root /app/NAME</code>, and its own output names (<code>trace-combined</code>, <code>step2-combined.log</code>, <code>verify-combined.txt</code>).
+Every <code>runs\NAME\verify-combined.txt</code> must end with:</p>
+<div class="code"><pre><code>VERDICT: PASS - the planned image did everything the scenario needs</code></pre></div>
+<p><code>CHECK</code> with problems: read them (a missing import, a file not found), and send <code>verify-combined.txt</code> to Claude. A
+program that only works on its own versions stays in its own image - combine the others.</p>
+<hr />
+<h2 id="6-start-them-from-the-combined-image">6. Start them from the combined image</h2>
+<p>Each program's compose file got a twin, <code>compose.combined.yml</code>, in the same folder - so its <code>.env</code>, <code>env_file</code> and
+<code>./folders</code> stay where they are. What changed in it (from the test):</p>
+<div class="code"><pre><code>    image: anpr-slim                                    -&gt;    image: mep-combined
+    build:                                                    (removed: nothing to build per program now)
+      context: ...                                            working_dir: /app/anpr
+      dockerfile: ...\runs\anpr\plan\Dockerfile               command: [&quot;python&quot;, &quot;main.py&quot;]
+      - ${OUTPUT_DIR:-./output}:/app/output             -&gt;    - ${OUTPUT_DIR:-./output}:/app/anpr/output</code></pre></div>
+<p>Start each one in its folder:</p>
+<div class="code has-copy"><button type="button">Copy</button><pre><code>cd /d &quot;C:\...\xray-tools\runs\anpr\plan&quot;
+docker compose -f compose.combined.yml up -d</code></pre></div>
+<p>The compose project name stays (<code>name: anpr</code>), so <code>up -d</code> replaces the slim container with one from the combined
+image. Networks, ports, the env file: as before. Your own compose file (not X-Ray's): give it with
+<code>--compose NAME=PATH</code>. The tool switches every service that uses <code>NAME-slim</code> or builds the plan's Dockerfile. Look at
+the new file once: <code>docker compose -f compose.combined.yml config</code> prints it as compose reads it.</p>
+<p>The programs talk to each other exactly as before (CONNECTIONS_GUIDE): the image changed, not the network.</p>
+<hr />
+<h2 id="7-the-sizes-measured">7. The sizes, measured</h2>
+<div class="code has-copy"><button type="button">Copy</button><pre><code>docker system df -v</code></pre></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SIZE</td>
+<td>everything the image needs</td>
+</tr>
+<tr>
+<td>SHARED SIZE</td>
+<td>layers other images use too (the base image) - on disk once</td>
+</tr>
+<tr>
+<td>UNIQUE SIZE</td>
+<td>what only this image has</td>
+</tr>
+</tbody>
+</table></div>
+<p>The disk the separate images take = SHARED once + each one's UNIQUE. In the test: 210 + 327 + 145 + 323 = 1,004 MB
+for the three slim images; the combined image 568 MB. Once every program runs from the combined image, the slim images
+can go (<code>docker image rm anpr-slim middle-slim toll-slim</code>) - <code>build-slim.bat</code> makes them again when you need them.</p>
+<hr />
+<h2 id="8-when-the-tool-stops-or-a-step-fails">8. When the tool stops, or a step fails</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Message</th>
+<th>Meaning</th>
+<th>Do this</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code class="wrap">cannot combine: the programs run on different Pythons</code></td>
+<td>e.g. anpr on 3.12 (an nvidia/cuda base), middle on 3.11</td>
+<td>make them the same: run xray_naive.py for one of them with <code>--python 3.12</code>, then its steps again. Or <code>--base IMAGE</code> and verify every program on it</td>
+</tr>
+<tr>
+<td><code class="wrap">... in one image CUDA would be there twice</code></td>
+<td>one GPU program gets CUDA from the nvidia/cuda base, another from pip wheels</td>
+<td>the same <code>GPUBASE</code> at the top of each <code>run-step3-4.bat</code>, then run-step3-4, build-slim, run-slim, combine again</td>
+</tr>
+<tr>
+<td><code class="wrap">the GPU programs use different nvidia/cuda images</code></td>
+<td>two CUDA versions</td>
+<td><code>--base</code> the newer one (<code>nvidia-smi</code> shows the driver supports it), verify every program on it</td>
+</tr>
+<tr>
+<td><code>plan.json is missing</code></td>
+<td>that program has no plan yet</td>
+<td>its <code>run-step3-4.bat</code></td>
+</tr>
+<tr>
+<td><code>NOT FOUND - run build-slim</code></td>
+<td>no slim image to copy the code from</td>
+<td>its <code>build-slim.bat</code></td>
+</tr>
+<tr>
+<td>CHECK <code class="wrap">no version every program's packages accept</code></td>
+<td>e.g. anpr's package wants numpy below 2, middle's package needs 2 or newer</td>
+<td>one program on a version the other's packages accept: change the pin, its X-Ray steps again - or that program keeps its own image</td>
+</tr>
+<tr>
+<td>the build stops with <code>ResolutionImpossible</code></td>
+<td>pip found what the CHECK warned about</td>
+<td>as above</td>
+</tr>
+<tr>
+<td><code>no compose file at ...</code></td>
+<td>its compose file is elsewhere</td>
+<td><code>--compose NAME=PATH</code></td>
+</tr>
+<tr>
+<td><code>PermissionError</code> writing a mounted folder (Linux server)</td>
+<td>Docker created the host folder as root; the programs run as the user app (uid 1000)</td>
+<td><code>sudo chown -R 1000:1000 FOLDER</code> once - the same as for the slim images</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="9-a-new-release-of-one-program">9. A new release of one program</h2>
+<ol>
+<li>That program's X-Ray steps (step 1, build-naive, run-step2, run-step3-4, build-slim, run-slim -&gt; PASS).</li>
+<li><code>xray_combine.py</code> again (the same command), then build (section 4).</li>
+<li>Verify every program (section 5), not only the new one: a shared package may have moved.</li>
+<li><code>docker compose -f compose.combined.yml up -d</code> for each: all programs get the new image.</li>
+</ol>
+<hr />
+<h2 id="10-how-it-works-for-anyone-who-changes-the-tool">10. How it works - for anyone who changes the tool</h2>
+<ul>
+<li><strong>Inputs, per program</strong> (<code>runs\NAME</code>): <code>plan\plan.json</code> (base, apt and pip packages, writable folders, volumes,
+  the command, ENV), <code>pkg\pkgscan.json</code> (every installed package with its own requirements and size), <code>run-slim.bat</code>,
+  the compose file. Nothing is read from the project folders.</li>
+<li><strong>Base:</strong> the plans' base when they agree; one Python for all; a GPU program's base when the others are CPU programs
+  on the same Python; it stops when CUDA would come from two places.</li>
+<li><strong>Packages:</strong> apt = all of them. pip = one version per package: from the package scans, the version every program's
+  packages accept (pinned on purpose first, then the newest); packages that install the same folder are reduced to one
+  (the list above). A dependency whose version moved is pinned too.</li>
+<li><strong>Code:</strong> <code>COPY --from=NAME-slim /app/ /app/NAME/</code> - the files the verify run of the slim image proved, nothing
+  re-read from the project. Writable folders are made per program (<code>/app/NAME/logs</code>), volumes as the plans have them.</li>
+<li><strong>No program-specific ENV in the image:</strong> <code>PYTHONPATH=/app/src</code> of two programs would let one import the other's
+  modules (both have a <code>constants.py</code>). It goes per program: into <code>run-combined.bat</code> (<code>-e</code>) and
+  <code>compose.combined.yml</code> (<code>environment:</code>), with <code>/app</code> replaced by <code>/app/NAME</code>; the same for env-file values that
+  point into <code>/app</code>.</li>
+<li><strong>The Dockerfile</strong> is written by X-Ray's own plan renderer (<code>xray_plan.dockerfile</code>), so it has the same parts as the
+  slim ones: slow-internet settings, the CUDA wheel registration, the non-root user, CHECK BY HAND.</li>
+<li><strong>Limits:</strong> the compose twin is made by editing the text of X-Ray-style compose files (2-space indents, a <code>services:</code>
+  block) - check it with <code>docker compose config</code>. Lines added by hand to a slim Dockerfile are reported, not copied.</li>
+</ul>
+<footer>Built from COMBINE_GUIDE.md in the tools folder - the Markdown is the source; this page is the same text.</footer>
+</main>
+</div>
+</div>
+<script>
+document.querySelectorAll('.code button').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var pre = b.parentElement.querySelector('pre');
+    var text = pre.innerText;
+    function done(ok) { b.textContent = ok ? 'Copied' : 'Select + Ctrl+C'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); }
+    try {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, function () { select(pre); done(false); });
+    } catch (e) { select(pre); done(false); }
+  });
+});
+function select(el) { var r = document.createRange(); r.selectNodeContents(el); var s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+var links = Array.prototype.slice.call(document.querySelectorAll('nav.toc a'));
+var heads = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function mark() {
+  var i = 0;
+  heads.forEach(function (h, k) { if (h && h.getBoundingClientRect().top < 120) { i = k; } });
+  links.forEach(function (a, k) { a.classList.toggle('on', k === i); });
+}
+addEventListener('scroll', mark, { passive: true }); mark();
+var toc = document.querySelector('nav.toc details');
+if (toc && matchMedia('(max-width: 900px)').matches) { toc.open = false; }
+</script>
+</body>
+</html>
